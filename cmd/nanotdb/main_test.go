@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadRuntimeConfig(t *testing.T) {
@@ -64,5 +65,28 @@ func TestInitConfigFile_RejectsInvalidConfigName(t *testing.T) {
 	configPath := filepath.Join(root, "my.toml")
 	if err := initConfigFile(configPath); err == nil {
 		t.Fatal("expected initConfigFile to reject invalid config file name")
+	}
+}
+
+func TestParseTimeParam_AcceptsHumanReadable(t *testing.T) {
+	input := "2026-05-14 12:34:56.123456789"
+	got, err := parseTimeParam(input)
+	if err != nil {
+		t.Fatalf("parseTimeParam failed: %v", err)
+	}
+	want := time.Date(2026, 5, 14, 12, 34, 56, 123456789, time.UTC).UnixNano()
+	if int64(got) != want {
+		t.Fatalf("parseTimeParam mismatch: got=%d want=%d", int64(got), want)
+	}
+}
+
+func TestParseTimeParam_IntegerSecondsStillSupported(t *testing.T) {
+	got, err := parseTimeParam("1715680000")
+	if err != nil {
+		t.Fatalf("parseTimeParam failed: %v", err)
+	}
+	want := int64(1715680000) * int64(time.Second)
+	if int64(got) != want {
+		t.Fatalf("parseTimeParam mismatch: got=%d want=%d", int64(got), want)
 	}
 }

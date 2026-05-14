@@ -43,6 +43,38 @@ func TestEngineAddLineAndQueryLast(t *testing.T) {
 	}
 }
 
+func TestEngineAddSampleAndQueryLast(t *testing.T) {
+	e, err := OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	if err := e.AddSample("prod", "system.cpu.user", Timestamp(1000000001), float32(42)); err != nil {
+		t.Fatalf("AddSample failed: %v", err)
+	}
+	if err := e.AddSample("prod", "system.cpu.user", Timestamp(1000000002), float32(45)); err != nil {
+		t.Fatalf("AddSample failed: %v", err)
+	}
+
+	last, found, err := e.QueryLast("prod", "system.cpu.user")
+	if err != nil {
+		t.Fatalf("QueryLast failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected last sample")
+	}
+	if last.ValueType != Float32Sample {
+		t.Fatalf("type mismatch: got=%d want=%d", last.ValueType, Float32Sample)
+	}
+	if last.Float32 != 45 {
+		t.Fatalf("value mismatch: got=%v want=45", last.Float32)
+	}
+	if last.TS != Timestamp(1000000002) {
+		t.Fatalf("timestamp mismatch: got=%d want=%d", last.TS, 1000000002)
+	}
+}
+
 func TestEngineAddLineExplicitIntSuffix(t *testing.T) {
 	e, err := OpenEngine(t.TempDir(), 1024*1024)
 	if err != nil {
@@ -163,7 +195,7 @@ func TestOpenEngineWalFsyncPolicyAlways(t *testing.T) {
 
 func TestOpenEngineCopiesDefaultsToDatabaseManifest(t *testing.T) {
 	root := t.TempDir()
-	cfg := []byte("[defaults]\ndatabases = [\"prod\"]\n\n[manifest_defaults.retention]\ngrace = \"1s\"\nretention_days = 7\nmax_active_days = 3\n\n[manifest_defaults.wal]\nenabled = false\nskip_before = \"30m\"\n\n[manifest_defaults.page]\nmax_records = 3\nmax_bytes = 256\nmax_age = \"2s\"\n")
+	cfg := []byte("[defaults]\ndatabases = [\"prod\"]\n\n[manifest_defaults.retention]\ngrace = \"1s\"\nretention_days = 7\nmax_active_days = 3\npartition = \"year\"\n\n[manifest_defaults.wal]\nenabled = false\nskip_before = \"30m\"\n\n[manifest_defaults.page]\nmax_records = 3\nmax_bytes = 256\nmax_age = \"2s\"\n")
 	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
 		t.Fatalf("write engine.toml failed: %v", err)
 	}
@@ -186,6 +218,9 @@ func TestOpenEngineCopiesDefaultsToDatabaseManifest(t *testing.T) {
 	}
 	if rt.info.MaxActiveDays != 3 {
 		t.Fatalf("max_active_days mismatch: got=%d want=%d", rt.info.MaxActiveDays, 3)
+	}
+	if rt.info.Partition != "year" {
+		t.Fatalf("partition mismatch: got=%q want=%q", rt.info.Partition, "year")
 	}
 	if rt.info.WALEnabled {
 		t.Fatalf("wal_enabled mismatch: got=true want=false")
@@ -211,11 +246,70 @@ func TestOpenEngineCopiesDefaultsToDatabaseManifest(t *testing.T) {
 	if !strings.Contains(manifestText, "[retention]") || !strings.Contains(manifestText, "grace = \"1s\"") {
 		t.Fatalf("expected manifest.toml retention defaults from engine.toml")
 	}
+	if !strings.Contains(manifestText, "partition = \"year\"") {
+		t.Fatalf("expected manifest.toml retention partition from engine.toml")
+	}
 	if !strings.Contains(manifestText, "[wal]") || !strings.Contains(manifestText, "enabled = false") {
 		t.Fatalf("expected manifest.toml wal defaults from engine.toml")
 	}
 	if !strings.Contains(manifestText, "[page]") || !strings.Contains(manifestText, "max_records = 3") {
 		t.Fatalf("expected manifest.toml page defaults from engine.toml")
+	}
+}
+
+func TestEngineManifestRetentionPartitionInvalid(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nmax_active_days = 2\npartition = \"weekly\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 16000\nmax_bytes = 127000\nmax_age = \"60s\"\n")
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed unexpectedly: %v", err)
+	}
+	defer e.Close()
+
+	if _, _, err := e.getOrCreateDB("prod"); err == nil {
+		t.Fatalf("expected getOrCreateDB to fail for invalid partition")
+	} else if !strings.Contains(err.Error(), "invalid partition") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEngineYearPartitionWritesYearlyDatFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nmax_active_days = 30\npartition = \"year\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 2\nmax_bytes = 127000\nmax_age = \"60s\"\n")
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	ts1 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC).UnixNano()
+	ts2 := time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC).UnixNano()
+	if err := e.AddLine("prod/metric.a 1 " + itoa64(ts1)); err != nil {
+		t.Fatalf("AddLine ts1 failed: %v", err)
+	}
+	if err := e.AddLine("prod/metric.a 2 " + itoa64(ts2)); err != nil {
+		t.Fatalf("AddLine ts2 failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "prod", "data-2026.dat")); err != nil {
+		t.Fatalf("expected yearly data file, got error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "prod", "data-2026-01-02.dat")); err == nil {
+		t.Fatalf("did not expect daily data file when partition=year")
 	}
 }
 
@@ -778,7 +872,7 @@ func TestEngineReplaysWALOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDatabase failed: %v", err)
 	}
-	if err := AddSample[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
+	if err := addSampleToDB[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if err := db.catalog.WriteCatalog(); err != nil {
@@ -864,7 +958,7 @@ func TestEngineReplaysWALAndRebuildsCatalogFromWALMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDatabase failed: %v", err)
 	}
-	if err := AddSample[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
+	if err := addSampleToDB[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -919,7 +1013,7 @@ func TestMaybeResetWALPersistsDirtyCatalogBeforeTruncate(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := AddSample[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
+	if err := addSampleToDB[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if !db.catalog.IsDirty() {
@@ -963,13 +1057,13 @@ func TestEngineReplayRespectsMaxActiveDays(t *testing.T) {
 	day1 := Timestamp(24 * int64(time.Hour))
 	day2 := Timestamp(2 * 24 * int64(time.Hour))
 	day3 := Timestamp(3 * 24 * int64(time.Hour))
-	if err := AddSample[int32](db, "metric.a", day1, int32(1)); err != nil {
+	if err := addSampleToDB[int32](db, "metric.a", day1, int32(1)); err != nil {
 		t.Fatalf("AddSample day1 failed: %v", err)
 	}
-	if err := AddSample[int32](db, "metric.a", day2, int32(2)); err != nil {
+	if err := addSampleToDB[int32](db, "metric.a", day2, int32(2)); err != nil {
 		t.Fatalf("AddSample day2 failed: %v", err)
 	}
-	if err := AddSample[int32](db, "metric.a", day3, int32(3)); err != nil {
+	if err := addSampleToDB[int32](db, "metric.a", day3, int32(3)); err != nil {
 		t.Fatalf("AddSample day3 failed: %v", err)
 	}
 	if err := db.catalog.WriteCatalog(); err != nil {
@@ -1178,13 +1272,21 @@ func TestEngineImportExportIdentical(t *testing.T) {
 
 	base := int64(1_700_000_000_000_000_000)
 	day := int64(24 * time.Hour)
+	ts := []Timestamp{
+		Timestamp(base + 10),
+		Timestamp(base + 20),
+		Timestamp(base + day + 10),
+		Timestamp(base + day + 20),
+		Timestamp(base + 2*day + 10),
+		Timestamp(base + 2*day + 20),
+	}
 	lines := []string{
-		"prod/sensors.room1.temp 2000 " + itoa64(base+10),
-		"prod/sensors.room1.temp 2001 " + itoa64(base+20),
-		"prod/sensors.room1.temp 2002 " + itoa64(base+day+10),
-		"prod/sensors.room1.temp 2003 " + itoa64(base+day+20),
-		"prod/sensors.room1.temp 2004 " + itoa64(base+2*day+10),
-		"prod/sensors.room1.temp 2005 " + itoa64(base+2*day+20),
+		"prod/sensors.room1.temp 2000 " + FormatTimestamp(ts[0]),
+		"prod/sensors.room1.temp 2001 " + FormatTimestamp(ts[1]),
+		"prod/sensors.room1.temp 2002 " + FormatTimestamp(ts[2]),
+		"prod/sensors.room1.temp 2003 " + FormatTimestamp(ts[3]),
+		"prod/sensors.room1.temp 2004 " + FormatTimestamp(ts[4]),
+		"prod/sensors.room1.temp 2005 " + FormatTimestamp(ts[5]),
 	}
 	importBody := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(importPath, []byte(importBody), 0644); err != nil {

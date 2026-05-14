@@ -1,8 +1,0 @@
-Before WAL (using the reg tester):
-
-SUMMARY
-  files=1 bytes=214195 frames=87 records=86390
-  comp=207.14KiB uncomp=1.15MiB ratio=0.175
-  disk_frame_size min=1.04KiB avg=2.40KiB max=2.47KiB
-  range=2023-11-15T00:00:06.612274984Z .. 2023-11-15T23:59:58.375779792Z
-

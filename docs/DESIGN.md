@@ -18,10 +18,10 @@ This document summarizes the architecture decisions for v0.
   - No in-place modification of persisted page frames
   - Once a page frame is durable, it is immutable
 
-- **Day-partitioned raw storage**
-  - Raw data is grouped by UTC day file (`data-YYYY-MM-DD.dat`)
-  - Each database has one `.dat` file per UTC day containing all metrics
-  - Retention is enforced by removing old day files
+- **Configurable UTC-partitioned raw storage**
+  - Raw data is grouped by configured partition file (`data-<partition>.dat`)
+  - Partition mode is per-database via manifest: `day|month|year|forever`
+  - Retention is enforced by removing old partition files
 
 - **No separate index file**
   - Queries scan day files directly; the data files are self-describing and index-free
@@ -72,12 +72,12 @@ Per database root:
 <db>/
   catalog.json
   manifest.json
-  data-2026-05-08.dat
-  data-2026-05-09.dat
+  data-2026-05.dat
+  data-2026.dat
   <db>.wal
 ```
 
-### Daily raw data file (`data-YYYY-MM-DD.dat`)
+### Raw data file (`data-<partition>.dat`)
 - Append-only stream of variable-length page frames
 - Each frame may contain records from multiple metrics
 - Each frame header includes enough metadata for header-only filtering
@@ -101,11 +101,13 @@ Recommended frame metadata fields:
 
 ### Manifest file
 - Database-scoped operational metadata
-- Stores settings such as retention and active-day limits
+- Stores settings such as retention, partitioning, active-day limits, and rollups
 - Example fields:
   - `retention_days`: how long to keep historical data
-  - `max_active_days`: maximum number of simultaneous open day-files (default 2)
+  - `max_active_days`: maximum number of simultaneous open partition files (default 2)
+  - `partition`: partition mode (`day|month|year|forever`)
   - `grace`: grace period for out-of-order sample tolerance (v0 placeholder)
+  - `rollups`: source-defined rollup jobs + checkpoint settings
 
 ---
 
@@ -116,9 +118,9 @@ Recommended frame metadata fields:
 3. Unknown metric strings are created in catalog with a new `MetricID`
 4. Value type must match metric type; mismatched writes are rejected
 5. If the metric id space is exhausted, insert fails by rejection
-6. Target UTC day file (`data-YYYY-MM-DD.dat`) is selected from sample timestamp
-7. Sample is appended to the active in-memory page buffer for that database-day stream
-8. On page seal (size/time policy), write one page frame to the selected daily `.dat` file
+6. Target UTC partition file (`data-<partition>.dat`) is selected from sample timestamp + partition mode
+7. Sample is appended to the active in-memory page buffer for that database-partition stream
+8. On page seal (size/time policy), write one page frame to the selected partition `.dat` file
 9. Optional batching/fsync policy is applied
 
 Out-of-order inserts for a metric are rejected in v0.
@@ -196,7 +198,7 @@ Benefits:
 - stride=N: every Nth sample for downsampling
 - Callback is invoked once per matching sample
 - Callback can return error to terminate scan early
-- Results span active pages and all historical daily files in range
+- Results span active pages and all historical partition files in range
 
 ### Export/Import
 
@@ -206,7 +208,7 @@ Benefits:
 
 Recovery is deterministic and per database:
 1. Load source metric catalog (source metric ids and fixed metric types)
-2. For each daily raw `.dat`, sequentially validate frame boundaries/integrity
+2. For each raw `.dat`, sequentially validate frame boundaries/integrity
 3. Truncate invalid trailing tail if needed (crash-tail handling)
 4. Resume appends from the last valid frame
 
@@ -214,7 +216,7 @@ Recovery is deterministic and per database:
 
 ## Operational Notes
 
-- Raw retention: remove old `data-YYYY-MM-DD.dat` files
+- Raw retention: remove old `data-<partition>.dat` files
 - Deleting a day while files are open is implementation-defined and must be handled carefully
 - This architecture assumes low cardinality (hundreds of metrics). If cardinality increases significantly, file-count and scan costs should be re-evaluated
 
@@ -234,13 +236,17 @@ This maps config keys to runtime fields in `internal/engine/engine.go`.
 | `stats.interval` | `EngineConfig.Stats.Interval` | `Engine.StatsInterval` | Parsed with Go duration (`time.ParseDuration`) |
 | `defaults.databases` | `EngineConfig.Defaults.Databases` | Startup DB auto-creation list | Empty names and `internal` are ignored |
 | `manifest_defaults.retention.grace` | `EngineConfig.ManifestDefaults.Retention.Grace` | Copied into new DB manifest via DB defaults | Duration string; validated |
-| `manifest_defaults.retention.retention_days` | `EngineConfig.ManifestDefaults.Retention.RetentionDays` | Per-DB day-file retention policy | If `<= 0`, default is applied |
-| `manifest_defaults.retention.max_active_days` | `EngineConfig.ManifestDefaults.Retention.MaxActiveDays` | Per-DB open-day memory window | If `<= 0`, default is applied |
+| `manifest_defaults.retention.retention_days` | `EngineConfig.ManifestDefaults.Retention.RetentionDays` | Per-DB partition-file retention policy | If `<= 0`, default is applied |
+| `manifest_defaults.retention.max_active_days` | `EngineConfig.ManifestDefaults.Retention.MaxActiveDays` | Per-DB open-partition memory window | If `<= 0`, default is applied |
+| `manifest_defaults.retention.partition` | `EngineConfig.ManifestDefaults.Retention.Partition` | Per-DB partition mode (`day|month|year|forever`) | If empty, default `day` is applied |
 | `manifest_defaults.wal.enabled` | `EngineConfig.ManifestDefaults.WAL.Enabled` | Per-DB WAL enable flag for new DB manifests | Copied only when DB is created |
 | `manifest_defaults.wal.skip_before` | `EngineConfig.ManifestDefaults.WAL.SkipBefore` | Per-DB WAL backfill skip window | Duration string; validated |
 | `manifest_defaults.page.max_records` | `EngineConfig.ManifestDefaults.Page.MaxRecords` | Per-DB page flush threshold (records) | If `<= 0`, default is applied |
 | `manifest_defaults.page.max_bytes` | `EngineConfig.ManifestDefaults.Page.MaxBytes` | Per-DB page flush threshold (bytes) | If `<= 0`, default is applied |
 | `manifest_defaults.page.max_age` | `EngineConfig.ManifestDefaults.Page.MaxAge` | Per-DB page rollover age | Duration string; validated |
+| `manifest_defaults.rollups.enabled` | `EngineConfig.ManifestDefaults.Rollups.Enabled` | Per-DB rollups toggle | Copied only when DB is created |
+| `manifest_defaults.rollups.checkpoint_file` | `EngineConfig.ManifestDefaults.Rollups.CheckpointFile` | Per-DB source checkpoint log file | Defaults to `rollup.checkpoints.log` |
+| `manifest_defaults.rollups.default_grace` | `EngineConfig.ManifestDefaults.Rollups.DefaultGrace` | Per-DB default rollup grace | Duration string or empty |
 
 Durability profile to runtime sync behavior:
 
@@ -260,7 +266,6 @@ Notes:
 
 - No separate external index file
 - No WAL durability guarantees
-- No rollup storage or rollup query tier in v0
 - No compaction implementation
 - No background collection
 - No distributed operation
@@ -277,7 +282,7 @@ NanoTDB prioritizes clarity, predictability, and operational simplicity over fea
 NanoTDB supports multiple databases.
 
 A **Database** is an isolated storage unit consisting of:
-- its own day-partitioned `data-YYYY-MM-DD.dat` files
+- its own partitioned `data-<partition>.dat` files
 - its own source metric catalog file
 - operational manifest metadata file
 - optional WAL files (future)

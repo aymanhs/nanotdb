@@ -119,8 +119,8 @@ func buildInspectWALReportDetailed(ctx dbContext) (inspectWALReportDetailed, err
 		if stats.Records > 0 {
 			fileReport.MinTimestamp = int64(stats.MinTS)
 			fileReport.MaxTimestamp = int64(stats.MaxTS)
-			fileReport.MinUTC = time.Unix(0, int64(stats.MinTS)).UTC().Format(time.RFC3339Nano)
-			fileReport.MaxUTC = time.Unix(0, int64(stats.MaxTS)).UTC().Format(time.RFC3339Nano)
+			fileReport.MinUTC = engine.FormatTimestamp(stats.MinTS)
+			fileReport.MaxUTC = engine.FormatTimestamp(stats.MaxTS)
 		}
 		fileReport.HasTail = stats.HasTail
 		fileReport.TailBytes = stats.TailBytes

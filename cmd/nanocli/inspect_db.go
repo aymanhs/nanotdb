@@ -265,8 +265,8 @@ func buildInspectReport(ctx dbContext, verbose bool) (inspectDBReport, error) {
 		}
 	}
 	if report.Data.MinTimestamp > 0 {
-		report.Data.MinUTC = time.Unix(0, report.Data.MinTimestamp).UTC().Format(time.RFC3339Nano)
-		report.Data.MaxUTC = time.Unix(0, report.Data.MaxTimestamp).UTC().Format(time.RFC3339Nano)
+		report.Data.MinUTC = engine.FormatTimestamp(engine.Timestamp(report.Data.MinTimestamp))
+		report.Data.MaxUTC = engine.FormatTimestamp(engine.Timestamp(report.Data.MaxTimestamp))
 	}
 
 	report.WAL.Files = len(ctx.WALFilePaths)

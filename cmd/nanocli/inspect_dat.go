@@ -119,8 +119,8 @@ func buildInspectDatReport(ctx dbContext) (inspectDatReport, error) {
 		if stats.Frames > 0 {
 			fileReport.MinTimestamp = int64(stats.MinStart)
 			fileReport.MaxTimestamp = int64(stats.MaxEnd)
-			fileReport.MinUTC = time.Unix(0, int64(stats.MinStart)).UTC().Format(time.RFC3339Nano)
-			fileReport.MaxUTC = time.Unix(0, int64(stats.MaxEnd)).UTC().Format(time.RFC3339Nano)
+			fileReport.MinUTC = engine.FormatTimestamp(stats.MinStart)
+			fileReport.MaxUTC = engine.FormatTimestamp(stats.MaxEnd)
 		}
 
 		report.TotalBytes += fileReport.Bytes

@@ -45,11 +45,11 @@ func TestAddSampleMultiMetricPageFill(t *testing.T) {
 	for _, s := range samples {
 		switch v := s.value.(type) {
 		case int32:
-			if err := AddSample(db, s.name, s.ts, v); err != nil {
+			if err := addSampleToDB(db, s.name, s.ts, v); err != nil {
 				t.Fatalf("AddSample(%s, %d, %d) failed: %v", s.name, s.ts, v, err)
 			}
 		case float32:
-			if err := AddSample(db, s.name, s.ts, v); err != nil {
+			if err := addSampleToDB(db, s.name, s.ts, v); err != nil {
 				t.Fatalf("AddSample(%s, %d, %f) failed: %v", s.name, s.ts, v, err)
 			}
 		}
@@ -112,7 +112,7 @@ func TestAddSamplePageFillTrigger(t *testing.T) {
 	// Add PageMaxRecords samples; page should not be full
 	for i := 0; i < PageMaxRecords-1; i++ {
 		ts := Timestamp(1000 + i)
-		if err := AddSample(db, "metric1", ts, int32(i)); err != nil {
+		if err := addSampleToDB(db, "metric1", ts, int32(i)); err != nil {
 			t.Fatalf("AddSample at i=%d failed: %v", i, err)
 		}
 	}
@@ -125,7 +125,7 @@ func TestAddSamplePageFillTrigger(t *testing.T) {
 	}
 
 	// Add one more; page should now be full
-	if err := AddSample(db, "metric1", Timestamp(1000+PageMaxRecords-1), int32(999)); err != nil {
+	if err := addSampleToDB(db, "metric1", Timestamp(1000+PageMaxRecords-1), int32(999)); err != nil {
 		t.Fatalf("AddSample at max failed: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestAddSamplePageRoundTrip(t *testing.T) {
 		name := s[0].(string)
 		ts := s[1].(Timestamp)
 		value := s[2].(int32)
-		if err := AddSample(db, name, ts, value); err != nil {
+		if err := addSampleToDB(db, name, ts, value); err != nil {
 			t.Fatalf("AddSample failed: %v", err)
 		}
 	}
@@ -227,7 +227,7 @@ func TestCatalogDirtyAndSafeJSONWrite(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := AddSample(db, "temp", Timestamp(1000), int32(2500)); err != nil {
+	if err := addSampleToDB(db, "temp", Timestamp(1000), int32(2500)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if !db.catalog.IsDirty() {
@@ -284,7 +284,7 @@ func TestCatalogDirtyOnlyForNewMetrics(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := AddSample(db, "temp", Timestamp(1000), int32(2500)); err != nil {
+	if err := addSampleToDB(db, "temp", Timestamp(1000), int32(2500)); err != nil {
 		t.Fatalf("AddSample temp failed: %v", err)
 	}
 	if !db.catalog.IsDirty() {
@@ -298,14 +298,14 @@ func TestCatalogDirtyOnlyForNewMetrics(t *testing.T) {
 		t.Fatalf("catalog should be clean after write")
 	}
 
-	if err := AddSample(db, "temp", Timestamp(1001), int32(2501)); err != nil {
+	if err := addSampleToDB(db, "temp", Timestamp(1001), int32(2501)); err != nil {
 		t.Fatalf("AddSample temp existing metric failed: %v", err)
 	}
 	if db.catalog.IsDirty() {
 		t.Fatalf("catalog should stay clean for existing metrics")
 	}
 
-	if err := AddSample(db, "humidity", Timestamp(1002), int32(6500)); err != nil {
+	if err := addSampleToDB(db, "humidity", Timestamp(1002), int32(6500)); err != nil {
 		t.Fatalf("AddSample humidity failed: %v", err)
 	}
 	if !db.catalog.IsDirty() {
@@ -331,7 +331,7 @@ func TestDatabaseRootDataFolderPaths(t *testing.T) {
 	}
 
 	// Trigger a new metric and grouped write so catalog file is flushed.
-	if err := AddSample(db, "temp", Timestamp(1000), int32(2500)); err != nil {
+	if err := addSampleToDB(db, "temp", Timestamp(1000), int32(2500)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if err := writePage(db, dayKey(db.page.Start), db.page); err != nil {

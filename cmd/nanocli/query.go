@@ -185,7 +185,7 @@ func sampleToQueryRow(s engine.Sample) queryRow {
 	return queryRow{
 		Metric:       s.Metric,
 		TimestampNS:  int64(s.TS),
-		TimestampUTC: time.Unix(0, int64(s.TS)).UTC().Format(time.RFC3339Nano),
+		TimestampUTC: engine.FormatTimestamp(s.TS),
 		ValueType:    valueType,
 		Value:        value,
 	}

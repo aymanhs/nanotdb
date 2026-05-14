@@ -11,8 +11,6 @@ These items are intentionally deferred from the current design lock.
 
 - Define multi-metric insert semantics under crash (partial success behavior).
 - Revisit acknowledgment semantics once stronger durability (WAL or fsync policy changes) is introduced.
-- Revisit rollup architecture after v1; current design intentionally excludes rollup storage/query semantics.
-- If rollups are added later, define rollup job scheduling, catalog schema, retention, derivation levels, and query behavior from scratch.
 
 ## Open Questions
 

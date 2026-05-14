@@ -53,6 +53,12 @@ retention_days = 30
 # Max distinct open day-buckets kept active in memory during ingest/replay.
 # Higher values support broader out-of-order arrival windows at higher memory cost.
 max_active_days = 2
+# Partition key granularity for data files: day | month | year | forever.
+# - day: data-YYYY-MM-DD.dat (default, finest granularity)
+# - month: data-YYYY-MM.dat
+# - year: data-YYYY.dat
+# - forever: data-forever.dat (single shard; retention cleanup cannot split by age)
+partition = "day"
 
 [manifest_defaults.wal]
 # Enable/disable WAL usage for this database.
@@ -69,3 +75,65 @@ max_records = 16000
 max_bytes = 127000
 # Max age of samples in one in-memory page (Go duration) before page rollover.
 max_age = "60s"
+
+[manifest_defaults.rollups]
+# Enable rollups by default for newly created DBs.
+# Existing DB manifests are not rewritten.
+enabled = false
+# File used to store rollup checkpoints in source DB directories.
+checkpoint_file = "rollup.checkpoints.log"
+# Default grace used when rollup jobs do not define per-job grace.
+default_grace = ""
+
+# ------------------------------------------------------------------------------
+# Sample per-database rollup config (put in <root>/<db>/manifest.toml)
+# ------------------------------------------------------------------------------
+#
+# Rollup jobs should be declared on the SOURCE database manifest.
+# Destination databases may also define their own jobs for chained rollups.
+#
+# Example source DB (for example: sensors/manifest.toml):
+#
+# [rollups]
+# enabled = true
+# checkpoint_file = "rollup.checkpoints.log"
+# default_grace = "5m"
+#
+# # Job id: unique within this source DB; used as checkpoint key.
+# [[rollups.jobs]]
+# id = "office_temp_1h"
+# # Source metric to aggregate.
+# source_metric = "temp.office_dry"
+# # Rollup bucket width (Go duration).
+# interval = "1h"
+# # Allowed aggregates: min, max, sum, avg, count.
+# aggregates = ["min", "max", "sum", "avg", "count"]
+# # Destination DB receiving rollup samples.
+# destination_db = "sensors_rollup_1h"
+# # Output metric prefix; engine writes <prefix>.<aggregate>.
+# destination_metric_prefix = "temp.office"
+# # Optional per-job grace override (otherwise uses default_grace/retention grace).
+# grace = ""
+#
+# [[rollups.jobs]]
+# id = "outside_temp_1h"
+# source_metric = "temp.out_dry"
+# interval = "1h"
+# aggregates = ["min", "max", "sum", "avg", "count"]
+# destination_db = "sensors_rollup_1h"
+# destination_metric_prefix = "temp.out_dry"
+#
+# Example chained rollup (for example: sensors_rollup_1h/manifest.toml):
+#
+# [rollups]
+# enabled = true
+# checkpoint_file = "rollup.checkpoints.log"
+# default_grace = "5m"
+#
+# [[rollups.jobs]]
+# id = "outside_temp_1d_from_1h"
+# source_metric = "temp.out_dry.sum"
+# interval = "24h"
+# aggregates = ["min", "max", "avg"]
+# destination_db = "sensors_rollup_1d"
+# destination_metric_prefix = "temp.out_dry"

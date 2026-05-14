@@ -28,17 +28,11 @@ func runExport(args []string) error {
 	outputPath := fs.String("out", "", "line protocol output file")
 	jsonOut := fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli export --root <root-dir> --db <database> --out <line-protocol-file> [--json]")
-	}
-	if *outputPath == "" {
-		return fmt.Errorf("--out is required")
+		return fmt.Errorf("usage: nanocli export --root <root-dir> --db <database> [--out <line-protocol-file>] [--json]")
 	}
 
 	ctx, err := resolveDBContext(*rootDir, *dbName)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(*outputPath), 0755); err != nil {
 		return err
 	}
 
@@ -48,6 +42,17 @@ func runExport(args []string) error {
 		return err
 	}
 	defer eng.Close()
+
+	if *outputPath == "" {
+		if *jsonOut {
+			return fmt.Errorf("--json requires --out when exporting to stdout")
+		}
+		return eng.ExportToWriter(ctx.Database, os.Stdout)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(*outputPath), 0755); err != nil {
+		return err
+	}
 
 	if err := eng.ExportFile(ctx.Database, *outputPath); err != nil {
 		return err

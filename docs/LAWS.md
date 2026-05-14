@@ -18,7 +18,7 @@ All laws apply per database unless explicitly stated otherwise.
 Each NanoTDB database is an independent failure and storage domain.
 
 Formally:
-- Each database has its own daily raw `.dat` files and source metric catalog
+- Each database has its own partitioned raw `.dat` files and source metric catalog
 - No data or catalog state is shared across databases
 - Crash recovery is performed independently per database
 
@@ -29,13 +29,14 @@ Purpose:
 
 ---
 
-## LAW 1 - UTC Day Partitioning
+## LAW 1 - Deterministic UTC Partitioning
 
-Persisted raw data is partitioned by UTC calendar day.
+Persisted raw data is partitioned deterministically by configured UTC partition granularity.
 
 Formally:
-- For a sample with timestamp `T`, target file is `data-UTC(T).dat` where `UTC(T)` is formatted as `YYYY-MM-DD`
-- Retention boundaries are day-file boundaries, not per-record tombstones
+- For a sample with timestamp `T`, target file is determined only by `(partition mode, UTC(T))`
+- Supported partition modes are `day|month|year|forever`
+- Retention boundaries are partition-file boundaries, not per-record tombstones
 
 Purpose:
 - Deterministic storage placement
@@ -133,10 +134,10 @@ Purpose:
 
 ## LAW 8 - Retention Is Filesystem-Scoped Deletion
 
-Retention is enforced by deleting old UTC day files.
+Retention is enforced by deleting old UTC partition files.
 
 Formally:
-- Retention operations remove old `data-YYYY-MM-DD.dat` files; they do not rewrite surviving `.dat` content
+- Retention operations remove old `data-<partition>.dat` files; they do not rewrite surviving `.dat` content
 
 Purpose:
 - Operational simplicity

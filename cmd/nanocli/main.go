@@ -48,6 +48,6 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  nanocli inspect dat --root <root-dir> --db <database> [--json]")
 	fmt.Fprintln(w, "  nanocli inspect wal --root <root-dir> --db <database> [--json]")
 	fmt.Fprintln(w, "  nanocli import --root <root-dir> --in <line-protocol-file> [--json]")
-	fmt.Fprintln(w, "  nanocli export --root <root-dir> --db <database> --out <line-protocol-file> [--json]")
+	fmt.Fprintln(w, "  nanocli export --root <root-dir> --db <database> [--out <line-protocol-file>] [--json]")
 	fmt.Fprintln(w, "  nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--format table|json]")
 }

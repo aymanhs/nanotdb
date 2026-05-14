@@ -20,14 +20,16 @@ import (
 )
 
 type DBInfo struct {
-	Grace          string `json:"grace" toml:"grace"`
-	RetentionDays  int    `json:"retention_days" toml:"retention_days"`
-	MaxActiveDays  int    `json:"max_active_days" toml:"max_active_days"`
-	WALEnabled     bool   `json:"wal_enabled" toml:"wal_enabled"`
-	WALSkipBefore  string `json:"wal_skip_before" toml:"wal_skip_before"`
-	PageMaxRecords int    `json:"page_max_records" toml:"page_max_records"`
-	PageMaxBytes   int    `json:"page_max_bytes" toml:"page_max_bytes"`
-	PageMaxAge     string `json:"page_max_age" toml:"page_max_age"`
+	Grace          string            `json:"grace" toml:"grace"`
+	RetentionDays  int               `json:"retention_days" toml:"retention_days"`
+	MaxActiveDays  int               `json:"max_active_days" toml:"max_active_days"`
+	Partition      string            `json:"partition" toml:"partition"`
+	WALEnabled     bool              `json:"wal_enabled" toml:"wal_enabled"`
+	WALSkipBefore  string            `json:"wal_skip_before" toml:"wal_skip_before"`
+	PageMaxRecords int               `json:"page_max_records" toml:"page_max_records"`
+	PageMaxBytes   int               `json:"page_max_bytes" toml:"page_max_bytes"`
+	PageMaxAge     string            `json:"page_max_age" toml:"page_max_age"`
+	Rollups        DBManifestRollups `json:"rollups" toml:"rollups"`
 }
 
 type dbRuntime struct {
@@ -42,12 +44,14 @@ type DBManifestTOML struct {
 	Retention DBManifestRetention `toml:"retention"`
 	WAL       DBManifestWAL       `toml:"wal"`
 	Page      DBManifestPage      `toml:"page"`
+	Rollups   DBManifestRollups   `toml:"rollups"`
 }
 
 type DBManifestRetention struct {
 	Grace         string `toml:"grace"`
 	RetentionDays int    `toml:"retention_days"`
 	MaxActiveDays int    `toml:"max_active_days"`
+	Partition     string `toml:"partition"`
 }
 
 type DBManifestWAL struct {
@@ -59,6 +63,23 @@ type DBManifestPage struct {
 	MaxRecords int    `toml:"max_records"`
 	MaxBytes   int    `toml:"max_bytes"`
 	MaxAge     string `toml:"max_age"`
+}
+
+type DBManifestRollups struct {
+	Enabled        bool                  `toml:"enabled"`
+	CheckpointFile string                `toml:"checkpoint_file"`
+	DefaultGrace   string                `toml:"default_grace"`
+	Jobs           []DBManifestRollupJob `toml:"jobs"`
+}
+
+type DBManifestRollupJob struct {
+	ID                      string   `toml:"id"`
+	SourceMetric            string   `toml:"source_metric"`
+	Interval                string   `toml:"interval"`
+	Aggregates              []string `toml:"aggregates"`
+	DestinationDB           string   `toml:"destination_db"`
+	DestinationMetricPrefix string   `toml:"destination_metric_prefix"`
+	Grace                   string   `toml:"grace"`
 }
 
 type EngineConfig struct {
@@ -96,6 +117,7 @@ type EngineConfigManifestDefaults struct {
 	Retention DBManifestRetention `toml:"retention"`
 	WAL       DBManifestWAL       `toml:"wal"`
 	Page      DBManifestPage      `toml:"page"`
+	Rollups   DBManifestRollups   `toml:"rollups"`
 }
 
 const (
@@ -156,11 +178,18 @@ func defaultDBInfo() DBInfo {
 		Grace:          "5m",
 		RetentionDays:  30,
 		MaxActiveDays:  2,
+		Partition:      "day",
 		WALEnabled:     true,
 		WALSkipBefore:  "1h",
 		PageMaxRecords: PageMaxRecords,
 		PageMaxBytes:   PageMaxBytes,
 		PageMaxAge:     PageMaxAge.String(),
+		Rollups: DBManifestRollups{
+			Enabled:        false,
+			CheckpointFile: defaultRollupCheckpointFile,
+			DefaultGrace:   "",
+			Jobs:           nil,
+		},
 	}
 }
 
@@ -187,6 +216,7 @@ func engineConfigManifestDefaultsFromInfo(info DBInfo) EngineConfigManifestDefau
 			Grace:         info.Grace,
 			RetentionDays: info.RetentionDays,
 			MaxActiveDays: info.MaxActiveDays,
+			Partition:     info.Partition,
 		},
 		WAL: DBManifestWAL{
 			Enabled:    info.WALEnabled,
@@ -197,11 +227,17 @@ func engineConfigManifestDefaultsFromInfo(info DBInfo) EngineConfigManifestDefau
 			MaxBytes:   info.PageMaxBytes,
 			MaxAge:     info.PageMaxAge,
 		},
+		Rollups: info.Rollups,
 	}
 }
 
 func dbInfoDefaultsFromEngineConfig(cfg EngineConfigManifestDefaults) (DBInfo, error) {
-	info := dbInfoFromManifest(DBManifestTOML(cfg))
+	info := dbInfoFromManifest(DBManifestTOML{
+		Retention: cfg.Retention,
+		WAL:       cfg.WAL,
+		Page:      cfg.Page,
+		Rollups:   cfg.Rollups,
+	})
 	return normalizeDBInfo(info, defaultDBInfo())
 }
 
@@ -383,15 +419,54 @@ func (e *Engine) Close() error {
 	return nil
 }
 
+// GetAllDatabaseNames returns all database names managed by this engine.
+func (e *Engine) GetAllDatabaseNames() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	names := make([]string, 0, len(e.dbs))
+	for name := range e.dbs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // AddLine ingests one sample in line-protocol format: "DB/metric value [ts]"
-// where value is an integer or float literal and ts is a Unix nanosecond timestamp
-// (optional — current time is used when omitted). AddLine is safe for concurrent use.
+// where value is an integer or float literal and ts is optional.
+// ts can be Unix nanoseconds or a human-readable timestamp accepted by ParseTimestamp.
+// AddLine is safe for concurrent use.
 func (e *Engine) AddLine(line string) error {
 	dbName, metric, ts, vType, i32, f32, err := parseLineProtocol(line)
 	if err != nil {
 		return err
 	}
+	if vType == Int32Sample {
+		return e.AddSample(dbName, metric, ts, i32)
+	}
+	return e.AddSample(dbName, metric, ts, f32)
+}
 
+// AddSample ingests one typed sample directly.
+// This is the canonical ingest API used by all write paths.
+func (e *Engine) AddSample(database, metric string, ts Timestamp, value any) error {
+	if strings.TrimSpace(database) == "" {
+		return fmt.Errorf("database cannot be empty")
+	}
+	if strings.TrimSpace(metric) == "" {
+		return fmt.Errorf("metric cannot be empty")
+	}
+
+	switch v := value.(type) {
+	case int32:
+		return e.addParsedSample(database, metric, ts, Int32Sample, v, 0, true, false)
+	case float32:
+		return e.addParsedSample(database, metric, ts, Float32Sample, 0, v, true, false)
+	default:
+		return fmt.Errorf("unsupported sample type")
+	}
+}
+
+func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte, i32 int32, f32 float32, triggerRollups bool, forceWAL bool) error {
 	db, rt, err := e.getOrCreateDB(dbName)
 	if err != nil {
 		return err
@@ -402,12 +477,12 @@ func (e *Engine) AddLine(line string) error {
 		return fmt.Errorf("stale sample rejected for %s/%s: ts=%d < last=%d", dbName, metric, ts, entry.LastTS)
 	}
 
-	day := dayKey(ts)
+	day := partitionKey(rt, ts)
 	if err := e.ensureDayOpen(db, rt, dbName, day, ts); err != nil {
 		return err
 	}
 
-	useWAL := shouldWriteWAL(rt, ts, time.Now())
+	useWAL := forceWAL || shouldWriteWAL(rt, ts, time.Now())
 
 	var metricID MetricID
 	var raw [4]byte
@@ -447,7 +522,22 @@ func (e *Engine) AddLine(line string) error {
 	}
 
 	if err := e.addToOpenDay(db, rt, day, ts, metricID, raw[:], walSegment); err != nil {
-		return err
+		// Rollup writes can revisit older period starts for a day after another
+		// rollup job already appended newer timestamps into that open day page.
+		// In that case, flush the existing page and retry once.
+		if err == ErrOutOfOrderTimestamp && forceWAL {
+			if existing := rt.openDays[day]; existing != nil {
+				if werr := e.writePageToDailyFile(db, dbName, day, existing); werr != nil {
+					return werr
+				}
+				rt.openDays[day] = nil
+			}
+			if rerr := e.addToOpenDay(db, rt, day, ts, metricID, raw[:], walSegment); rerr != nil {
+				return rerr
+			}
+		} else {
+			return err
+		}
 	}
 	p := rt.openDays[day]
 
@@ -459,6 +549,9 @@ func (e *Engine) AddLine(line string) error {
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
+		if triggerRollups {
+			e.triggerRollups(dbName)
+		}
 		rt.openDays[day] = nil
 		if err := maybeResetWAL(db, rt); err != nil {
 			return err
@@ -467,6 +560,10 @@ func (e *Engine) AddLine(line string) error {
 	}
 	e.maybeFlushStats(dbName)
 	return nil
+}
+
+func (e *Engine) addFloatSample(dbName, metric string, ts Timestamp, val float32, triggerRollups bool, forceWAL bool) error {
+	return e.addParsedSample(dbName, metric, ts, Float32Sample, 0, val, triggerRollups, forceWAL)
 }
 
 // addToOpenDay appends a sample to the active day page and updates catalog last-value.
@@ -492,6 +589,7 @@ func (e *Engine) addToOpenDay(db *Database, rt *dbRuntime, day string, ts Timest
 }
 
 // ImportFile imports LP lines in the format: DB/metric value [ts].
+// ts can be Unix nanoseconds or a human-readable value accepted by ParseTimestamp.
 func (e *Engine) ImportFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -518,19 +616,26 @@ func (e *Engine) ImportFile(path string) error {
 }
 
 // ExportFile exports one database to a LP file using: DB/metric value ts.
+// Exported timestamps use FormatTimestamp (UTC, YYYY-MM-DD HH:MM:SS.nnnnnnnnn).
 func (e *Engine) ExportFile(database, outPath string) error {
-	db, rt, err := e.getOrCreateDB(database)
-	if err != nil {
-		return err
-	}
-
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		return err
 	}
 	defer outFile.Close()
 
-	w := bufio.NewWriterSize(outFile, 64*1024)
+	return e.ExportToWriter(database, outFile)
+}
+
+// ExportToWriter exports one database to an arbitrary writer using line protocol.
+// Timestamps are written with FormatTimestamp (UTC, YYYY-MM-DD HH:MM:SS.nnnnnnnnn).
+func (e *Engine) ExportToWriter(database string, out io.Writer) error {
+	db, rt, err := e.getOrCreateDB(database)
+	if err != nil {
+		return err
+	}
+
+	w := bufio.NewWriterSize(out, 64*1024)
 	wroteAny := false
 
 	entries, err := os.ReadDir(db.RootDataDir)
@@ -667,18 +772,23 @@ func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, str
 	}
 
 	count := 0
+	lastPath := ""
 	for d := dayStartUTC(fromTS); !d.After(dayStartUTC(toTS)); d = d.Add(24 * time.Hour) {
-		day := d.Format("2006-01-02")
-		path := filepath.Join(db.RootDataDir, "data-"+day+".dat")
+		part := partitionKey(rt, Timestamp(d.UnixNano()))
+		path := filepath.Join(db.RootDataDir, "data-"+part+".dat")
+		if path == lastPath {
+			continue
+		}
+		lastPath = path
 		if err := collectMetricFromFile(database, metric, entry, path, fromTS, toTS, stride, &count, fn); err == nil {
 			// persisted frames processed
 		} else if os.IsNotExist(err) {
-			// no persisted file for this day
+			// no persisted file for this partition
 		} else {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
 
-		if p := rt.openDays[day]; p != nil {
+		if p := rt.openDays[part]; p != nil {
 			if err := collectMetricFromPage(database, metric, entry, p, fromTS, toTS, stride, &count, fn); err != nil {
 				return err
 			}
@@ -879,8 +989,7 @@ func exportLinesFromPage(database string, db *Database, p *Page, w *bufio.Writer
 		if err := w.WriteByte(' '); err != nil {
 			return err
 		}
-		tsBuf := strconv.AppendInt(numBuf[:0], int64(p.Times[i]), 10)
-		if _, err := w.Write(tsBuf); err != nil {
+		if _, err := w.WriteString(FormatTimestamp(p.Times[i])); err != nil {
 			return err
 		}
 	}
@@ -1144,7 +1253,7 @@ func (e *Engine) replayWALIntoRuntime(db *Database, rt *dbRuntime, dbName string
 			return fmt.Errorf("missing catalog entry for wal metric id %d", rec.MetricID)
 		}
 
-		day := dayKey(rec.Timestamp)
+		day := partitionKey(rt, rec.Timestamp)
 		if err := e.ensureDayOpen(db, rt, dbName, day, rec.Timestamp); err != nil {
 			return err
 		}
@@ -1355,8 +1464,8 @@ func cleanupRetention(db *Database, retentionDays int, nowTS Timestamp) {
 		if ent.IsDir() || !strings.HasPrefix(name, "data-") || !strings.HasSuffix(name, ".dat") {
 			continue
 		}
-		day := strings.TrimSuffix(strings.TrimPrefix(name, "data-"), ".dat")
-		t, err := time.Parse("2006-01-02", day)
+		part := strings.TrimSuffix(strings.TrimPrefix(name, "data-"), ".dat")
+		t, err := parsePartitionStart(part)
 		if err != nil {
 			continue
 		}
@@ -1373,6 +1482,43 @@ func dayStartUTC(ts Timestamp) time.Time {
 
 func dayKey(ts Timestamp) string {
 	return dayStartUTC(ts).Format("2006-01-02")
+}
+
+func monthKey(ts Timestamp) string {
+	t := time.Unix(0, int64(ts)).UTC()
+	return t.Format("2006-01")
+}
+
+func yearKey(ts Timestamp) string {
+	t := time.Unix(0, int64(ts)).UTC()
+	return t.Format("2006")
+}
+
+func parsePartitionStart(part string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", part); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01", part); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006", part); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("invalid partition key: %s", part)
+}
+
+func partitionKey(rt *dbRuntime, ts Timestamp) string {
+	if rt != nil {
+		switch strings.ToLower(strings.TrimSpace(rt.info.Partition)) {
+		case "month":
+			return monthKey(ts)
+		case "year":
+			return yearKey(ts)
+		case "forever":
+			return "forever"
+		}
+	}
+	return dayKey(ts)
 }
 
 func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
@@ -1398,6 +1544,19 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	if strings.TrimSpace(info.PageMaxAge) == "" {
 		info.PageMaxAge = def.PageMaxAge
 	}
+	if strings.TrimSpace(info.Partition) == "" {
+		info.Partition = def.Partition
+	}
+	if strings.TrimSpace(info.Rollups.CheckpointFile) == "" {
+		if strings.TrimSpace(def.Rollups.CheckpointFile) != "" {
+			info.Rollups.CheckpointFile = def.Rollups.CheckpointFile
+		} else {
+			info.Rollups.CheckpointFile = defaultRollupCheckpointFile
+		}
+	}
+	if strings.TrimSpace(info.Rollups.DefaultGrace) == "" {
+		info.Rollups.DefaultGrace = strings.TrimSpace(def.Rollups.DefaultGrace)
+	}
 	if _, err := time.ParseDuration(info.Grace); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid grace: %w", err)
 	}
@@ -1406,6 +1565,64 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	}
 	if _, err := time.ParseDuration(info.PageMaxAge); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid page_max_age: %w", err)
+	}
+	info.Partition = strings.ToLower(strings.TrimSpace(info.Partition))
+	if info.Partition == "" {
+		info.Partition = "day"
+	}
+	if info.Partition != "day" && info.Partition != "month" && info.Partition != "year" && info.Partition != "forever" {
+		return DBInfo{}, fmt.Errorf("invalid partition: %q (expected day|month|year|forever)", info.Partition)
+	}
+	if !info.Rollups.Enabled {
+		info.Rollups.Jobs = nil
+		return info, nil
+	}
+	if strings.TrimSpace(info.Rollups.DefaultGrace) != "" {
+		if _, err := time.ParseDuration(info.Rollups.DefaultGrace); err != nil {
+			return DBInfo{}, fmt.Errorf("invalid rollups.default_grace: %w", err)
+		}
+	}
+	for idx := range info.Rollups.Jobs {
+		job := &info.Rollups.Jobs[idx]
+		job.ID = strings.TrimSpace(job.ID)
+		job.SourceMetric = strings.TrimSpace(job.SourceMetric)
+		job.Interval = strings.TrimSpace(job.Interval)
+		job.DestinationDB = strings.TrimSpace(job.DestinationDB)
+		job.DestinationMetricPrefix = strings.TrimSpace(job.DestinationMetricPrefix)
+		job.Grace = strings.TrimSpace(job.Grace)
+		if job.ID == "" {
+			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].id: empty", idx)
+		}
+		if job.SourceMetric == "" {
+			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].source_metric: empty", idx)
+		}
+		if job.Interval == "" {
+			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].interval: empty", idx)
+		}
+		if _, err := time.ParseDuration(job.Interval); err != nil {
+			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].interval: %w", idx, err)
+		}
+		if job.DestinationDB == "" {
+			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].destination_db: empty", idx)
+		}
+		if job.DestinationMetricPrefix == "" {
+			job.DestinationMetricPrefix = job.SourceMetric
+		}
+		if job.Grace != "" {
+			if _, err := time.ParseDuration(job.Grace); err != nil {
+				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].grace: %w", idx, err)
+			}
+		}
+		if len(job.Aggregates) == 0 {
+			job.Aggregates = defaultRollupAggregates()
+		}
+		for aggIdx, agg := range job.Aggregates {
+			agg = strings.TrimSpace(strings.ToLower(agg))
+			if !isSupportedRollupAggregate(agg) {
+				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].aggregates[%d]: %q (supported: %s)", idx, aggIdx, job.Aggregates[aggIdx], strings.Join(supportedRollupAggregates(), ","))
+			}
+			job.Aggregates[aggIdx] = agg
+		}
 	}
 	return info, nil
 }
@@ -1416,6 +1633,7 @@ func dbManifestFromInfo(info DBInfo) DBManifestTOML {
 			Grace:         info.Grace,
 			RetentionDays: info.RetentionDays,
 			MaxActiveDays: info.MaxActiveDays,
+			Partition:     info.Partition,
 		},
 		WAL: DBManifestWAL{
 			Enabled:    info.WALEnabled,
@@ -1426,6 +1644,7 @@ func dbManifestFromInfo(info DBInfo) DBManifestTOML {
 			MaxBytes:   info.PageMaxBytes,
 			MaxAge:     info.PageMaxAge,
 		},
+		Rollups: info.Rollups,
 	}
 }
 
@@ -1434,11 +1653,13 @@ func dbInfoFromManifest(man DBManifestTOML) DBInfo {
 		Grace:          man.Retention.Grace,
 		RetentionDays:  man.Retention.RetentionDays,
 		MaxActiveDays:  man.Retention.MaxActiveDays,
+		Partition:      man.Retention.Partition,
 		WALEnabled:     man.WAL.Enabled,
 		WALSkipBefore:  man.WAL.SkipBefore,
 		PageMaxRecords: man.Page.MaxRecords,
 		PageMaxBytes:   man.Page.MaxBytes,
 		PageMaxAge:     man.Page.MaxAge,
+		Rollups:        man.Rollups,
 	}
 }
 
@@ -1479,7 +1700,7 @@ func loadOrCreateDBInfo(root string, defaults DBInfo) (DBInfo, error) {
 
 func parseLineProtocol(line string) (database, metric string, ts Timestamp, valueType byte, i32 int32, f32 float32, err error) {
 	fields := strings.Fields(strings.TrimSpace(line))
-	if len(fields) != 2 && len(fields) != 3 {
+	if len(fields) < 2 {
 		err = fmt.Errorf("invalid line protocol: expected 'DB/metric value [ts]'")
 		return
 	}
@@ -1525,13 +1746,14 @@ func parseLineProtocol(line string) (database, metric string, ts Timestamp, valu
 		f32 = float32(parsed)
 	}
 
-	if len(fields) == 3 {
-		parsedTS, perr := strconv.ParseInt(fields[2], 10, 64)
+	if len(fields) > 2 {
+		tsText := strings.Join(fields[2:], " ")
+		parsedTS, perr := ParseTimestamp(tsText)
 		if perr != nil {
-			err = fmt.Errorf("invalid timestamp %q", fields[2])
+			err = fmt.Errorf("invalid timestamp %q", tsText)
 			return
 		}
-		ts = Timestamp(parsedTS)
+		ts = parsedTS
 	} else {
 		ts = Timestamp(time.Now().UnixNano())
 	}

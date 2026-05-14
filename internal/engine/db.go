@@ -149,7 +149,7 @@ func (db *Database) Close() error {
 	return nil
 }
 
-func AddSample[T SampleType](db *Database, name string, ts Timestamp, value T) (err error) {
+func addSampleToDB[T SampleType](db *Database, name string, ts Timestamp, value T) (err error) {
 	_, exists := db.catalog.GetMetricEntry(name)
 	metricID, err := GetMetricID[T](db.catalog, name)
 	if err != nil {

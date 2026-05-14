@@ -339,19 +339,22 @@ func parseTimeParam(v string) (engine.Timestamp, error) {
 	}
 	if strings.Contains(v, ".") {
 		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			return 0, err
+		if err == nil {
+			return engine.Timestamp(f * float64(time.Second)), nil
 		}
-		return engine.Timestamp(f * float64(time.Second)), nil
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
+	if err == nil {
+		if n > 1_000_000_000_000 {
+			return engine.Timestamp(n), nil
+		}
+		return engine.Timestamp(n * int64(time.Second)), nil
+	}
+	ts, err := engine.ParseTimestamp(v)
 	if err != nil {
 		return 0, err
 	}
-	if n > 1_000_000_000_000 {
-		return engine.Timestamp(n), nil
-	}
-	return engine.Timestamp(n * int64(time.Second)), nil
+	return ts, nil
 }
 
 func parseStepParam(v string) (engine.Timestamp, error) {

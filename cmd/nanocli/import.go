@@ -59,6 +59,27 @@ func runImport(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// After import completes, trigger rollups for all source databases to process remaining data.
+	// This includes cascading: 1h DB may have its own rollup jobs to trigger.
+	eng.TriggerRollupsForSources(dbsSeen)
+
+	// Also trigger rollups for any intermediate databases that may have received rollup data
+	// and have their own rollup jobs configured (enabling multi-level cascading).
+	allDBs := eng.GetAllDatabaseNames()
+	for _, dbName := range allDBs {
+		found := false
+		for _, source := range dbsSeen {
+			if dbName == source {
+				found = true
+				break
+			}
+		}
+		if !found {
+			// This is an intermediate/destination DB, trigger its rollups too
+			eng.TriggerRollupsForSource(dbName)
+		}
+	}
 	report := importReport{
 		RootDir:       rootAbs,
 		InputFile:     *inputPath,

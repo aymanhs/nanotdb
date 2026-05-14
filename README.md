@@ -10,8 +10,8 @@ All data lives in plain files under a single root directory.
 
 ```
 Engine
- ├── "prod"    Database  → WAL (prod.wal) + Catalog (catalog.json) + daily .dat files
- ├── "sensors" Database  → WAL + Catalog + daily .dat files
+ ├── "prod"    Database  → WAL (prod.wal) + Catalog (catalog.json) + partitioned .dat files
+ ├── "sensors" Database  → WAL + Catalog + partitioned .dat files
  └── "internal"          → engine self-metrics (same layout, never exposed to users)
 ```
 
@@ -24,7 +24,7 @@ Each `Database` has three storage layers:
 |---|---|---|
 | WAL | `<db>.wal` | Crash-safety: records every sample before it enters the page |
 | Catalog | `catalog.json` | Maps metric names ↔ compact MetricIDs + value types |
-| Data files | `data-YYYY-MM-DD.dat` | Immutable compressed pages flushed from memory |
+| Data files | `data-<partition>.dat` | Immutable compressed pages flushed from memory |
 
 ---
 
@@ -39,7 +39,7 @@ AddLine("prod/room.temp 21.5 1715000000000000000")
   ├─ getOrCreateDB        →  open or reuse prod Database
   ├─ WAL append           →  write compact record to prod.wal  (crash-safe)
   ├─ addToOpenDay         →  append to in-memory Page for today's bucket
-  └─ if page full         →  compress + write page frame to data-YYYY-MM-DD.dat
+  └─ if page full         →  compress + write page frame to data-<partition>.dat
                               reset WAL (replay no longer needed)
 ```
 
@@ -59,7 +59,7 @@ ready to accept new writes.
 QueryRange("prod", "room.temp", fromTS, toTS, stride, callback)
   │
   ├─ iterate UTC days in [fromTS, toTS]
-  │    ├─ open data-YYYY-MM-DD.dat  →  scan page frame headers
+  │    ├─ open data-<partition>.dat  →  scan page frame headers
   │    │    skip frames outside time window (no decompression)
   │    │    decompress + scan matching frames
   │    └─ check in-memory page for today's data
@@ -131,7 +131,7 @@ Offset  Size  Field
     catalog.json       — metric registry: name → id + type
     manifest.toml      — per-database settings (retention, WAL, page limits)
     <db>.wal           — write-ahead log (single reusable file)
-    data-YYYY-MM-DD.dat — compressed page frames for completed days
+    data-<partition>.dat — compressed page frames for completed partitions
 ```
 
 Data files are append-only sequences of page frames:
@@ -167,9 +167,56 @@ Created automatically at `<root>/engine.toml` on first start. Key settings:
 | `balanced` | yes | no |
 | `throughput` | no | no |
 
-Per-database settings (retention, WAL skip window, page flush thresholds) live in
+Per-database settings (retention, partitioning, WAL skip window, page flush thresholds, rollups) live in
 `<db>/manifest.toml` and default values can be set in `engine.toml` under
 `[manifest_defaults]`.
+
+Partition options in `[retention]`:
+- `partition = "day"` (default): `data-YYYY-MM-DD.dat`
+- `partition = "month"`: `data-YYYY-MM.dat`
+- `partition = "year"`: `data-YYYY.dat`
+- `partition = "forever"`: `data-forever.dat`
+
+### Rollups (`manifest.toml`)
+
+Rollup jobs are defined in the **source** database manifest under `[rollups]`.
+
+Example:
+
+```toml
+[rollups]
+enabled = true
+checkpoint_file = "rollup.checkpoints.log"
+default_grace = "5m"
+
+[[rollups.jobs]]
+id = "outside_temp_1h"
+source_metric = "temp.out_dry"
+interval = "1h"
+aggregates = ["min", "max", "sum", "avg", "count"]
+destination_db = "sensors_rollup_1h"
+destination_metric_prefix = "temp.out_dry"
+```
+
+Rollup config reference:
+
+| Field | Scope | Required | Valid / Default | Notes |
+|---|---|---|---|---|
+| `rollups.enabled` | DB | no | `true|false` (default `false`) | Enables rollup processing for this DB as a source. |
+| `rollups.checkpoint_file` | DB | no | string (default `rollup.checkpoints.log`) | Checkpoint log path, relative to source DB directory. |
+| `rollups.default_grace` | DB | no | Go duration or empty | Used when job `grace` is omitted. |
+| `rollups.jobs[].id` | Job | yes | non-empty string | Unique per source DB for checkpoint tracking. |
+| `rollups.jobs[].source_metric` | Job | yes | non-empty string | Metric to read from source DB. |
+| `rollups.jobs[].interval` | Job | yes | valid Go duration (`>0`) | Rollup bucket size (for example `1h`, `24h`). |
+| `rollups.jobs[].aggregates` | Job | no | `min|max|sum|avg|count` (default all five) | Aggregate outputs written as suffix metrics. |
+| `rollups.jobs[].destination_db` | Job | yes | non-empty string | Target DB receiving rollup samples. |
+| `rollups.jobs[].destination_metric_prefix` | Job | no | string (default `source_metric`) | Output names are `<prefix>.<agg>`. |
+| `rollups.jobs[].grace` | Job | no | Go duration or empty | Overrides `default_grace` for this job. |
+
+Notes:
+- Checkpoints are stored in the source DB (default `rollup.checkpoints.log`).
+- Destination DBs can also define their own rollup jobs to create cascades (for example `1h -> 1d`).
+- For low-frequency rollup outputs, use coarser partitions on destination DBs (for example `month` or `year`) to avoid many tiny day files.
 
 ---
 
@@ -195,13 +242,17 @@ nanocli inspect dat --root <dir>  --db <name>  [--json]  — page frame headers 
 nanocli inspect wal --root <dir>  --db <name>  [--json]  — WAL record dump
 
 nanocli import --root <dir> --in <file.lp>  [--json]     — bulk import line-protocol file
-nanocli export --root <dir> --db <name> --out <file.lp>  — export database to line protocol
+nanocli export --root <dir> --db <name> [--out <file.lp>] — export database to line protocol (stdout when --out is omitted)
 
 nanocli query  --root <dir> --db <name> --metric <regex>
                [--start <time>] [--end <time>] [--format table|json]
 ```
 
-`--start` / `--end` accept RFC3339 strings or Unix timestamps (seconds or nanoseconds).
+LP timestamps (import and exported files) accept / use: `YYYY-MM-DD HH:MM:SS.nnnnnnnnn` (UTC)
+and also accept raw Unix nanoseconds on import.
+
+`--start` / `--end` accept RFC3339 strings, `YYYY-MM-DD [HH[:MM[:SS[.nnnnnnnnn]]]]`,
+or Unix timestamps (seconds or nanoseconds).
 
 ---
 
