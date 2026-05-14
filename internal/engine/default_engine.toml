@@ -1,0 +1,71 @@
+# NanoTDB Engine Configuration
+#
+# This file is loaded at startup from <root_data_dir>/engine.toml.
+# It is created automatically the first time the engine starts.
+# If a numeric limit is set to 0 or a negative value, NanoTDB falls back to
+# the built-in default for that key.
+
+[engine]
+# HTTP listen address for the NanoTDB server (host:port).
+# Example: ":8428", "127.0.0.1:8428", "0.0.0.0:8428".
+listen = ":8428"
+
+[wal]
+# Max WAL segment size in bytes.
+# Larger values reduce segment rotations and fsync work, but increase
+# per-segment disk usage.
+max_segment_size = 67108864
+# WAL fsync behavior:
+# - "segment": fsync when a segment is sealed (better throughput).
+# - "always": fsync every append (strongest write durability, highest latency).
+fsync_policy = "segment"
+
+[durability]
+# Write durability profile for page/catalog flush behavior:
+# - "strict": fsync page file and persist catalog on each flush (safest, highest latency)
+# - "balanced": fsync page file on flush, defer catalog persistence
+# - "throughput": no fsync on page flush and defer catalog persistence (fastest, more crash risk)
+profile = "strict"
+
+[stats]
+# Enable/disable periodic internal engine metrics emission to the internal DB.
+# This does not affect user data ingest; it only controls engine self-metrics.
+enabled = true
+# Metrics flush interval (Go duration format, e.g. "5s", "1m").
+# "0s" is allowed and means stats are flushed whenever data is ingested.
+interval = "30s"
+
+[defaults]
+# Databases to create at startup if they do not exist yet.
+# The special internal DB name is ignored even if listed here.
+# Example: ["prod", "dev"]
+databases = []
+
+# Default manifest values copied into manifest.toml for newly created databases.
+# Existing databases keep their own manifest settings.
+[manifest_defaults.retention]
+# Retention grace window (Go duration).
+# Stored in each database manifest and validated as a duration string.
+# Use this to define your retention boundary grace policy.
+grace = "5m"
+# Number of full days of data to keep in on-disk data-YYYY-MM-DD.dat files.
+retention_days = 30
+# Max distinct open day-buckets kept active in memory during ingest/replay.
+# Higher values support broader out-of-order arrival windows at higher memory cost.
+max_active_days = 2
+
+[manifest_defaults.wal]
+# Enable/disable WAL usage for this database.
+# If disabled, data durability depends on page flush timing only.
+enabled = true
+# Skip WAL for samples older than now-skip_before (Go duration).
+# Useful for backfills where replay protection is less important.
+skip_before = "1h"
+
+[manifest_defaults.page]
+# Max samples per in-memory page before it is flushed to disk.
+max_records = 16000
+# Approximate max encoded payload bytes per in-memory page before flush.
+max_bytes = 127000
+# Max age of samples in one in-memory page (Go duration) before page rollover.
+max_age = "60s"

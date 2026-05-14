@@ -1,0 +1,73 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+)
+
+type dbContext struct {
+	RootDir       string
+	Database      string
+	EngineConfig  string
+	DatabaseDir   string
+	CatalogPath   string
+	ManifestPath  string
+	DataFilePaths []string
+	WALFilePaths  []string
+}
+
+func resolveRootDir(rootDir string) (string, string, error) {
+	if rootDir == "" {
+		return "", "", fmt.Errorf("--root is required")
+	}
+
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", "", err
+	}
+	engineCfg := filepath.Join(rootAbs, "engine.toml")
+	st, err := os.Stat(engineCfg)
+	if err != nil {
+		return "", "", fmt.Errorf("engine config not found at %s: %w", engineCfg, err)
+	}
+	if st.IsDir() {
+		return "", "", fmt.Errorf("engine config path is a directory: %s", engineCfg)
+	}
+	return rootAbs, engineCfg, nil
+}
+
+func resolveDBContext(rootDir string, database string) (dbContext, error) {
+	if database == "" {
+		return dbContext{}, fmt.Errorf("--db is required")
+	}
+
+	rootAbs, engineCfg, err := resolveRootDir(rootDir)
+	if err != nil {
+		return dbContext{}, err
+	}
+
+	dbDir := filepath.Join(rootAbs, database)
+	dataFiles, err := filepath.Glob(filepath.Join(dbDir, "data-*.dat"))
+	if err != nil {
+		return dbContext{}, err
+	}
+	walFiles, err := filepath.Glob(filepath.Join(dbDir, "*.wal"))
+	if err != nil {
+		return dbContext{}, err
+	}
+	sort.Strings(dataFiles)
+	sort.Strings(walFiles)
+
+	return dbContext{
+		RootDir:       rootAbs,
+		Database:      database,
+		EngineConfig:  engineCfg,
+		DatabaseDir:   dbDir,
+		CatalogPath:   filepath.Join(dbDir, "catalog.json"),
+		ManifestPath:  filepath.Join(dbDir, "manifest.toml"),
+		DataFilePaths: dataFiles,
+		WALFilePaths:  walFiles,
+	}, nil
+}
