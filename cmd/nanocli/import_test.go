@@ -81,6 +81,7 @@ destination_metric_prefix = "temp.out_dry"
 		"sensors/temp.out_dry 10i " + itoa64(hourStart.Add(10*time.Minute).UnixNano()) + "\n" +
 		"sensors/temp.office 15i " + itoa64(hourStart.Add(40*time.Minute).UnixNano()) + "\n" +
 		"sensors/temp.out_dry 20i " + itoa64(hourStart.Add(40*time.Minute).UnixNano()) + "\n" +
+		"sensors/temp.office 1i " + itoa64(hourStart.Add(1*time.Hour).UnixNano()) + "\n" +
 		"sensors/temp.out_dry 30i " + itoa64(dayStart.Add(26*time.Hour).UnixNano()) + "\n"
 	if err := os.WriteFile(input, []byte(lp), 0644); err != nil {
 		t.Fatalf("WriteFile input.lp failed: %v", err)
@@ -182,7 +183,7 @@ func TestChainedRollups_1HTo1D(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	dayStart := now.Truncate(24 * time.Hour).Add(-48 * time.Hour)
-	hourStart := dayStart.Add(2 * time.Hour)
+	hourStart := dayStart
 	if dayStart.Add(24 * time.Hour).After(now.Add(-2 * time.Minute)) {
 		t.Fatalf("test timestamps are not safely in the past")
 	}
@@ -282,14 +283,16 @@ default_grace = ""
 		t.Fatalf("WriteFile 1d manifest failed: %v", err)
 	}
 
-	// Write source data: 5 points over 2 hours
+	// Write source data over ~26h so 1h rollups close and 1d cascade can finalize.
 	input := filepath.Join(root, "input.lp")
 	lp := "" +
 		"sensors/temperature 100i " + itoa64(hourStart.UnixNano()) + "\n" +
 		"sensors/temperature 200i " + itoa64(hourStart.Add(15*time.Minute).UnixNano()) + "\n" +
 		"sensors/temperature 300i " + itoa64(hourStart.Add(45*time.Minute).UnixNano()) + "\n" +
 		"sensors/temperature 400i " + itoa64(hourStart.Add(1*time.Hour).UnixNano()) + "\n" +
-		"sensors/temperature 500i " + itoa64(hourStart.Add(1*time.Hour+30*time.Minute).UnixNano()) + "\n"
+		"sensors/temperature 500i " + itoa64(hourStart.Add(1*time.Hour+30*time.Minute).UnixNano()) + "\n" +
+		"sensors/temperature 600i " + itoa64(hourStart.Add(24*time.Hour).UnixNano()) + "\n" +
+		"sensors/temperature 700i " + itoa64(hourStart.Add(25*time.Hour).UnixNano()) + "\n"
 	if err := os.WriteFile(input, []byte(lp), 0644); err != nil {
 		t.Fatalf("WriteFile input.lp failed: %v", err)
 	}
@@ -324,6 +327,19 @@ default_grace = ""
 	if len(rows1h) == 0 {
 		t.Fatalf("expected 1h rollup samples but got none")
 	}
+	has600 := false
+	has900 := false
+	for _, row := range rows1h {
+		if row.Float32 == 600 {
+			has600 = true
+		}
+		if row.Float32 == 900 {
+			has900 = true
+		}
+	}
+	if !has600 || !has900 {
+		t.Fatalf("expected 1h sums to include 600 and 900, got=%v", rows1h)
+	}
 
 	// Verify 1d rollups exist (min/max of the 1h sums)
 	rows1d := make([]engine.Sample, 0)
@@ -336,6 +352,15 @@ default_grace = ""
 	if len(rows1d) == 0 {
 		t.Fatalf("expected 1d rollup samples (min) but got none")
 	}
+	hasMin600 := false
+	for _, row := range rows1d {
+		if row.Float32 == 600 {
+			hasMin600 = true
+		}
+	}
+	if !hasMin600 {
+		t.Fatalf("expected 1d min to include 600, got=%v", rows1d)
+	}
 
 	rows1dMax := make([]engine.Sample, 0)
 	if err := e.QueryRange("sensors_rollup_1d", "temperature.max", from, to, 1, func(s engine.Sample) error {
@@ -346,6 +371,15 @@ default_grace = ""
 	}
 	if len(rows1dMax) == 0 {
 		t.Fatalf("expected 1d rollup samples (max) but got none")
+	}
+	hasMax900 := false
+	for _, row := range rows1dMax {
+		if row.Float32 == 900 {
+			hasMax900 = true
+		}
+	}
+	if !hasMax900 {
+		t.Fatalf("expected 1d max to include 900, got=%v", rows1dMax)
 	}
 
 	// Verify checkpoint logs exist for both rollup sources

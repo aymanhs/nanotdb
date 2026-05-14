@@ -92,13 +92,9 @@ func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job D
 	}
 
 	safeTS := Timestamp(time.Now().Add(-grace).UnixNano())
-	// Never advance too far beyond the newest source sample for this metric.
-	// We allow at most one interval beyond LastTS so the latest (possibly partial)
-	// interval can still be computed, while preventing checkpoints from leaping to now.
-	maxSafeBySource := sourceEntry.LastTS + Timestamp(interval)
-	if maxSafeBySource < sourceEntry.LastTS {
-		maxSafeBySource = sourceEntry.LastTS
-	}
+	// Only compute fully closed periods. Allowing partial intervals to checkpoint
+	// causes incorrect aggregates when more source points arrive later.
+	maxSafeBySource := sourceEntry.LastTS
 	if maxSafeBySource < safeTS {
 		safeTS = maxSafeBySource
 	}

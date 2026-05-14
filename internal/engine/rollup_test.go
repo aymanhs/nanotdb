@@ -76,8 +76,14 @@ func TestTriggerRollupsOnlyProcessesRequestedSourceDatabase(t *testing.T) {
 	if err := e.AddLine("prod/sensors.temp 7 " + itoa64(int64(ts))); err != nil {
 		t.Fatalf("AddLine prod failed: %v", err)
 	}
+	if err := e.AddLine("prod/sensors.temp 1 " + itoa64(int64(periodStart.Add(1*time.Hour).UnixNano()))); err != nil {
+		t.Fatalf("AddLine prod close-hour failed: %v", err)
+	}
 	if err := e.AddLine("other/sensors.temp 11 " + itoa64(int64(ts))); err != nil {
 		t.Fatalf("AddLine other failed: %v", err)
+	}
+	if err := e.AddLine("other/sensors.temp 1 " + itoa64(int64(periodStart.Add(1*time.Hour).UnixNano()))); err != nil {
+		t.Fatalf("AddLine other close-hour failed: %v", err)
 	}
 
 	_, prodRT, err := e.getOrCreateDB("prod")
@@ -209,7 +215,7 @@ func TestTriggerRollupsForSourceAppendsCheckpoint(t *testing.T) {
 	}
 }
 
-func TestTriggerRollupsDoesNotAdvancePastSourceMetricLastTS(t *testing.T) {
+func TestTriggerRollupsDoesNotComputePartialInterval(t *testing.T) {
 	root := t.TempDir()
 	e, err := OpenEngine(root, 1024*1024)
 	if err != nil {
@@ -220,8 +226,7 @@ func TestTriggerRollupsDoesNotAdvancePastSourceMetricLastTS(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	periodStart := now.Add(-2 * time.Hour).Truncate(time.Hour)
 
-	// Only partial data in first hour; rollup may finalize this hour, but checkpoint
-	// must not leap far beyond source LastTS.
+	// Only partial data in first hour; rollup must not finalize this interval yet.
 	ts1 := Timestamp(periodStart.Add(5 * time.Minute).UnixNano())
 	ts2 := Timestamp(periodStart.Add(20 * time.Minute).UnixNano())
 	if err := e.AddLine("prod/sensors.temp 3 " + itoa64(int64(ts1))); err != nil {
@@ -250,28 +255,25 @@ func TestTriggerRollupsDoesNotAdvancePastSourceMetricLastTS(t *testing.T) {
 	}
 
 	e.TriggerRollupsForSource("prod")
-	assertRollupValue(t, e, "prod_rollup", "sensors.temp.sum", Timestamp(periodStart.UnixNano()), 8)
+
+	_, found, err := e.QueryLast("prod_rollup", "sensors.temp.sum")
+	if err != nil {
+		t.Fatalf("QueryLast failed: %v", err)
+	}
+	if found {
+		t.Fatalf("did not expect rollup sample for partial interval")
+	}
 
 	checkpointPath := filepath.Join(root, "prod", "rollup.checkpoints.log")
 	raw, err := os.ReadFile(checkpointPath)
+	if os.IsNotExist(err) {
+		return
+	}
 	if err != nil {
 		t.Fatalf("ReadFile checkpoint failed: %v", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
-		t.Fatalf("expected checkpoint entry")
-	}
-	parts := strings.Split(lines[len(lines)-1], ",")
-	if len(parts) != 2 {
-		t.Fatalf("unexpected checkpoint line: %q", lines[len(lines)-1])
-	}
-	checkpointTS, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-	if err != nil {
-		t.Fatalf("invalid checkpoint timestamp in %q: %v", lines[len(lines)-1], err)
-	}
-	wantCheckpoint := periodStart.Add(1 * time.Hour).UnixNano()
-	if checkpointTS != wantCheckpoint {
-		t.Fatalf("checkpoint mismatch: got=%d want=%d", checkpointTS, wantCheckpoint)
+	if strings.TrimSpace(string(raw)) != "" {
+		t.Fatalf("did not expect checkpoint entry for partial interval, got %q", strings.TrimSpace(string(raw)))
 	}
 }
 

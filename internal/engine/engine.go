@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -155,6 +156,7 @@ type Engine struct {
 	stats          engineStatStore
 	statsLastFlush time.Time
 	statsLastMu    sync.Mutex
+	rollupAuto     atomic.Bool
 }
 
 // Sample is one decoded data point returned by QueryRange or QueryLast.
@@ -347,6 +349,7 @@ func OpenEngine(rootDataDir string, walMaxSegSize int64) (*Engine, error) {
 		runtimes:       make(map[string]*dbRuntime),
 		stats:          newEngineStatStore(),
 	}
+	e.rollupAuto.Store(true)
 	for _, dbName := range cfg.Defaults.Databases {
 		dbName = strings.TrimSpace(dbName)
 		if dbName == "" || dbName == internalStatsDatabase {
@@ -357,6 +360,12 @@ func OpenEngine(rootDataDir string, walMaxSegSize int64) (*Engine, error) {
 		}
 	}
 	return e, nil
+}
+
+// SetAutoRollupTrigger controls whether ingest-time flushes automatically
+// trigger rollup computation for the source database.
+func (e *Engine) SetAutoRollupTrigger(enabled bool) {
+	e.rollupAuto.Store(enabled)
 }
 
 func durabilitySyncPolicy(profile string) (syncDataFile bool, syncCatalog bool) {
@@ -549,7 +558,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
-		if triggerRollups {
+		if triggerRollups && e.rollupAuto.Load() {
 			e.triggerRollups(dbName)
 		}
 		rt.openDays[day] = nil

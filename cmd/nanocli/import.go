@@ -54,29 +54,21 @@ func runImport(args []string) error {
 		return err
 	}
 	defer eng.Close()
+	eng.SetAutoRollupTrigger(false)
 
 	total, imported, skipped, dbsSeen, err := importLineProtocol(eng, in)
 	if err != nil {
 		return err
 	}
+	eng.SetAutoRollupTrigger(true)
 
-	// After import completes, trigger rollups for all source databases to process remaining data.
-	// This includes cascading: 1h DB may have its own rollup jobs to trigger.
+	// Phase 1: trigger rollups for imported source DBs.
 	eng.TriggerRollupsForSources(dbsSeen)
-
-	// Also trigger rollups for any intermediate databases that may have received rollup data
-	// and have their own rollup jobs configured (enabling multi-level cascading).
-	allDBs := eng.GetAllDatabaseNames()
-	for _, dbName := range allDBs {
-		found := false
-		for _, source := range dbsSeen {
-			if dbName == source {
-				found = true
-				break
-			}
-		}
-		if !found {
-			// This is an intermediate/destination DB, trigger its rollups too
+	// Phase 2: cascade through all DBs in sorted order for a few passes so
+	// chained rollups (e.g. 1h -> 1d -> 1w) settle deterministically.
+	for pass := 0; pass < 4; pass++ {
+		allDBs := eng.GetAllDatabaseNames()
+		for _, dbName := range allDBs {
 			eng.TriggerRollupsForSource(dbName)
 		}
 	}

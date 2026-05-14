@@ -254,6 +254,23 @@ and also accept raw Unix nanoseconds on import.
 `--start` / `--end` accept RFC3339 strings, `YYYY-MM-DD [HH[:MM[:SS[.nnnnnnnnn]]]]`,
 or Unix timestamps (seconds or nanoseconds).
 
+### Rollup full-cycle check script
+
+For deterministic end-to-end verification (generate LP -> import -> rollups -> export -> compare expected), run:
+
+```bash
+./scripts/rollup_full_cycle_check.sh
+```
+
+Optional arguments:
+- `./scripts/rollup_full_cycle_check.sh <root-dir> <duration-hours> <metrics> <cadence-seconds> <gap-metrics>`
+- Defaults: `root-dir=test-data/full-cycle-check`, `duration-hours=30`, `metrics=10`, `cadence-seconds=10`, `gap-metrics=2`
+
+Generated artifacts are placed in `<root-dir>/work` for easy discovery:
+- `scenario_summary.json` (duration, rates, counts, per-metric stats)
+- `known_gaps.csv` (deterministic missing windows for `temp.gap_probeXX` metrics)
+- `SCENARIO.md` (quick human-readable summary)
+
 ---
 
 ## Engine API (embedding)

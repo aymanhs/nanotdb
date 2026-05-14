@@ -1,5 +1,9 @@
 {
     "chat.tools.terminal.autoApprove": {
-        "gofmt": true
+        "gofmt": true,
+        "/^cd /home/ayman/code/nanotdb && \\./scripts/rollup_full_cycle_check\\.sh$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }
