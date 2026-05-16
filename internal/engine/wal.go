@@ -134,7 +134,7 @@ func appendSampleRecord[T SampleType](w *WAL, metricID MetricID, metricName stri
 		return 0, fmt.Errorf("wal is nil")
 	}
 
-	vtype := Int32Sample
+	var vtype byte
 	var raw [4]byte
 	switch v := any(value).(type) {
 	case int32:
@@ -580,11 +580,12 @@ func decodeWALPayloadCompactWithBaseline(payload []byte, baselineTS Timestamp) (
 	}
 
 	rec := WALRecord{SegmentID: 1, MetricID: metricID, MetricName: metricName, Timestamp: ts, ValueType: vtype}
-	if vtype == Int32Sample {
+	switch vtype {
+	case Int32Sample:
 		rec.Value = int32(binary.LittleEndian.Uint32(valueRaw[:]))
-	} else if vtype == Float32Sample {
+	case Float32Sample:
 		rec.Value = math.Float32frombits(binary.LittleEndian.Uint32(valueRaw[:]))
-	} else {
+	default:
 		return WALRecord{}, fmt.Errorf("unsupported wal value type: %d", vtype)
 	}
 	return rec, nil
