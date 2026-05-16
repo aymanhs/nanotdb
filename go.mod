@@ -1,4 +1,4 @@
-module aymanhs/nanotdb
+module github.com/aymanhs/nanotdb
 
 go 1.25.3
 
