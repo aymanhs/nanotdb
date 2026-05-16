@@ -13,7 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 type queryRow struct {

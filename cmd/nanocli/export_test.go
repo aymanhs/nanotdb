@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 func TestRunExport_WritesToStdoutWhenOutOmitted(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 type exportReport struct {

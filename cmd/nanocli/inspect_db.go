@@ -10,7 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 type catalogDisk struct {

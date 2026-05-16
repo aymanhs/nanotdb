@@ -4,6 +4,14 @@ A small, embedded time-series database designed for resource-constrained hosts
 (Raspberry Pi, edge nodes, IoT gateways). No external dependencies at runtime.
 All data lives in plain files under a single root directory.
 
+> **Important:** NanoTDB supports automatic aggregates and rollups.
+> When you ingest time-series samples, the engine can automatically maintain
+> aggregate summaries for higher-level time buckets, reducing query cost and
+> improving query performance for long-range or downsampled queries.
+> 
+> This behavior is built into the storage engine and is one of the core
+> differentiators of NanoTDB.
+
 ---
 
 ## Architecture overview

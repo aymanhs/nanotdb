@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 type runStats struct {

@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 type inspectDatFileReport struct {
