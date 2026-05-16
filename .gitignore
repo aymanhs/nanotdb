@@ -2,3 +2,4 @@ devdata/
 devdata-*/
 .tmp/
 test-data/
+.vscode/
