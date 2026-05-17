@@ -14,6 +14,14 @@ All data lives in plain files under a single root directory.
 
 ---
 
+## 🚀 Quick Start
+
+**New to NanoDB?** See [**Getting Started**](GETTING_STARTED.md) for installation, compilation, and practical examples using shell scripts and Python.
+
+For technical deep-dives, continue below.
+
+---
+
 ## Architecture overview
 
 ```
