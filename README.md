@@ -18,6 +18,18 @@ All data lives in plain files under a single root directory.
 
 **New to NanoDB?** See [**Getting Started**](GETTING_STARTED.md) for installation, compilation, and practical examples using shell scripts and Python.
 
+Prefer ready-to-use binaries? Download the latest release assets from
+[GitHub Releases](https://github.com/aymanhs/nanotdb/releases/latest):
+
+- Old Raspberry Pi (Pi 0/1): `nanotdb-linux-armv6-rpi0-rpi1` and `nanocli-linux-armv6-rpi0-rpi1`
+- Newer 32-bit Raspberry Pi OS (Pi 2/3/4): `nanotdb-linux-armv7-rpi3-rpi4` and `nanocli-linux-armv7-rpi3-rpi4`
+- 64-bit Raspberry Pi OS: `nanotdb-linux-arm64` and `nanocli-linux-arm64`
+
+Release/change history:
+
+- Published release notes and downloads: [Releases](https://github.com/aymanhs/nanotdb/releases)
+- Detailed change log in-repo: [CHANGELOG.md](CHANGELOG.md)
+
 For technical deep-dives, continue below.
 
 ---
@@ -246,7 +258,20 @@ nanotdb --init --config <path>   write default engine.toml and exit
 ```
 
 Exposes a small HTTP API compatible with the VictoriaMetrics instant/range query
-wire format (`/api/v1/query`, `/api/v1/query_range`, `/api/v1/import/prometheus`).
+wire format (`/api/v1/import`, `/api/v1/import/prometheus`, `/api/v1/query`, `/api/v1/query_range`).
+
+API quick reference:
+
+- `GET /health` - health check
+- `POST /api/v1/import` - import line protocol (raw body or JSON payload)
+- `POST /api/v1/import/prometheus` - Prometheus-compatible import endpoint
+- `GET /api/v1/query` - instant query (latest point)
+- `GET /api/v1/query_range` - range query
+
+Also exposes discovery endpoints:
+
+- `GET /api/v1/databases` (use `?include_internal=true` to include the internal DB)
+- `GET /api/v1/metrics?db=<name>` (use `&details=true` for id/type metadata)
 
 ### `nanocli` — offline CLI tool
 

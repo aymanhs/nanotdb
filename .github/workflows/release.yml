@@ -1,0 +1,118 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.id }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-amd64
+            goos: linux
+            goarch: amd64
+            goarm: ""
+          - id: linux-arm64
+            goos: linux
+            goarch: arm64
+            goarm: ""
+          - id: linux-armv7-rpi3-rpi4
+            goos: linux
+            goarch: arm
+            goarm: "7"
+          - id: linux-armv6-rpi0-rpi1
+            goos: linux
+            goarch: arm
+            goarm: "6"
+          - id: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            goarm: ""
+          - id: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            goarm: ""
+          - id: windows-amd64
+            goos: windows
+            goarch: amd64
+            goarm: ""
+          - id: windows-arm64
+            goos: windows
+            goarch: arm64
+            goarm: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ext=".exe"
+          fi
+
+          export CGO_ENABLED=0
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
+
+          if [ -n "${{ matrix.goarm }}" ]; then
+            export GOARM="${{ matrix.goarm }}"
+          else
+            unset GOARM
+          fi
+
+          go build -trimpath -ldflags "-s -w" -o "dist/nanotdb-${{ matrix.id }}${ext}" ./cmd/nanotdb
+          go build -trimpath -ldflags "-s -w" -o "dist/nanocli-${{ matrix.id }}${ext}" ./cmd/nanocli
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          make_latest: true

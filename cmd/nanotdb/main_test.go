@@ -1,10 +1,16 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 func TestLoadRuntimeConfig(t *testing.T) {
@@ -88,5 +94,185 @@ func TestParseTimeParam_IntegerSecondsStillSupported(t *testing.T) {
 	want := int64(1715680000) * int64(time.Second)
 	if int64(got) != want {
 		t.Fatalf("parseTimeParam mismatch: got=%d want=%d", int64(got), want)
+	}
+}
+
+func TestHandleDatabases_DefaultAndIncludeInternal(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("prod/temp 21"); err != nil {
+		t.Fatalf("AddLine prod failed: %v", err)
+	}
+	if err := eng.AddLine("sensors/humidity 60"); err != nil {
+		t.Fatalf("AddLine sensors failed: %v", err)
+	}
+	if err := eng.AddLine("internal/test.metric 1"); err != nil {
+		t.Fatalf("AddLine internal failed: %v", err)
+	}
+
+	defaultReq := httptest.NewRequest(http.MethodGet, "/api/v1/databases", nil)
+	defaultRec := httptest.NewRecorder()
+	handleDatabases(eng)(defaultRec, defaultReq)
+
+	if defaultRec.Code != http.StatusOK {
+		t.Fatalf("default status mismatch: got=%d want=%d", defaultRec.Code, http.StatusOK)
+	}
+
+	var defaultResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string   `json:"resultType"`
+			Result     []string `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(defaultRec.Body).Decode(&defaultResp); err != nil {
+		t.Fatalf("decode default response failed: %v", err)
+	}
+	if defaultResp.Status != "success" {
+		t.Fatalf("default status mismatch: got=%q want=success", defaultResp.Status)
+	}
+	if defaultResp.Data.ResultType != "databases" {
+		t.Fatalf("default resultType mismatch: got=%q want=databases", defaultResp.Data.ResultType)
+	}
+	wantDefault := []string{"prod", "sensors"}
+	if !reflect.DeepEqual(defaultResp.Data.Result, wantDefault) {
+		t.Fatalf("default result mismatch: got=%v want=%v", defaultResp.Data.Result, wantDefault)
+	}
+
+	withInternalReq := httptest.NewRequest(http.MethodGet, "/api/v1/databases?include_internal=true", nil)
+	withInternalRec := httptest.NewRecorder()
+	handleDatabases(eng)(withInternalRec, withInternalReq)
+
+	if withInternalRec.Code != http.StatusOK {
+		t.Fatalf("include_internal status mismatch: got=%d want=%d", withInternalRec.Code, http.StatusOK)
+	}
+	var withInternalResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []string `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(withInternalRec.Body).Decode(&withInternalResp); err != nil {
+		t.Fatalf("decode include_internal response failed: %v", err)
+	}
+	wantWithInternal := []string{"internal", "prod", "sensors"}
+	if !reflect.DeepEqual(withInternalResp.Data.Result, wantWithInternal) {
+		t.Fatalf("include_internal result mismatch: got=%v want=%v", withInternalResp.Data.Result, wantWithInternal)
+	}
+}
+
+func TestHandleMetrics_NamesAndDetails(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("prod/alpha 10"); err != nil {
+		t.Fatalf("AddLine alpha failed: %v", err)
+	}
+	if err := eng.AddLine("prod/beta 12.5"); err != nil {
+		t.Fatalf("AddLine beta failed: %v", err)
+	}
+
+	namesReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics?db=prod", nil)
+	namesRec := httptest.NewRecorder()
+	handleMetrics(eng)(namesRec, namesReq)
+
+	if namesRec.Code != http.StatusOK {
+		t.Fatalf("names status mismatch: got=%d want=%d", namesRec.Code, http.StatusOK)
+	}
+	var namesResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string   `json:"resultType"`
+			DB         string   `json:"db"`
+			Result     []string `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(namesRec.Body).Decode(&namesResp); err != nil {
+		t.Fatalf("decode names response failed: %v", err)
+	}
+	if namesResp.Status != "success" {
+		t.Fatalf("names status mismatch: got=%q want=success", namesResp.Status)
+	}
+	if namesResp.Data.ResultType != "metrics" {
+		t.Fatalf("names resultType mismatch: got=%q want=metrics", namesResp.Data.ResultType)
+	}
+	if namesResp.Data.DB != "prod" {
+		t.Fatalf("names db mismatch: got=%q want=prod", namesResp.Data.DB)
+	}
+	wantNames := []string{"alpha", "beta"}
+	if !reflect.DeepEqual(namesResp.Data.Result, wantNames) {
+		t.Fatalf("names result mismatch: got=%v want=%v", namesResp.Data.Result, wantNames)
+	}
+
+	detailsReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics?db=prod&details=true", nil)
+	detailsRec := httptest.NewRecorder()
+	handleMetrics(eng)(detailsRec, detailsReq)
+
+	if detailsRec.Code != http.StatusOK {
+		t.Fatalf("details status mismatch: got=%d want=%d", detailsRec.Code, http.StatusOK)
+	}
+	var detailsResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Name string `json:"name"`
+				ID   uint16 `json:"id"`
+				Type string `json:"type"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(detailsRec.Body).Decode(&detailsResp); err != nil {
+		t.Fatalf("decode details response failed: %v", err)
+	}
+	if len(detailsResp.Data.Result) != 2 {
+		t.Fatalf("details result length mismatch: got=%d want=2", len(detailsResp.Data.Result))
+	}
+	if detailsResp.Data.Result[0].Name != "alpha" {
+		t.Fatalf("details first entry mismatch: got=%+v", detailsResp.Data.Result[0])
+	}
+	if detailsResp.Data.Result[0].Type != "int32" && detailsResp.Data.Result[0].Type != "float32" {
+		t.Fatalf("details first entry type mismatch: got=%q", detailsResp.Data.Result[0].Type)
+	}
+	if detailsResp.Data.Result[1].Name != "beta" {
+		t.Fatalf("details second entry mismatch: got=%+v", detailsResp.Data.Result[1])
+	}
+	if detailsResp.Data.Result[1].Type != "float32" {
+		t.Fatalf("details second entry type mismatch: got=%q want=float32", detailsResp.Data.Result[1].Type)
+	}
+}
+
+func TestHandleMetrics_DatabaseNotFound(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics?db=does-not-exist", nil)
+	rec := httptest.NewRecorder()
+	handleMetrics(eng)(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status mismatch: got=%d want=%d", rec.Code, http.StatusNotFound)
+	}
+	var resp struct {
+		Status    string `json:"status"`
+		ErrorType string `json:"errorType"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if resp.Status != "error" || resp.ErrorType != "not_found" {
+		t.Fatalf("error payload mismatch: got status=%q type=%q", resp.Status, resp.ErrorType)
 	}
 }

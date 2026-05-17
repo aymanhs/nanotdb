@@ -440,6 +440,22 @@ func (e *Engine) GetAllDatabaseNames() []string {
 	return names
 }
 
+// ListMetrics returns all known metrics for a database in stable name order.
+func (e *Engine) ListMetrics(database string) ([]MetricInfo, error) {
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return nil, fmt.Errorf("database cannot be empty")
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	db, ok := e.dbs[database]
+	if !ok {
+		return nil, fmt.Errorf("database not found: %s", database)
+	}
+	return db.catalog.ListMetrics(), nil
+}
+
 // AddLine ingests one sample in line-protocol format: "DB/metric value [ts]"
 // where value is an integer or float literal and ts is optional.
 // ts can be Unix nanoseconds or a human-readable timestamp accepted by ParseTimestamp.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -15,6 +16,12 @@ type Catalog struct {
 	metrics  map[string]MetricEntry
 	idToName map[int16]string // reverse index for O(1) GetMetricByID
 	dirty    bool
+}
+
+type MetricInfo struct {
+	Name      string
+	MetricID  MetricID
+	ValueType byte
 }
 
 // MetricEntry holds the catalog record for one metric: its assigned ID, value type,
@@ -148,6 +155,22 @@ func (c *Catalog) GetValueWidth(mid MetricID) int {
 func (c *Catalog) GetMetricEntry(name string) (MetricEntry, bool) {
 	m, ok := c.metrics[name]
 	return m, ok
+}
+
+// ListMetrics returns a stable, name-sorted snapshot of metrics in this catalog.
+func (c *Catalog) ListMetrics() []MetricInfo {
+	out := make([]MetricInfo, 0, len(c.metrics))
+	for name, entry := range c.metrics {
+		out = append(out, MetricInfo{
+			Name:      name,
+			MetricID:  entry.MetricID,
+			ValueType: entry.ValueType,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 func (c *Catalog) EnsureMetricEntry(name string, mid MetricID, valueType byte) error {

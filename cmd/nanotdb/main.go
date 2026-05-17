@@ -78,6 +78,8 @@ func main() {
 	mux.HandleFunc("/api/v1/import/prometheus", handleImport(eng))
 	mux.HandleFunc("/api/v1/query", handleQuery(eng))
 	mux.HandleFunc("/api/v1/query_range", handleQueryRange(eng))
+	mux.HandleFunc("/api/v1/databases", handleDatabases(eng))
+	mux.HandleFunc("/api/v1/metrics", handleMetrics(eng))
 
 	srv := &http.Server{
 		Addr:              listenAddr,
@@ -292,6 +294,120 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 	}
 }
 
+func handleDatabases(eng *engine.Engine) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeVMError(w, http.StatusMethodNotAllowed, "bad_data", "method not allowed")
+			return
+		}
+
+		includeInternal := false
+		if raw := strings.TrimSpace(r.URL.Query().Get("include_internal")); raw != "" {
+			parsed, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", "invalid include_internal: must be true or false")
+				return
+			}
+			includeInternal = parsed
+		}
+
+		names := eng.GetAllDatabaseNames()
+		if !includeInternal {
+			filtered := make([]string, 0, len(names))
+			for _, name := range names {
+				if name == "internal" {
+					continue
+				}
+				filtered = append(filtered, name)
+			}
+			names = filtered
+		}
+
+		writeJSON(w, http.StatusOK, vmResponse{
+			Status: "success",
+			Data: map[string]interface{}{
+				"resultType": "databases",
+				"result":     names,
+			},
+		})
+	}
+}
+
+func handleMetrics(eng *engine.Engine) http.HandlerFunc {
+	type metricDetails struct {
+		Name string `json:"name"`
+		ID   uint16 `json:"id"`
+		Type string `json:"type"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeVMError(w, http.StatusMethodNotAllowed, "bad_data", "method not allowed")
+			return
+		}
+
+		database := strings.TrimSpace(r.URL.Query().Get("db"))
+		if database == "" {
+			writeVMError(w, http.StatusBadRequest, "bad_data", "missing db parameter")
+			return
+		}
+
+		details := false
+		if raw := strings.TrimSpace(r.URL.Query().Get("details")); raw != "" {
+			parsed, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", "invalid details: must be true or false")
+				return
+			}
+			details = parsed
+		}
+
+		metrics, err := eng.ListMetrics(database)
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "database not found: ") {
+				writeVMError(w, http.StatusNotFound, "not_found", err.Error())
+				return
+			}
+			writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+			return
+		}
+
+		if !details {
+			names := make([]string, 0, len(metrics))
+			for _, m := range metrics {
+				names = append(names, m.Name)
+			}
+			writeJSON(w, http.StatusOK, vmResponse{
+				Status: "success",
+				Data: map[string]interface{}{
+					"resultType": "metrics",
+					"db":         database,
+					"result":     names,
+				},
+			})
+			return
+		}
+
+		items := make([]metricDetails, 0, len(metrics))
+		for _, m := range metrics {
+			items = append(items, metricDetails{
+				Name: m.Name,
+				ID:   uint16(m.MetricID),
+				Type: metricTypeName(m.ValueType),
+			})
+		}
+
+		writeJSON(w, http.StatusOK, vmResponse{
+			Status: "success",
+			Data: map[string]interface{}{
+				"resultType": "metrics",
+				"db":         database,
+				"result":     items,
+			},
+		})
+	}
+}
+
 func importLines(eng *engine.Engine, source io.Reader) (int, error) {
 	s := bufio.NewScanner(source)
 	s.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -383,6 +499,16 @@ func sampleValueString(s engine.Sample) string {
 		return strconv.FormatInt(int64(s.Int32), 10)
 	}
 	return strconv.FormatFloat(float64(s.Float32), 'f', -1, 32)
+}
+
+func metricTypeName(vt byte) string {
+	if vt == engine.Int32Sample {
+		return "int32"
+	}
+	if vt == engine.Float32Sample {
+		return "float32"
+	}
+	return "unknown"
 }
 
 func toUnixSeconds(ts engine.Timestamp) float64 {

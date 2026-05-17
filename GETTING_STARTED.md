@@ -6,6 +6,33 @@ A beginner-friendly guide to installing, running, and using NanoDB. For technica
 
 ## Installation
 
+### Option A: Download Prebuilt Binaries (Fastest)
+
+If you do not want to compile from source, download the latest binaries from
+[GitHub Releases](https://github.com/aymanhs/nanotdb/releases/latest).
+
+Pick the files that match your device:
+
+- Raspberry Pi 0/1 (older boards): `nanotdb-linux-armv6-rpi0-rpi1`, `nanocli-linux-armv6-rpi0-rpi1`
+- Raspberry Pi 2/3/4 with 32-bit OS: `nanotdb-linux-armv7-rpi3-rpi4`, `nanocli-linux-armv7-rpi3-rpi4`
+- Raspberry Pi with 64-bit OS: `nanotdb-linux-arm64`, `nanocli-linux-arm64`
+- Linux PC/server (x86_64): `nanotdb-linux-amd64`, `nanocli-linux-amd64`
+- macOS Intel: `nanotdb-darwin-amd64`, `nanocli-darwin-amd64`
+- macOS Apple Silicon: `nanotdb-darwin-arm64`, `nanocli-darwin-arm64`
+- Windows x64: `nanotdb-windows-amd64.exe`, `nanocli-windows-amd64.exe`
+
+Make binaries executable on Linux/macOS:
+
+```bash
+chmod +x nanotdb-* nanocli-*
+```
+
+Then run them directly from the download directory or move them into your `$PATH`.
+
+---
+
+### Option B: Build from Source
+
 ### Prerequisites
 
 - **Go** (version 1.20 or later) — [Download here](https://golang.org/dl/)
@@ -145,6 +172,85 @@ Returns data in JSON format.
 curl "http://localhost:8428/api/v1/query_range?query=sensors/room.temp&start=2024-05-01T00:00:00Z&end=2024-05-02T00:00:00Z&step=60s"
 ```
 
+### 3. Discover databases and metrics
+
+List user databases:
+
+```bash
+curl "http://localhost:8428/api/v1/databases"
+```
+
+Example response:
+
+```json
+{
+    "status": "success",
+    "data": {
+        "resultType": "databases",
+        "result": ["home_sensors", "weather"]
+    }
+}
+```
+
+Include the internal database too:
+
+```bash
+curl "http://localhost:8428/api/v1/databases?include_internal=true"
+```
+
+Example response:
+
+```json
+{
+    "status": "success",
+    "data": {
+        "resultType": "databases",
+        "result": ["home_sensors", "internal", "weather"]
+    }
+}
+```
+
+List metrics in one database:
+
+```bash
+curl "http://localhost:8428/api/v1/metrics?db=sensors"
+```
+
+Example response:
+
+```json
+{
+    "status": "success",
+    "data": {
+        "resultType": "metrics",
+        "db": "sensors",
+        "result": ["room.humidity", "room.temp"]
+    }
+}
+```
+
+List metrics with metadata (metric id and type):
+
+```bash
+curl "http://localhost:8428/api/v1/metrics?db=sensors&details=true"
+```
+
+Example response:
+
+```json
+{
+    "status": "success",
+    "data": {
+        "resultType": "metrics",
+        "db": "sensors",
+        "result": [
+            {"name": "room.humidity", "id": 1, "type": "float32"},
+            {"name": "room.temp", "id": 2, "type": "float32"}
+        ]
+    }
+}
+```
+
 ---
 
 ## Python Examples
@@ -170,7 +276,7 @@ def push_data(database, metric, value, timestamp_ns=None):
         data=line
     )
     
-    if response.status_code == 204:
+    if response.status_code == 200:
         print(f"✓ Pushed: {line}")
     else:
         print(f"✗ Error: {response.status_code} - {response.text}")
@@ -209,7 +315,7 @@ def push_sensor_reading(db_name, metric_name, value):
             data=line,
             timeout=5
         )
-        if response.status_code == 204:
+        if response.status_code == 200:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ {metric_name}: {value}")
             return True
         else:
