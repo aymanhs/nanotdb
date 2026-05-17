@@ -263,9 +263,11 @@ Choose a larger TSDB when you need:
 
 ---
 
-## Configuration (`engine.toml`)
+## Configuration
 
-Created automatically at `<root>/engine.toml` on first start. Key settings:
+### Server Config (`engine.toml`)
+
+Created automatically at `<root>/engine.toml` on `--init`. Key settings:
 
 | Key | Default | Effect |
 |---|---|---|
@@ -318,6 +320,94 @@ Level guidance:
 Per-database settings (retention, partitioning, WAL skip window, page flush thresholds, rollups) live in
 `<db>/manifest.toml` and default values can be set in `engine.toml` under
 `[manifest_defaults]`.
+
+### Dashboard Config (`dashboard.json`)
+
+Created automatically at `<root>/dashboard.json` on `--init`. Example:
+
+```json
+{
+  "title": "NanoTDB Dashboard",
+  "default_db": "metrics",
+  "groups": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "widgets": ["system_snapshot", "load_history", "storage_snapshot"]
+    },
+    {
+      "id": "temperatures",
+      "label": "Temperatures",
+      "widgets": ["temperature_snapshot", "temperature_history"]
+    }
+  ],
+  "widgets": {
+    "system_snapshot": {
+      "type": "numbers",
+      "title": "System Snapshot",
+      "refresh_sec": 10,
+      "decimals": 2,
+      "series": [
+        { "label": "Load 1m", "metric": "sys.load1" },
+        { "label": "Load 5m", "metric": "sys.load5" },
+        { "label": "Mem Avail KB", "metric": "mem.available" },
+        { "label": "CPU kHz", "metric": "cpu.freq_khz" },
+        { "label": "CPU Temp mC", "metric": "temp.cpu" }
+      ]
+    },
+    "load_history": {
+      "type": "line_chart",
+      "title": "Load Average",
+      "refresh_sec": 15,
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [
+        { "label": "Load 1m", "metric": "sys.load1" },
+        { "label": "Load 5m", "metric": "sys.load5" },
+        { "label": "Load 15m", "metric": "sys.load15" }
+      ]
+    },
+    "storage_snapshot": {
+      "type": "numbers",
+      "title": "Storage Snapshot",
+      "refresh_sec": 15,
+      "decimals": 2,
+      "series": [
+        { "label": "Root Used %", "metric": "diskfs.root.used_pct" },
+        { "label": "Root Avail B", "metric": "diskfs.root.bytes_avail" },
+        { "label": "SD Write ms", "metric": "disk.sd_write_probe_ms" }
+      ]
+    },
+    "temperature_snapshot": {
+      "type": "numbers",
+      "title": "Temperatures",
+      "refresh_sec": 15,
+      "decimals": 0,
+      "series": [
+        { "label": "CPU", "metric": "temp.cpu" },
+        { "label": "Office Dry", "metric": "temp.office_dry.mdeg" },
+        { "label": "Office Wet", "metric": "temp.office_wet.mdeg" },
+        { "label": "Outdoor", "metric": "temp.out_dry.mdeg" }
+      ]
+    },
+    "temperature_history": {
+      "type": "line_chart",
+      "title": "Temperature History",
+      "refresh_sec": 30,
+      "lookback": "12h",
+      "interval": "2m",
+      "series": [
+        { "label": "CPU", "metric": "temp.cpu" },
+        { "label": "Office Dry", "metric": "temp.office_dry.mdeg" },
+        { "label": "Office Wet", "metric": "temp.office_wet.mdeg" },
+        { "label": "Outdoor", "metric": "temp.out_dry.mdeg" }
+      ]
+    }
+  }
+}
+```
+
+Edit this file to customize your dashboard layout. The default sample is tuned to the metric names emitted by `drip` in [cmd/drip/drip.toml](cmd/drip/drip.toml).
 
 Partition options in `[retention]`:
 - `partition = "day"` (default): `data-YYYY-MM-DD.dat`
@@ -408,8 +498,21 @@ Terminal output uses aligned tables. Verbose DAT output shows per-page size/comp
 
 ```
 nanotdb --config <path>      start server using given engine.toml
-nanotdb --init --config <path>   write default engine.toml and exit
+nanotdb --init --config <path>   write default engine.toml and sample dashboard.json and exit
 ```
+
+The `--init` command creates:
+- `engine.toml` — server configuration (listen address, WAL, durability profile, database defaults, web UI settings)
+- `dashboard.json` — sample user dashboard (editable layout with widget definitions)
+
+Built-in dashboard is available in a browser at:
+
+- `/`
+- `/dashboard`
+
+Ad-hoc metric explorer (manual picker) is available at:
+
+- `/adhoc`
 
 Exposes a small HTTP API compatible with the VictoriaMetrics instant/range query
 wire format (`/api/v1/import`, `/api/v1/import/prometheus`, `/api/v1/query`, `/api/v1/query_range`).
@@ -421,12 +524,23 @@ API quick reference:
 - `POST /api/v1/import/prometheus` - Prometheus-compatible import endpoint
 - `GET /api/v1/query` - instant query (latest point)
 - `GET /api/v1/query_range` - range query
+- `GET /api/dashboard-config` - user dashboard JSON config served to browser
 
 Also exposes discovery endpoints:
 
 - `GET /api/v1/databases` (use `?include_internal=true` to include the internal DB)
 - `GET /api/v1/metrics?db=<name>` (use `&details=true` for id/type metadata)
 - `POST /api/v1/rollup/backfill` (optional JSON body: `{"source_db":"name"}` or `{"source_dbs":[...]}`)
+  - Optional rollup lineage (opt-in): `&lineage=rollups&max_hops=2` (`max_hops` range: `1..5`)
+
+Web dashboard config is controlled via `[web]` section in `engine.toml`:
+
+- `enabled` — enable/disable dashboard handlers
+- `base_path` — dashboard route prefix (default `/dashboard`)
+- `adhoc_path` — ad-hoc explorer route prefix (default `/adhoc`)
+- `title` — browser page title
+- `refresh_seconds` — auto-refresh cadence in seconds
+- `dashboard_config` — JSON file path for user-defined dashboard config (relative to engine root when not absolute)
 
 ### `nanocli` — offline CLI tool
 
@@ -472,6 +586,33 @@ Generated artifacts are placed in `<root-dir>/work` for easy discovery:
 - `scenario_summary.json` (duration, rates, counts, per-metric stats)
 - `known_gaps.csv` (deterministic missing windows for `temp.gap_probeXX` metrics)
 - `SCENARIO.md` (quick human-readable summary)
+
+### Live sample server (with continuous synthetic ingest)
+
+To run NanoTDB against the rollup-enabled fixture and keep appending fresh points every 10 seconds:
+
+```bash
+./scripts/run_sample_rollup_server.sh
+```
+
+Defaults:
+- root dir: `test-data/full-cycle-check`
+- config: `test-data/full-cycle-check/engine.toml`
+- dashboard config: `test-data/full-cycle-check/dashboard.json`
+- ingest interval: `10` seconds
+- base URL: `http://127.0.0.1:8428`
+- metrics per tick: `10` (`temp.synthetic00` .. `temp.synthetic09`)
+- source DB: `source`
+
+Optional arguments:
+
+```bash
+./scripts/run_sample_rollup_server.sh <root-dir> <config-path> <interval-seconds> <base-url> <metric-count> <source-db>
+```
+
+This keeps the server in the foreground and prints an ingest tick log. Stop with `Ctrl+C`.
+
+The sample dashboard JSON is file-backed and editable. Copy `test-data/full-cycle-check/dashboard.json` into your own data root and change it to match your metrics and preferred layout.
 
 ---
 

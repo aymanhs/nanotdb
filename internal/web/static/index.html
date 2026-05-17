@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} - AdHoc</title>
+  <link rel="stylesheet" href="/assets/common.css" />
+  <link rel="stylesheet" href="{{ .AssetBase }}/styles.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <nav class="top-nav" aria-label="Navigation">
+        <a href="/">Home</a>
+        <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .AdhocPath }}">AdHoc</a>
+      </nav>
+      <h1>{{ .Title }}</h1>
+      <p class="sub">Lightweight live view for NanoTDB metrics</p>
+    </header>
+
+    <section class="controls panel">
+      <label>
+        Database
+        <select id="dbSelect"></select>
+      </label>
+      <label>
+        Metric Picker
+        <div class="combo-row">
+          <input id="metricInput" list="metricsOptions" placeholder="Type metric name" />
+          <datalist id="metricsOptions"></datalist>
+          <button type="button" id="addMetricBtn" class="secondary-btn">Add</button>
+        </div>
+      </label>
+      <label>
+        Window
+        <select id="windowSelect">
+          <option value="900">15m</option>
+          <option value="3600" selected>1h</option>
+          <option value="21600">6h</option>
+          <option value="86400">24h</option>
+        </select>
+      </label>
+      <label>
+        Step
+        <select id="stepSelect">
+          <option value="10s">10s</option>
+          <option value="30s" selected>30s</option>
+          <option value="1m">1m</option>
+          <option value="5m">5m</option>
+        </select>
+      </label>
+      <button id="refreshBtn">Refresh Now</button>
+      <span id="status" aria-live="polite"></span>
+
+      <div class="selected-row">
+        <span class="selected-label">Selected Metrics</span>
+        <div id="selectedMetrics" class="selected-metrics" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section class="panel metrics-panel">
+      <header class="section-head">
+        <h2>Last Values</h2>
+        <p>Latest sample per selected metric</p>
+      </header>
+      <div id="cards" class="cards"></div>
+    </section>
+
+    <section class="chart-wrap panel">
+      <header class="section-head">
+        <h2>Live Chart</h2>
+        <p>Range view over selected window</p>
+      </header>
+      <canvas id="chart" width="1200" height="420"></canvas>
+    </section>
+  </main>
+
+  <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>
+  <script src="{{ .AssetBase }}/app.js"></script>
+</body>
+</html>

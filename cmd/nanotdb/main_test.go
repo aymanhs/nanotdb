@@ -27,6 +27,19 @@ func TestLoadRuntimeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadRuntimeConfig failed: %v", err)
 	}
+	listen := runtimeCfg.EngineConfig.Engine.Listen
+	dataDir := runtimeCfg.DataDir
+	walMaxSeg := runtimeCfg.EngineConfig.WAL.MaxSegmentSize
+	webCfg := runtimeCfg.WebConfig
+	if listen != ":9999" {
+		t.Fatalf("listen mismatch: got=%q want=%q", listen, ":9999")
+	}
+	if dataDir != root {
+		t.Fatalf("dataDir mismatch: got=%q want=%q", dataDir, root)
+	}
+	if walMaxSeg != 12345 {
+		t.Fatalf("walMaxSeg mismatch: got=%d want=%d", walMaxSeg, 12345)
+	}
 	if runtimeCfg.EngineConfig.Engine.Listen != ":9999" {
 		t.Fatalf("listen mismatch: got=%q want=%q", runtimeCfg.EngineConfig.Engine.Listen, ":9999")
 	}
@@ -35,6 +48,12 @@ func TestLoadRuntimeConfig(t *testing.T) {
 	}
 	if runtimeCfg.EngineConfig.WAL.MaxSegmentSize != 12345 {
 		t.Fatalf("walMaxSeg mismatch: got=%d want=%d", runtimeCfg.EngineConfig.WAL.MaxSegmentSize, 12345)
+	}
+	if !webCfg.Enabled {
+		t.Fatalf("expected web enabled by default")
+	}
+	if webCfg.BasePath != "/dashboard" {
+		t.Fatalf("web base path mismatch: got=%q want=%q", webCfg.BasePath, "/dashboard")
 	}
 }
 
@@ -49,11 +68,56 @@ func TestLoadRuntimeConfig_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadRuntimeConfig failed: %v", err)
 	}
+	listen := runtimeCfg.EngineConfig.Engine.Listen
+	walMaxSeg := runtimeCfg.EngineConfig.WAL.MaxSegmentSize
+	webCfg := runtimeCfg.WebConfig
+	if listen != ":8428" {
+		t.Fatalf("listen default mismatch: got=%q want=%q", listen, ":8428")
+	}
+	if walMaxSeg != 64*1024*1024 {
+		t.Fatalf("wal max default mismatch: got=%d want=%d", walMaxSeg, 64*1024*1024)
+	}
 	if runtimeCfg.EngineConfig.Engine.Listen != ":8428" {
 		t.Fatalf("listen default mismatch: got=%q want=%q", runtimeCfg.EngineConfig.Engine.Listen, ":8428")
 	}
 	if runtimeCfg.EngineConfig.WAL.MaxSegmentSize != 64*1024*1024 {
 		t.Fatalf("wal max default mismatch: got=%d want=%d", runtimeCfg.EngineConfig.WAL.MaxSegmentSize, 64*1024*1024)
+	}
+	if webCfg.RefreshSeconds <= 0 {
+		t.Fatalf("expected positive default web refresh seconds, got=%d", webCfg.RefreshSeconds)
+	}
+}
+
+func TestLoadRuntimeConfig_WebOverrides(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "engine.toml")
+	content := []byte("[engine]\nlisten = \":9998\"\n[wal]\nmax_segment_size = 222\n[web]\nenabled = false\nbase_path = \"/dash\"\nadhoc_path = \"/quick\"\ntitle = \"My Dash\"\nrefresh_seconds = 7\ndashboard_config = \"custom/dashboard.json\"\n")
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	runtimeCfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig failed: %v", err)
+	}
+	webCfg := runtimeCfg.WebConfig
+	if webCfg.Enabled {
+		t.Fatalf("expected web disabled override")
+	}
+	if webCfg.BasePath != "/dash" {
+		t.Fatalf("web base path override mismatch: got=%q want=/dash", webCfg.BasePath)
+	}
+	if webCfg.AdhocPath != "/quick" {
+		t.Fatalf("web adhoc path override mismatch: got=%q want=/quick", webCfg.AdhocPath)
+	}
+	if webCfg.Title != "My Dash" {
+		t.Fatalf("web title override mismatch: got=%q want=%q", webCfg.Title, "My Dash")
+	}
+	if webCfg.RefreshSeconds != 7 {
+		t.Fatalf("web refresh override mismatch: got=%d want=7", webCfg.RefreshSeconds)
+	}
+	if webCfg.DashboardFile != "custom/dashboard.json" {
+		t.Fatalf("web dashboard config override mismatch: got=%q want=%q", webCfg.DashboardFile, "custom/dashboard.json")
 	}
 }
 
@@ -295,7 +359,7 @@ source_metric = "temp.office"
 interval = "1h"
 aggregates = ["sum"]
 destination_db = "prod_rollup_1h"
-destination_metric_prefix = "temp.office"
+	destination_metric_prefix = "temp.office"
 `
 	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte(manifest), 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
@@ -351,5 +415,140 @@ destination_metric_prefix = "temp.office"
 		t.Fatalf("QueryLast rollup failed: %v", err)
 	} else if !found {
 		t.Fatalf("expected rollup sample after handler backfill")
+	}
+}
+
+func TestHandleMetrics_LineageValidationErrors(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("prod/alpha 1"); err != nil {
+		t.Fatalf("AddLine failed: %v", err)
+	}
+
+	lineageWithoutDetailsReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics?db=prod&lineage=rollups", nil)
+	lineageWithoutDetailsRec := httptest.NewRecorder()
+	handleMetrics(eng)(lineageWithoutDetailsRec, lineageWithoutDetailsReq)
+	if lineageWithoutDetailsRec.Code != http.StatusBadRequest {
+		t.Fatalf("lineage/details status mismatch: got=%d want=%d", lineageWithoutDetailsRec.Code, http.StatusBadRequest)
+	}
+
+	invalidMaxHopsReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics?db=prod&details=true&lineage=rollups&max_hops=9", nil)
+	invalidMaxHopsRec := httptest.NewRecorder()
+	handleMetrics(eng)(invalidMaxHopsRec, invalidMaxHopsReq)
+	if invalidMaxHopsRec.Code != http.StatusBadRequest {
+		t.Fatalf("max_hops status mismatch: got=%d want=%d", invalidMaxHopsRec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleMetrics_LineageMultiHop(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sensors"), 0755); err != nil {
+		t.Fatalf("MkdirAll sensors failed: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "sensors_rollup_1h"), 0755); err != nil {
+		t.Fatalf("MkdirAll sensors_rollup_1h failed: %v", err)
+	}
+
+	sensorsManifest := "[rollups]\nenabled = true\n[[rollups.jobs]]\nid = \"temp_1h\"\nsource_metric = \"temp.out_dry\"\ninterval = \"1h\"\naggregates = [\"sum\"]\ndestination_db = \"sensors_rollup_1h\"\ndestination_metric_prefix = \"temp.out_dry\"\n"
+	if err := os.WriteFile(filepath.Join(root, "sensors", "manifest.toml"), []byte(sensorsManifest), 0644); err != nil {
+		t.Fatalf("WriteFile sensors manifest failed: %v", err)
+	}
+
+	rollupManifest := "[rollups]\nenabled = true\n[[rollups.jobs]]\nid = \"temp_1d_from_1h\"\nsource_metric = \"temp.out_dry.sum\"\ninterval = \"24h\"\naggregates = [\"avg\"]\ndestination_db = \"sensors_rollup_1d\"\ndestination_metric_prefix = \"temp.out_dry\"\n"
+	if err := os.WriteFile(filepath.Join(root, "sensors_rollup_1h", "manifest.toml"), []byte(rollupManifest), 0644); err != nil {
+		t.Fatalf("WriteFile rollup manifest failed: %v", err)
+	}
+
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("sensors/temp.out_dry 21.5 1715000000000000000"); err != nil {
+		t.Fatalf("AddLine source failed: %v", err)
+	}
+	if err := eng.AddLine("sensors_rollup_1h/temp.out_dry.sum 21.5 1715000000000000000"); err != nil {
+		t.Fatalf("AddLine hop1 failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics?db=sensors&details=true&lineage=rollups&max_hops=2", nil)
+	rec := httptest.NewRecorder()
+	handleMetrics(eng)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=%d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Name    string `json:"name"`
+				Rollups *struct {
+					Downstream []struct {
+						Hop       int    `json:"hop"`
+						JobID     string `json:"job_id"`
+						DB        string `json:"db"`
+						Metric    string `json:"metric"`
+						Aggregate string `json:"aggregate"`
+					} `json:"downstream"`
+					MaxHops int `json:"max_hops"`
+				} `json:"rollups"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+
+	if resp.Status != "success" {
+		t.Fatalf("status payload mismatch: got=%q want=success", resp.Status)
+	}
+	if len(resp.Data.Result) == 0 {
+		t.Fatalf("expected metrics in response")
+	}
+
+	targetIdx := -1
+	for i := range resp.Data.Result {
+		if resp.Data.Result[i].Name == "temp.out_dry" {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		t.Fatalf("expected temp.out_dry metric in response")
+	}
+	target := resp.Data.Result[targetIdx]
+	if target.Rollups == nil {
+		t.Fatalf("expected rollups in details response")
+	}
+	if target.Rollups.MaxHops != 2 {
+		t.Fatalf("max_hops mismatch: got=%d want=2", target.Rollups.MaxHops)
+	}
+	if len(target.Rollups.Downstream) < 2 {
+		t.Fatalf("expected at least two downstream rollup entries, got=%d", len(target.Rollups.Downstream))
+	}
+
+	var foundHop1 bool
+	var foundHop2 bool
+	for _, d := range target.Rollups.Downstream {
+		if d.Hop == 1 && d.DB == "sensors_rollup_1h" && d.Metric == "temp.out_dry.sum" && d.JobID == "temp_1h" && d.Aggregate == "sum" {
+			foundHop1 = true
+		}
+		if d.Hop == 2 && d.DB == "sensors_rollup_1d" && d.Metric == "temp.out_dry.avg" && d.JobID == "temp_1d_from_1h" && d.Aggregate == "avg" {
+			foundHop2 = true
+		}
+	}
+	if !foundHop1 {
+		t.Fatalf("missing hop=1 downstream entry")
+	}
+	if !foundHop2 {
+		t.Fatalf("missing hop=2 downstream entry")
 	}
 }

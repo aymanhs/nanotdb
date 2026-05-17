@@ -561,6 +561,147 @@ func (e *Engine) ListMetrics(database string) ([]MetricInfo, error) {
 	return db.catalog.ListMetrics(), nil
 }
 
+type MetricRollupDownstream struct {
+	Hop       int
+	JobID     string
+	Interval  string
+	Aggregate string
+	Database  string
+	Metric    string
+}
+
+// GetMetricRollupDownstream returns bounded downstream rollup lineage for one metric.
+// Lineage is derived from configured rollup jobs in loaded database manifests.
+func (e *Engine) GetMetricRollupDownstream(database, metric string, maxHops int) ([]MetricRollupDownstream, bool, error) {
+	database = strings.TrimSpace(database)
+	metric = strings.TrimSpace(metric)
+	if database == "" {
+		return nil, false, fmt.Errorf("database cannot be empty")
+	}
+	if metric == "" {
+		return nil, false, fmt.Errorf("metric cannot be empty")
+	}
+	if maxHops < 1 {
+		return nil, false, fmt.Errorf("max_hops must be >= 1")
+	}
+
+	type lineageNode struct {
+		db     string
+		metric string
+	}
+	type queueItem struct {
+		node lineageNode
+		hop  int
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if _, ok := e.dbs[database]; !ok {
+		return nil, false, fmt.Errorf("database not found: %s", database)
+	}
+
+	visited := map[lineageNode]struct{}{{db: database, metric: metric}: {}}
+	q := []queueItem{{node: lineageNode{db: database, metric: metric}, hop: 0}}
+	steps := make([]MetricRollupDownstream, 0)
+	stepSeen := make(map[string]struct{})
+	truncated := false
+
+	for len(q) > 0 {
+		cur := q[0]
+		q = q[1:]
+
+		if cur.hop >= maxHops {
+			rt, ok := e.runtimes[cur.node.db]
+			if ok && rt.info.Rollups.Enabled {
+				for _, job := range rt.info.Rollups.Jobs {
+					if strings.TrimSpace(job.SourceMetric) != cur.node.metric {
+						continue
+					}
+					for _, aggRaw := range job.Aggregates {
+						if _, ok := getRollupAggregator(strings.TrimSpace(aggRaw)); ok {
+							truncated = true
+							break
+						}
+					}
+					if truncated {
+						break
+					}
+				}
+			}
+			continue
+		}
+
+		rt, ok := e.runtimes[cur.node.db]
+		if !ok || !rt.info.Rollups.Enabled || len(rt.info.Rollups.Jobs) == 0 {
+			continue
+		}
+
+		for _, job := range rt.info.Rollups.Jobs {
+			if strings.TrimSpace(job.SourceMetric) != cur.node.metric {
+				continue
+			}
+
+			nextHop := cur.hop + 1
+			if nextHop > maxHops {
+				truncated = true
+				continue
+			}
+
+			for _, aggRaw := range job.Aggregates {
+				agg := strings.TrimSpace(aggRaw)
+				aggFn, ok := getRollupAggregator(agg)
+				if !ok {
+					continue
+				}
+
+				destMetric := rollupDestinationMetricName(job, aggFn.Name())
+				destDB := strings.TrimSpace(job.DestinationDB)
+				if destDB == "" || destMetric == "" {
+					continue
+				}
+
+				step := MetricRollupDownstream{
+					Hop:       nextHop,
+					JobID:     strings.TrimSpace(job.ID),
+					Interval:  strings.TrimSpace(job.Interval),
+					Aggregate: aggFn.Name(),
+					Database:  destDB,
+					Metric:    destMetric,
+				}
+				stepKey := fmt.Sprintf("%d|%s|%s|%s|%s|%s", step.Hop, step.JobID, step.Aggregate, step.Database, step.Metric, step.Interval)
+				if _, ok := stepSeen[stepKey]; !ok {
+					stepSeen[stepKey] = struct{}{}
+					steps = append(steps, step)
+				}
+
+				nextNode := lineageNode{db: destDB, metric: destMetric}
+				if _, seen := visited[nextNode]; !seen {
+					visited[nextNode] = struct{}{}
+					q = append(q, queueItem{node: nextNode, hop: nextHop})
+				}
+			}
+		}
+	}
+
+	sort.Slice(steps, func(i, j int) bool {
+		if steps[i].Hop != steps[j].Hop {
+			return steps[i].Hop < steps[j].Hop
+		}
+		if steps[i].Database != steps[j].Database {
+			return steps[i].Database < steps[j].Database
+		}
+		if steps[i].Metric != steps[j].Metric {
+			return steps[i].Metric < steps[j].Metric
+		}
+		if steps[i].Aggregate != steps[j].Aggregate {
+			return steps[i].Aggregate < steps[j].Aggregate
+		}
+		return steps[i].JobID < steps[j].JobID
+	})
+
+	return steps, truncated, nil
+}
+
 // AddLine ingests one sample in line-protocol format: "DB/metric value [ts]"
 // where value is an integer or float literal and ts is optional.
 // ts can be Unix nanoseconds or a human-readable timestamp accepted by ParseTimestamp.

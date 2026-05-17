@@ -595,10 +595,6 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		return err
 	}
 
-	prefix := strings.TrimSpace(job.DestinationMetricPrefix)
-	if prefix == "" {
-		prefix = job.SourceMetric
-	}
 	for _, agg := range job.Aggregates {
 		aggFn, ok := getRollupAggregator(agg)
 		if !ok {
@@ -608,11 +604,23 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		if err != nil {
 			return err
 		}
-		if err := e.insertRollupSample(rollupDB.Name, prefix+"."+aggFn.Name(), periodStart, value); err != nil {
+		if err := e.insertRollupSample(rollupDB.Name, rollupDestinationMetricName(job, aggFn.Name()), periodStart, value); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func rollupDestinationMetricName(job DBManifestRollupJob, aggregate string) string {
+	prefix := strings.TrimSpace(job.DestinationMetricPrefix)
+	if prefix == "" {
+		prefix = strings.TrimSpace(job.SourceMetric)
+	}
+	aggregate = strings.TrimSpace(aggregate)
+	if prefix == "" || aggregate == "" {
+		return ""
+	}
+	return prefix + "." + aggregate
 }
 
 func (e *Engine) insertRollupSample(dbName, metricName string, ts Timestamp, val float32) error {

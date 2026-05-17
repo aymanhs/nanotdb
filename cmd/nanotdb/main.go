@@ -18,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/web"
 )
 
 type runtimeConfig struct {
@@ -26,6 +28,7 @@ type runtimeConfig struct {
 	EngineConfig  engine.EngineConfig
 	StatsInterval time.Duration
 	DBDefaults    engine.DBInfo
+	WebConfig     web.Config
 }
 
 type vmResponse struct {
@@ -100,6 +103,7 @@ func main() {
 	mux.HandleFunc("/api/v1/query_range", handleQueryRange(eng))
 	mux.HandleFunc("/api/v1/databases", handleDatabases(eng))
 	mux.HandleFunc("/api/v1/metrics", handleMetrics(eng))
+	web.Register(mux, runtimeCfg.WebConfig, runtimeCfg.DataDir)
 
 	srv := &http.Server{
 		Addr:              runtimeCfg.EngineConfig.Engine.Listen,
@@ -140,7 +144,19 @@ func initConfigFile(configPath string) error {
 	if err != nil {
 		return err
 	}
-	return eng.Close()
+	if err := eng.Close(); err != nil {
+		return err
+	}
+
+	// Create a sample dashboard.json if it doesn't already exist
+	dashboardPath := filepath.Join(dataDir, "dashboard.json")
+	if _, err := os.Stat(dashboardPath); os.IsNotExist(err) {
+		if err := os.WriteFile(dashboardPath, append(web.DefaultDashboardConfig(), '\n'), 0o644); err != nil {
+			return fmt.Errorf("write dashboard config: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
@@ -152,7 +168,43 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	return runtimeConfig{DataDir: dataDir, EngineConfig: cfg, StatsInterval: statsInterval, DBDefaults: dbDefaults}, nil
+	var webTOML struct {
+		Web struct {
+			Enabled        *bool  `toml:"enabled"`
+			BasePath       string `toml:"base_path"`
+			AdhocPath      string `toml:"adhoc_path"`
+			Title          string `toml:"title"`
+			RefreshSeconds int    `toml:"refresh_seconds"`
+			DashboardFile  string `toml:"dashboard_config"`
+		} `toml:"web"`
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	if _, err := toml.Decode(string(raw), &webTOML); err != nil {
+		return runtimeConfig{}, err
+	}
+	webCfg := web.DefaultConfig()
+	if webTOML.Web.Enabled != nil {
+		webCfg.Enabled = *webTOML.Web.Enabled
+	}
+	if v := strings.TrimSpace(webTOML.Web.BasePath); v != "" {
+		webCfg.BasePath = v
+	}
+	if v := strings.TrimSpace(webTOML.Web.AdhocPath); v != "" {
+		webCfg.AdhocPath = v
+	}
+	if v := strings.TrimSpace(webTOML.Web.Title); v != "" {
+		webCfg.Title = v
+	}
+	if webTOML.Web.RefreshSeconds > 0 {
+		webCfg.RefreshSeconds = webTOML.Web.RefreshSeconds
+	}
+	if v := strings.TrimSpace(webTOML.Web.DashboardFile); v != "" {
+		webCfg.DashboardFile = v
+	}
+	return runtimeConfig{DataDir: dataDir, EngineConfig: cfg, StatsInterval: statsInterval, DBDefaults: dbDefaults, WebConfig: webCfg}, nil
 }
 
 type statusRecorder struct {
@@ -416,10 +468,24 @@ func handleDatabases(eng *engine.Engine) http.HandlerFunc {
 }
 
 func handleMetrics(eng *engine.Engine) http.HandlerFunc {
+	type metricRollupDownstream struct {
+		Hop       int    `json:"hop"`
+		JobID     string `json:"job_id"`
+		Interval  string `json:"interval"`
+		Aggregate string `json:"aggregate"`
+		DB        string `json:"db"`
+		Metric    string `json:"metric"`
+	}
+	type metricRollups struct {
+		Downstream []metricRollupDownstream `json:"downstream"`
+		Truncated  bool                     `json:"truncated"`
+		MaxHops    int                      `json:"max_hops"`
+	}
 	type metricDetails struct {
-		Name string `json:"name"`
-		ID   uint16 `json:"id"`
-		Type string `json:"type"`
+		Name    string         `json:"name"`
+		ID      uint16         `json:"id"`
+		Type    string         `json:"type"`
+		Rollups *metricRollups `json:"rollups,omitempty"`
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -442,6 +508,30 @@ func handleMetrics(eng *engine.Engine) http.HandlerFunc {
 				return
 			}
 			details = parsed
+		}
+
+		lineageMode := strings.TrimSpace(r.URL.Query().Get("lineage"))
+		includeRollups := false
+		maxHops := 1
+		if lineageMode != "" {
+			if !details {
+				writeVMError(w, http.StatusBadRequest, "bad_data", "lineage requires details=true")
+				return
+			}
+			if lineageMode != "rollups" {
+				writeVMError(w, http.StatusBadRequest, "bad_data", "invalid lineage: supported values are rollups")
+				return
+			}
+			includeRollups = true
+
+			if raw := strings.TrimSpace(r.URL.Query().Get("max_hops")); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil || parsed < 1 || parsed > 5 {
+					writeVMError(w, http.StatusBadRequest, "bad_data", "invalid max_hops: must be in range [1,5]")
+					return
+				}
+				maxHops = parsed
+			}
 		}
 
 		metrics, err := eng.ListMetrics(database)
@@ -472,10 +562,39 @@ func handleMetrics(eng *engine.Engine) http.HandlerFunc {
 
 		items := make([]metricDetails, 0, len(metrics))
 		for _, m := range metrics {
-			items = append(items, metricDetails{
+			item := metricDetails{
 				Name: m.Name,
 				ID:   uint16(m.MetricID),
 				Type: metricTypeName(m.ValueType),
+			}
+			if includeRollups {
+				downstream, truncated, err := eng.GetMetricRollupDownstream(database, m.Name, maxHops)
+				if err != nil {
+					if strings.HasPrefix(err.Error(), "database not found: ") {
+						writeVMError(w, http.StatusNotFound, "not_found", err.Error())
+						return
+					}
+					writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+					return
+				}
+				rollupItems := make([]metricRollupDownstream, 0, len(downstream))
+				for _, d := range downstream {
+					rollupItems = append(rollupItems, metricRollupDownstream{
+						Hop:       d.Hop,
+						JobID:     d.JobID,
+						Interval:  d.Interval,
+						Aggregate: d.Aggregate,
+						DB:        d.Database,
+						Metric:    d.Metric,
+					})
+				}
+				item.Rollups = &metricRollups{Downstream: rollupItems, Truncated: truncated, MaxHops: maxHops}
+			}
+			items = append(items, metricDetails{
+				Name:    item.Name,
+				ID:      item.ID,
+				Type:    item.Type,
+				Rollups: item.Rollups,
 			})
 		}
 

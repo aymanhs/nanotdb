@@ -1,0 +1,136 @@
+{
+  "title": "NanoTDB Dashboard",
+  "default_db": "metrics",
+  "groups": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "widgets": ["system_snapshot", "load_history", "storage_snapshot"]
+    },
+    {
+      "id": "temperatures",
+      "label": "Temperatures",
+      "widgets": ["temperature_snapshot", "temperature_history"]
+    }
+  ],
+  "widgets": {
+    "system_snapshot": {
+      "type": "numbers",
+      "title": "System Snapshot",
+      "refresh_sec": 10,
+      "decimals": 2,
+      "series": [
+        {
+          "label": "Load 1m",
+          "metric": "sys.load1"
+        },
+        {
+          "label": "Load 5m",
+          "metric": "sys.load5"
+        },
+        {
+          "label": "Mem Avail KB",
+          "metric": "mem.available"
+        },
+        {
+          "label": "CPU kHz",
+          "metric": "cpu.freq_khz"
+        },
+        {
+          "label": "CPU Temp mC",
+          "metric": "temp.cpu"
+        }
+      ]
+    },
+    "load_history": {
+      "type": "line_chart",
+      "title": "Load Average",
+      "refresh_sec": 15,
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [
+        {
+          "label": "Load 1m",
+          "metric": "sys.load1"
+        },
+        {
+          "label": "Load 5m",
+          "metric": "sys.load5"
+        },
+        {
+          "label": "Load 15m",
+          "metric": "sys.load15"
+        }
+      ]
+    },
+    "storage_snapshot": {
+      "type": "numbers",
+      "title": "Storage Snapshot",
+      "refresh_sec": 15,
+      "decimals": 2,
+      "series": [
+        {
+          "label": "Root Used %",
+          "metric": "diskfs.root.used_pct"
+        },
+        {
+          "label": "Root Avail B",
+          "metric": "diskfs.root.bytes_avail"
+        },
+        {
+          "label": "SD Write ms",
+          "metric": "disk.sd_write_probe_ms"
+        }
+      ]
+    },
+    "temperature_snapshot": {
+      "type": "numbers",
+      "title": "Temperatures",
+      "refresh_sec": 15,
+      "decimals": 0,
+      "series": [
+        {
+          "label": "CPU",
+          "metric": "temp.cpu"
+        },
+        {
+          "label": "Office Dry",
+          "metric": "temp.office_dry.mdeg"
+        },
+        {
+          "label": "Office Wet",
+          "metric": "temp.office_wet.mdeg"
+        },
+        {
+          "label": "Outdoor",
+          "metric": "temp.out_dry.mdeg"
+        }
+      ]
+    },
+    "temperature_history": {
+      "type": "line_chart",
+      "title": "Temperature History",
+      "refresh_sec": 30,
+      "lookback": "12h",
+      "interval": "2m",
+      "series": [
+        {
+          "label": "CPU",
+          "metric": "temp.cpu"
+        },
+        {
+          "label": "Office Dry",
+          "metric": "temp.office_dry.mdeg"
+        },
+        {
+          "label": "Office Wet",
+          "metric": "temp.office_wet.mdeg"
+        },
+        {
+          "label": "Outdoor",
+          "metric": "temp.out_dry.mdeg"
+        }
+      ]
+    }
+  }
+}

@@ -86,7 +86,11 @@ mkdir -p ~/nanotdb-data
 ./nanotdb --init --config ~/nanotdb-data/engine.toml
 ```
 
-This creates a configuration file. You can edit it later if needed, but the defaults work fine for getting started.
+This creates two files:
+- `engine.toml` — runtime configuration for the server (listen port, WAL settings, durability profile, database defaults, web UI config).
+- `dashboard.json` — sample dashboard layout (user-defined widgets, groups, and metrics to display).
+
+You can edit both files later if needed, but the defaults work fine for getting started.
 
 ### 3. Start the server
 
@@ -115,6 +119,15 @@ level = "debug"
 At this point NanoTDB is already WAL-protecting recent samples and will replay
 that WAL on restart after a crash. For the recovery model and tuning knobs, see
 [README.md](README.md) and [docs/GLOSSARY.md](docs/GLOSSARY.md).
+
+Open the built-in dashboard in your browser:
+
+- `http://localhost:8428/`
+- `http://localhost:8428/dashboard`
+
+Open the ad-hoc metric explorer:
+
+- `http://localhost:8428/adhoc`
 
 ---
 
@@ -318,6 +331,12 @@ List metrics with metadata (metric id and type):
 curl "http://localhost:8428/api/v1/metrics?db=sensors&details=true"
 ```
 
+Include rollup lineage (downstream rollup targets):
+
+```bash
+curl "http://localhost:8428/api/v1/metrics?db=sensors&details=true&lineage=rollups&max_hops=2"
+```
+
 Example response:
 
 ```json
@@ -327,8 +346,26 @@ Example response:
         "resultType": "metrics",
         "db": "sensors",
         "result": [
-            {"name": "room.humidity", "id": 1, "type": "float32"},
-            {"name": "room.temp", "id": 2, "type": "float32"}
+            {
+                "name": "room.humidity",
+                "id": 1,
+                "type": "float32",
+                "rollups": {
+                    "downstream": [
+                        {
+                            "hop": 1,
+                            "job_id": "room_humidity_1h",
+                            "interval": "1h",
+                            "aggregate": "avg",
+                            "db": "sensors_rollup_1h",
+                            "metric": "room.humidity.avg"
+                        }
+                    ],
+                    "truncated": false,
+                    "max_hops": 2
+                }
+            },
+            {"name": "room.temp", "id": 2, "type": "float32", "rollups": {"downstream": [], "truncated": false, "max_hops": 2}}
         ]
     }
 }

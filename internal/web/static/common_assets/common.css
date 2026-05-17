@@ -1,0 +1,82 @@
+:root {
+  --bg: #1a1f2e;
+  --bg2: #0f141d;
+  --text: #e8ecf1;
+  --muted: #a8b5c5;
+  --card: #232d3d;
+  --card-2: #1f2735;
+  --border: #3a4558;
+  --accent: #2dd4a4;
+  --accent-2: #46a3ff;
+  --chart-grid: #4c5a73;
+  --chart-text: #b9c6d9;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Noto Sans", sans-serif;
+  color: var(--text);
+  background: linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+}
+
+.page {
+  width: min(100%, 1480px);
+  margin: 0 auto;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.page-header h1 {
+  margin: 0 0 6px;
+  font-size: 1.45rem;
+}
+
+.page-header .sub {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.top-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+
+.top-nav a {
+  text-decoration: none;
+  color: #c8d8ef;
+  border: 1px solid var(--border);
+  background: #1d2635;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+}
+
+.top-nav a:hover {
+  border-color: var(--accent-2);
+  color: #e8f2ff;
+}
+
+.panel {
+  background: linear-gradient(180deg, var(--card), var(--card-2));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.26);
+  position: relative;
+  overflow: hidden;
+}
+
+.panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 70%, transparent), transparent);
+}

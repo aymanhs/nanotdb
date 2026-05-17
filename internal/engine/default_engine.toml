@@ -10,6 +10,23 @@
 # Example: ":8428", "127.0.0.1:8428", "0.0.0.0:8428".
 listen = ":8428"
 
+[web]
+# Enable/disable the built-in lightweight dashboard.
+# When enabled, dashboard is served from both "/" and the configured base_path.
+enabled = true
+# Primary dashboard route prefix.
+# Example: "/dashboard" (recommended), "/ui"
+base_path = "/dashboard"
+# Ad-hoc explorer route prefix (current manual metric picker view).
+adhoc_path = "/adhoc"
+# Browser page title for the built-in dashboard.
+title = "NanoTDB Dashboard"
+# Automatic dashboard refresh period in seconds.
+refresh_seconds = 10
+# Dashboard configuration JSON file path.
+# Relative paths are resolved against the engine root data directory.
+dashboard_config = "dashboard.json"
+
 [wal]
 # Max WAL segment size in bytes.
 # Larger values reduce segment rotations and fsync work, but increase
