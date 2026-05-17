@@ -8,6 +8,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+## [1.0.1] - 2026-05-17
+
+### Added
 - GitHub Actions release workflow to build and publish multi-platform binaries.
 - Raspberry Pi release targets for old and new models:
   - `linux-armv6-rpi0-rpi1`
@@ -20,6 +25,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - README quick start now includes direct links to prebuilt release binaries.
+- Added API discovery quick reference to README.
+- Added discovery endpoint curl + JSON examples in getting-started docs.
+- Updated getting-started Python HTTP examples to match current import success status (`200`).
 
 ## [1.0.0] - 2026-05-17
 
@@ -34,5 +42,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   https://github.com/aymanhs/nanotdb/releases
 - Detailed project history: this file (`CHANGELOG.md`)
 
-[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/aymanhs/nanotdb/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.0.0
