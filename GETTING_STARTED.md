@@ -13,21 +13,24 @@ If you do not want to compile from source, download the latest binaries from
 
 Pick the files that match your device:
 
-- Raspberry Pi 0/1 (older boards): `nanotdb-linux-armv6-rpi0-rpi1`, `nanocli-linux-armv6-rpi0-rpi1`
-- Raspberry Pi 2/3/4 with 32-bit OS: `nanotdb-linux-armv7-rpi3-rpi4`, `nanocli-linux-armv7-rpi3-rpi4`
-- Raspberry Pi with 64-bit OS: `nanotdb-linux-arm64`, `nanocli-linux-arm64`
-- Linux PC/server (x86_64): `nanotdb-linux-amd64`, `nanocli-linux-amd64`
-- macOS Intel: `nanotdb-darwin-amd64`, `nanocli-darwin-amd64`
-- macOS Apple Silicon: `nanotdb-darwin-arm64`, `nanocli-darwin-arm64`
-- Windows x64: `nanotdb-windows-amd64.exe`, `nanocli-windows-amd64.exe`
+- Raspberry Pi 0/1 (older boards): `nanotdb-linux-armv6-rpi0-rpi1`, `nanocli-linux-armv6-rpi0-rpi1`, `drip-linux-armv6-rpi0-rpi1`
+- Raspberry Pi 2/3/4 with 32-bit OS: `nanotdb-linux-armv7-rpi3-rpi4`, `nanocli-linux-armv7-rpi3-rpi4`, `drip-linux-armv7-rpi3-rpi4`
+- Raspberry Pi with 64-bit OS: `nanotdb-linux-arm64`, `nanocli-linux-arm64`, `drip-linux-arm64`
+- Linux PC/server (x86_64): `nanotdb-linux-amd64`, `nanocli-linux-amd64`, `drip-linux-amd64`
+- macOS Intel: `nanotdb-darwin-amd64`, `nanocli-darwin-amd64`, `drip-darwin-amd64`
+- macOS Apple Silicon: `nanotdb-darwin-arm64`, `nanocli-darwin-arm64`, `drip-darwin-arm64`
+- Windows x64: `nanotdb-windows-amd64.exe`, `nanocli-windows-amd64.exe`, `drip-windows-amd64.exe`
+- Windows ARM64: `nanotdb-windows-arm64.exe`, `nanocli-windows-arm64.exe`, `drip-windows-arm64.exe`
 
 Make binaries executable on Linux/macOS:
 
 ```bash
-chmod +x nanotdb-* nanocli-*
+chmod +x nanotdb-* nanocli-* drip-*
 ```
 
 Then run them directly from the download directory or move them into your `$PATH`.
+
+`drip` is optional. You only need it if you want NanoTDB to collect and push host metrics automatically.
 
 ---
 
@@ -60,6 +63,8 @@ If you also want the optional host metrics collector:
 ```bash
 go build -o drip ./cmd/drip
 ```
+
+`drip` can then POST host metrics into your running `nanotdb` instance using line protocol.
 
 ---
 
