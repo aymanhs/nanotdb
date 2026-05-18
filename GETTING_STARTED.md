@@ -55,6 +55,12 @@ go build -o nanocli ./cmd/nanocli
 
 Both binaries will be created in the current directory. You can now use them.
 
+If you also want the optional host metrics collector:
+
+```bash
+go build -o drip ./cmd/drip
+```
+
 ---
 
 ## Quick Start
@@ -413,10 +419,19 @@ The `nanocli` tool lets you inspect and manage data without running the server.
 ### Inspect database
 
 ```bash
-./nanocli inspect db --root ~/nanotdb-data
+./nanocli inspect db --root ~/nanotdb-data --db home_sensors --verbose
 ```
 
-Shows all databases and metrics stored.
+Shows catalog, manifest, data/WAL summaries, and verbose DAT/WAL tables for one database.
+
+Inspect only data files or WAL files:
+
+```bash
+./nanocli inspect dat --root ~/nanotdb-data --db home_sensors --verbose
+./nanocli inspect wal --root ~/nanotdb-data --db home_sensors --verbose
+```
+
+Verbose terminal output is rendered as aligned tables. DAT output shows per-file and per-page size statistics; WAL output shows per-file size/decode/tail diagnostics. Human-readable output uses `start` plus `duration`; `--json` keeps raw timestamps.
 
 ### Export data to a file
 

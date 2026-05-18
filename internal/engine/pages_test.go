@@ -17,11 +17,6 @@ func encodeInt32(v int32) []byte {
 	return buf[:]
 }
 
-// decodeInt32 reads an int32 from a 4-byte little-endian slice at the given byte offset.
-func decodeInt32(values []byte, idx int) int32 {
-	return int32(binary.LittleEndian.Uint32(values[idx*4:]))
-}
-
 // encodeFloat32 serialises a float32 to 4-byte little-endian form.
 func encodeFloat32(v float32) []byte {
 	var buf [4]byte

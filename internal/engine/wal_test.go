@@ -16,10 +16,10 @@ func TestWALAppendAndReadRecords(t *testing.T) {
 
 	// For compact format, use AppendSampleWithMetricName to include ValueType in WAL.
 	// Known metrics (no name) omit ValueType and require catalog lookup for decoding.
-	if _, err := AppendSampleWithMetricName[int32](w, 7, "test.int", Timestamp(1001), int32(-42)); err != nil {
+	if _, err := AppendSampleWithMetricName(w, 7, "test.int", Timestamp(1001), int32(-42)); err != nil {
 		t.Fatalf("AppendSampleWithMetricName int failed: %v", err)
 	}
-	if _, err := AppendSampleWithMetricName[float32](w, 8, "test.float", Timestamp(1002), float32(3.5)); err != nil {
+	if _, err := AppendSampleWithMetricName(w, 8, "test.float", Timestamp(1002), float32(3.5)); err != nil {
 		t.Fatalf("AppendSampleWithMetricName float failed: %v", err)
 	}
 
@@ -57,7 +57,7 @@ func TestWALAppendSampleWithMetricNameRoundTrips(t *testing.T) {
 	}
 	defer w.Close()
 
-	if _, err := AppendSampleWithMetricName[int32](w, 7, "temp.office", Timestamp(1001), int32(25000)); err != nil {
+	if _, err := AppendSampleWithMetricName(w, 7, "temp.office", Timestamp(1001), int32(25000)); err != nil {
 		t.Fatalf("AppendSampleWithMetricName failed: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestWALResetTruncatesAndReuses(t *testing.T) {
 	}
 	defer w.Close()
 
-	if _, err := AppendSample[int32](w, 1, Timestamp(10), int32(11)); err != nil {
+	if _, err := AppendSample(w, 1, Timestamp(10), int32(11)); err != nil {
 		t.Fatalf("AppendSample failed: %v", err)
 	}
 	recs, err := w.Records()
@@ -103,7 +103,7 @@ func TestWALResetTruncatesAndReuses(t *testing.T) {
 		t.Fatalf("expected zero records after reset, got=%d", len(recs))
 	}
 
-	if _, err := AppendSample[int32](w, 2, Timestamp(20), int32(22)); err != nil {
+	if _, err := AppendSample(w, 2, Timestamp(20), int32(22)); err != nil {
 		t.Fatalf("AppendSample after reset failed: %v", err)
 	}
 	recs, err = w.Records()
@@ -126,7 +126,7 @@ func TestWALStatsTrackFlushMetrics(t *testing.T) {
 	}
 	defer w.Close()
 
-	if _, err := AppendSample[int32](w, 1, Timestamp(10), int32(11)); err != nil {
+	if _, err := AppendSample(w, 1, Timestamp(10), int32(11)); err != nil {
 		t.Fatalf("AppendSample failed: %v", err)
 	}
 	before := w.Stats()
@@ -172,10 +172,10 @@ func TestWALFsyncPolicyAlwaysFsyncsEachAppend(t *testing.T) {
 	}
 	defer w.Close()
 
-	if _, err := AppendSample[int32](w, 1, Timestamp(10), int32(11)); err != nil {
+	if _, err := AppendSample(w, 1, Timestamp(10), int32(11)); err != nil {
 		t.Fatalf("AppendSample failed: %v", err)
 	}
-	if _, err := AppendSample[int32](w, 1, Timestamp(11), int32(12)); err != nil {
+	if _, err := AppendSample(w, 1, Timestamp(11), int32(12)); err != nil {
 		t.Fatalf("AppendSample failed: %v", err)
 	}
 

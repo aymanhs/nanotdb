@@ -280,6 +280,70 @@ func TestEngineManifestRetentionPartitionInvalid(t *testing.T) {
 	}
 }
 
+func TestEngineManifestRollupDefaultsApplyToPatternJobs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	manifest := []byte("[retention]\n" +
+		"grace = \"5m\"\n" +
+		"retention_days = 30\n" +
+		"max_active_days = 2\n" +
+		"partition = \"day\"\n\n" +
+		"[wal]\n" +
+		"enabled = true\n" +
+		"skip_before = \"1h\"\n\n" +
+		"[page]\n" +
+		"max_records = 16000\n" +
+		"max_bytes = 127000\n" +
+		"max_age = \"60s\"\n\n" +
+		"[rollups]\n" +
+		"enabled = true\n" +
+		"default_interval = \"1h\"\n" +
+		"default_destination_db = \"prod_rollup_1h\"\n" +
+		"default_aggregates = [\"min\",\"max\"]\n" +
+		"global_exclude_patterns = [\"nanotdb.*\"]\n\n" +
+		"[[rollups.jobs]]\n" +
+		"id = \"auto-temp\"\n" +
+		"source_pattern = \"temp.*\"\n")
+
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB failed: %v", err)
+	}
+
+	if !rt.info.Rollups.Enabled {
+		t.Fatalf("expected rollups to be enabled")
+	}
+	if len(rt.info.Rollups.Jobs) != 1 {
+		t.Fatalf("jobs count mismatch: got=%d want=1", len(rt.info.Rollups.Jobs))
+	}
+	job := rt.info.Rollups.Jobs[0]
+	if job.SourcePattern != "temp.*" {
+		t.Fatalf("source_pattern mismatch: got=%q want=%q", job.SourcePattern, "temp.*")
+	}
+	if job.Interval != "1h" {
+		t.Fatalf("interval mismatch: got=%q want=%q", job.Interval, "1h")
+	}
+	if job.DestinationDB != "prod_rollup_1h" {
+		t.Fatalf("destination_db mismatch: got=%q want=%q", job.DestinationDB, "prod_rollup_1h")
+	}
+	if len(job.Aggregates) != 2 || job.Aggregates[0] != "min" || job.Aggregates[1] != "max" {
+		t.Fatalf("aggregates mismatch: got=%v want=[min max]", job.Aggregates)
+	}
+}
+
 func TestEngineYearPartitionWritesYearlyDatFile(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
@@ -872,7 +936,7 @@ func TestEngineReplaysWALOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDatabase failed: %v", err)
 	}
-	if err := addSampleToDB[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
+	if err := addSampleToDB(db, "metric.a", Timestamp(1000), int32(42)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if err := db.catalog.WriteCatalog(); err != nil {
@@ -958,7 +1022,7 @@ func TestEngineReplaysWALAndRebuildsCatalogFromWALMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDatabase failed: %v", err)
 	}
-	if err := addSampleToDB[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
+	if err := addSampleToDB(db, "metric.a", Timestamp(1000), int32(42)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -1013,7 +1077,7 @@ func TestMaybeResetWALPersistsDirtyCatalogBeforeTruncate(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := addSampleToDB[int32](db, "metric.a", Timestamp(1000), int32(42)); err != nil {
+	if err := addSampleToDB(db, "metric.a", Timestamp(1000), int32(42)); err != nil {
 		t.Fatalf("AddSample failed: %v", err)
 	}
 	if !db.catalog.IsDirty() {
@@ -1057,13 +1121,13 @@ func TestEngineReplayRespectsMaxActiveDays(t *testing.T) {
 	day1 := Timestamp(24 * int64(time.Hour))
 	day2 := Timestamp(2 * 24 * int64(time.Hour))
 	day3 := Timestamp(3 * 24 * int64(time.Hour))
-	if err := addSampleToDB[int32](db, "metric.a", day1, int32(1)); err != nil {
+	if err := addSampleToDB(db, "metric.a", day1, int32(1)); err != nil {
 		t.Fatalf("AddSample day1 failed: %v", err)
 	}
-	if err := addSampleToDB[int32](db, "metric.a", day2, int32(2)); err != nil {
+	if err := addSampleToDB(db, "metric.a", day2, int32(2)); err != nil {
 		t.Fatalf("AddSample day2 failed: %v", err)
 	}
-	if err := addSampleToDB[int32](db, "metric.a", day3, int32(3)); err != nil {
+	if err := addSampleToDB(db, "metric.a", day3, int32(3)); err != nil {
 		t.Fatalf("AddSample day3 failed: %v", err)
 	}
 	if err := db.catalog.WriteCatalog(); err != nil {

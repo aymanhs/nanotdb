@@ -1,0 +1,17 @@
+[Unit]
+Description=NanoDB Time Series Database
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/nanotdb/nanotdb -config /home/pi/nanotdb/engine.toml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

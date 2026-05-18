@@ -2,19 +2,12 @@ package engine
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-func decodeFloat32(buf []byte, idx int) float32 {
-	b := binary.LittleEndian.Uint32(buf[idx*4:])
-	// Note: this is a lossy cast; proper decode would use math.Float32frombits
-	return float32(int32(b))
-}
 
 // TestAddSampleMultiMetricPageFill tests that AddSample correctly:
 // 1. Auto-creates metrics in catalog for unknown names

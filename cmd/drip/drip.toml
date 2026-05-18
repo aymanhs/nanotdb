@@ -1,0 +1,91 @@
+# drip — metrics collector configuration
+
+[drip]
+# URL of the running nanotdb server.
+server_url = "http://localhost:8448"
+
+# Target database for all collected metrics.
+database = "metrics"
+
+# How often to run a collection cycle (milliseconds).
+collection_interval_ms = 10000
+
+# Maximum time allowed for all collectors to respond per cycle (milliseconds).
+# Collectors that do not push results within this window are skipped for this cycle.
+timeout_ms = 5500
+
+# -----------------------------------------------------------------------------
+# Collectors — enable/disable each metric source.
+# -----------------------------------------------------------------------------
+
+[collectors.cpu]
+# Emits: cpu.user, cpu.nice, cpu.system, cpu.idle, cpu.iowait, cpu.irq, cpu.softirq,
+#        cpu.temp_mdeg (if thermal zone is available)
+enabled = true
+# Optional explicit thermal file path (manual override).
+temp_path = "/sys/class/thermal/thermal_zone0/temp"
+# Optional metric name override for CPU temp.
+temp_metric = "temp.cpu"
+
+[collectors.memory]
+# Emits: mem.total, mem.free, mem.available, mem.buffers, mem.cached,
+#        mem.swapcached, mem.swaptotal, mem.swapfree
+enabled = true
+
+[collectors.disk]
+# Emits per physical block device:
+#   disk.{dev}.reads, reads_merged, read_sectors, read_ms,
+#   disk.{dev}.writes, writes_merged, write_sectors, write_ms,
+#   disk.{dev}.io_in_progress, io_ms, io_weighted_ms
+# Emits per mounted filesystem:
+#   diskfs.{mount}.bytes_total, bytes_used, bytes_free, bytes_avail, used_pct
+enabled = true
+
+[collectors.io]
+# Emits: io.pgpgin, io.pgpgout, io.pswpin, io.pswpout
+enabled = true
+
+[collectors.sd_write_probe]
+# Measures write+fsync latency by writing a probe file.
+# Emits: disk.sd_write_probe_ms (or custom metric name)
+enabled = true
+# Directory on the target storage (set to an SD-card-backed path on RPi).
+directory = "/tmp"
+# Probe payload size in bytes.
+bytes = 32000
+# Run the actual probe every N cycles; last known value is emitted each cycle.
+every_n_cycles = 6
+# Metric name to emit.
+metric = "disk.sd_write_probe_ms"
+
+[collectors.network]
+# Reads /proc/net/dev per-interface byte/packet counters.
+# Emits: net.{iface}.rx_bytes, rx_packets, rx_errors, rx_drop,
+#        net.{iface}.tx_bytes, tx_packets, tx_errors, tx_drop
+enabled = true
+# Interfaces to exclude (loopback is never interesting).
+skip = ["lo", "br-*", "docker*", "enx*"]
+
+[collectors.loadavg]
+# Reads /proc/loadavg.
+# Emits: sys.load1, sys.load5, sys.load15, sys.procs_running, sys.procs_total
+enabled = true
+
+[collectors.onewire]
+# Reads DS18B20 temperature sensors via /sys/bus/w1/devices.
+# Map device IDs to friendly metric name suffixes.
+# Emits: temp.{friendly_name}.mdeg (millidegrees Celsius)
+enabled = true
+# If true, every discovered 28-* sensor under base_path is collected.
+# Unmapped sensors use their device ID as metric suffix.
+auto_discover = true
+# Override only if your sysfs mount differs.
+base_path = "/sys/bus/w1/devices"
+# Drop readings above this value (mdeg C). Useful to ignore DS18B20 error value 85000.
+max_valid_mdeg = 85000
+
+[collectors.onewire.devices]
+
+"28-0120481ddd35" = "office_wet"
+"28-01214506d428" = "out_dry"
+"28-0121450f31ef" = "office_dry"

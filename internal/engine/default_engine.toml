@@ -84,6 +84,15 @@ enabled = false
 checkpoint_file = "rollup.checkpoints.log"
 # Default grace used when rollup jobs do not define per-job grace.
 default_grace = ""
+# Default rollup interval for jobs that omit per-job interval.
+default_interval = ""
+# Default destination DB for jobs that omit destination_db.
+default_destination_db = ""
+# Default aggregates for jobs that omit aggregates.
+# Allowed values: min, max, sum, avg, count.
+default_aggregates = []
+# Wildcard patterns excluded from selector-based jobs (supports *).
+global_exclude_patterns = []
 
 # ------------------------------------------------------------------------------
 # Sample per-database rollup config (put in <root>/<db>/manifest.toml)
@@ -91,6 +100,10 @@ default_grace = ""
 #
 # Rollup jobs should be declared on the SOURCE database manifest.
 # Destination databases may also define their own jobs for chained rollups.
+# Auto-created rollup destination DBs use rollup-tuned manifests:
+# - WAL disabled because rollups are derived and rebuildable.
+# - partition = "month" for sub-daily rollups and "year" for daily-or-larger rollups.
+# - page.max_age increased to reduce tiny sparse pages.
 #
 # Example source DB (for example: sensors/manifest.toml):
 #
@@ -98,30 +111,33 @@ default_grace = ""
 # enabled = true
 # checkpoint_file = "rollup.checkpoints.log"
 # default_grace = "5m"
+# default_interval = "1h"
+# default_destination_db = "sensors_rollup_1h"
+# default_aggregates = ["min", "max", "avg", "count"]
+# global_exclude_patterns = ["nanotdb.*", "*.debug"]
 #
-# # Job id: unique within this source DB; used as checkpoint key.
+# # Job id: unique within this source DB.
+# # Selector-based jobs expand to per-metric checkpoint keys internally:
+# #   <job-id>::<metric-name>
 # [[rollups.jobs]]
-# id = "office_temp_1h"
-# # Source metric to aggregate.
-# source_metric = "temp.office_dry"
-# # Rollup bucket width (Go duration).
-# interval = "1h"
-# # Allowed aggregates: min, max, sum, avg, count.
-# aggregates = ["min", "max", "sum", "avg", "count"]
-# # Destination DB receiving rollup samples.
-# destination_db = "sensors_rollup_1h"
-# # Output metric prefix; engine writes <prefix>.<aggregate>.
-# destination_metric_prefix = "temp.office"
-# # Optional per-job grace override (otherwise uses default_grace/retention grace).
-# grace = ""
+# id = "all_metrics_1h"
+# # Exactly one of source_metric or source_pattern must be set.
+# source_pattern = "*"
+# # Optional wildcard exclusions for this selector-based job.
+# exclude_patterns = ["disk.sd_write_probe_ms", "net.*"]
+# # interval / destination_db / aggregates may inherit from [rollups] defaults.
+# # Output metric prefix defaults to the concrete source metric name.
 #
 # [[rollups.jobs]]
 # id = "outside_temp_1h"
+# # Explicit per-metric override job.
 # source_metric = "temp.out_dry"
 # interval = "1h"
 # aggregates = ["min", "max", "sum", "avg", "count"]
 # destination_db = "sensors_rollup_1h"
 # destination_metric_prefix = "temp.out_dry"
+# # Optional per-job grace override (otherwise uses default_grace/retention grace).
+# grace = ""
 #
 # Example chained rollup (for example: sensors_rollup_1h/manifest.toml):
 #

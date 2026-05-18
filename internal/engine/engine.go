@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -67,15 +68,21 @@ type DBManifestPage struct {
 }
 
 type DBManifestRollups struct {
-	Enabled        bool                  `toml:"enabled"`
-	CheckpointFile string                `toml:"checkpoint_file"`
-	DefaultGrace   string                `toml:"default_grace"`
-	Jobs           []DBManifestRollupJob `toml:"jobs"`
+	Enabled               bool                  `toml:"enabled"`
+	CheckpointFile        string                `toml:"checkpoint_file"`
+	DefaultGrace          string                `toml:"default_grace"`
+	DefaultInterval       string                `toml:"default_interval"`
+	DefaultDestinationDB  string                `toml:"default_destination_db"`
+	DefaultAggregates     []string              `toml:"default_aggregates"`
+	GlobalExcludePatterns []string              `toml:"global_exclude_patterns"`
+	Jobs                  []DBManifestRollupJob `toml:"jobs"`
 }
 
 type DBManifestRollupJob struct {
 	ID                      string   `toml:"id"`
 	SourceMetric            string   `toml:"source_metric"`
+	SourcePattern           string   `toml:"source_pattern"`
+	ExcludePatterns         []string `toml:"exclude_patterns"`
 	Interval                string   `toml:"interval"`
 	Aggregates              []string `toml:"aggregates"`
 	DestinationDB           string   `toml:"destination_db"`
@@ -187,10 +194,14 @@ func defaultDBInfo() DBInfo {
 		PageMaxBytes:   PageMaxBytes,
 		PageMaxAge:     PageMaxAge.String(),
 		Rollups: DBManifestRollups{
-			Enabled:        false,
-			CheckpointFile: defaultRollupCheckpointFile,
-			DefaultGrace:   "",
-			Jobs:           nil,
+			Enabled:               false,
+			CheckpointFile:        defaultRollupCheckpointFile,
+			DefaultGrace:          "",
+			DefaultInterval:       "",
+			DefaultDestinationDB:  "",
+			DefaultAggregates:     nil,
+			GlobalExcludePatterns: nil,
+			Jobs:                  nil,
 		},
 	}
 }
@@ -234,12 +245,7 @@ func engineConfigManifestDefaultsFromInfo(info DBInfo) EngineConfigManifestDefau
 }
 
 func dbInfoDefaultsFromEngineConfig(cfg EngineConfigManifestDefaults) (DBInfo, error) {
-	info := dbInfoFromManifest(DBManifestTOML{
-		Retention: cfg.Retention,
-		WAL:       cfg.WAL,
-		Page:      cfg.Page,
-		Rollups:   cfg.Rollups,
-	})
+	info := dbInfoFromManifest(DBManifestTOML(cfg))
 	return normalizeDBInfo(info, defaultDBInfo())
 }
 
@@ -519,9 +525,9 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		}
 		if useWAL {
 			if !exists {
-				walSegment, err = AppendSampleWithMetricName[int32](db.wal, metricID, metric, ts, i32)
+				walSegment, err = AppendSampleWithMetricName(db.wal, metricID, metric, ts, i32)
 			} else {
-				walSegment, err = AppendSample[int32](db.wal, metricID, ts, i32)
+				walSegment, err = AppendSample(db.wal, metricID, ts, i32)
 			}
 			if err != nil {
 				return err
@@ -535,9 +541,9 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		}
 		if useWAL {
 			if !exists {
-				walSegment, err = AppendSampleWithMetricName[float32](db.wal, metricID, metric, ts, f32)
+				walSegment, err = AppendSampleWithMetricName(db.wal, metricID, metric, ts, f32)
 			} else {
-				walSegment, err = AppendSample[float32](db.wal, metricID, ts, f32)
+				walSegment, err = AppendSample(db.wal, metricID, ts, f32)
 			}
 			if err != nil {
 				return err
@@ -898,47 +904,6 @@ func collectMetricFromFile(database, metric string, entry MetricEntry, path stri
 	}
 }
 
-func collectMetricFromBlob(database, metric string, entry MetricEntry, blob []byte, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
-	for pos := 0; pos < len(blob); {
-		if pos+HeaderSize > len(blob) {
-			return fmt.Errorf("truncated frame header at offset %d", pos)
-		}
-		start := Timestamp(binary.LittleEndian.Uint64(blob[pos : pos+8]))
-		end := Timestamp(binary.LittleEndian.Uint64(blob[pos+8 : pos+16]))
-
-		compressedLen, n := binary.Uvarint(blob[pos+HeaderSize:])
-		if n <= 0 {
-			return fmt.Errorf("invalid compressed length varint at offset %d", pos+HeaderSize)
-		}
-
-		frameSize := HeaderSize + n + int(compressedLen) + 4
-		if pos+frameSize > len(blob) {
-			return fmt.Errorf("truncated frame at offset %d", pos)
-		}
-
-		if end < fromTS || start > toTS {
-			pos += frameSize
-			continue
-		}
-
-		reader := bytes.NewReader(blob[pos : pos+frameSize])
-		startLen := reader.Len()
-		var p Page
-		if err := p.DecodeFrom(reader); err != nil {
-			return fmt.Errorf("decode page at offset %d: %w", pos, err)
-		}
-		consumed := startLen - reader.Len()
-		if consumed <= 0 {
-			return fmt.Errorf("invalid page decoding at offset %d", pos)
-		}
-		pos += frameSize
-		if err := collectMetricFromPage(database, metric, entry, &p, fromTS, toTS, stride, count, fn); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func exportLinesFromBlob(database string, db *Database, blob []byte, w *bufio.Writer, wroteAny *bool) error {
 	for pos := 0; pos < len(blob); {
 		reader := bytes.NewReader(blob[pos:])
@@ -1063,6 +1028,10 @@ func collectMetricFromPage(database, metric string, entry MetricEntry, p *Page, 
 }
 
 func (e *Engine) getOrCreateDB(database string) (*Database, *dbRuntime, error) {
+	return e.getOrCreateDBWithDefaults(database, e.dbDefaults, false, 0)
+}
+
+func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rollupManifest bool, rollupInterval time.Duration) (*Database, *dbRuntime, error) {
 	e.mu.RLock()
 	db, ok := e.dbs[database]
 	rt := e.runtimes[database]
@@ -1099,7 +1068,7 @@ func (e *Engine) getOrCreateDB(database string) (*Database, *dbRuntime, error) {
 		replayRecords = count
 		replayBytes = bytes
 	}
-	info, err := loadOrCreateDBInfo(db.RootDataDir, e.dbDefaults)
+	info, err := loadOrCreateDBInfoWithOptions(db.RootDataDir, defaults, rollupManifest, rollupInterval)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1124,6 +1093,23 @@ func (e *Engine) getOrCreateDB(database string) (*Database, *dbRuntime, error) {
 	e.dbs[database] = db
 	e.runtimes[database] = rt
 	return db, rt, nil
+}
+
+func defaultRollupDestinationDBInfo(base DBInfo, interval time.Duration) DBInfo {
+	info := base
+	info.WALEnabled = false
+	info.Rollups.Enabled = false
+	info.Rollups.Jobs = nil
+
+	if interval >= 24*time.Hour {
+		info.Partition = "year"
+		info.PageMaxAge = "168h"
+	} else {
+		info.Partition = "month"
+		info.PageMaxAge = "6h"
+	}
+
+	return info
 }
 
 // captureWALStats copies cumulative WAL counters into the engine stat store.
@@ -1190,54 +1176,6 @@ func (e *Engine) flushStatsToInternal(ts Timestamp) {
 		line := internalStatsDatabase + "/" + metric + " " + valText + " " + tsText
 		_ = e.AddLine(line)
 	}
-}
-
-// getOrCreateDBLocked is like getOrCreateDB but assumes the caller holds e.mu write lock.
-func (e *Engine) getOrCreateDBLocked(database string) (*Database, *dbRuntime, error) {
-	if db, ok := e.dbs[database]; ok {
-		if rt := e.runtimes[database]; rt != nil {
-			return db, rt, nil
-		}
-	}
-	dbDir := filepath.Join(e.RootDataDir, database)
-	fullName := filepath.Join(dbDir, database)
-	db, err := NewDatabaseWithWALConfig(fullName, e.WALMaxSegSize, e.WALFsyncPolicy)
-	if err != nil {
-		return nil, nil, err
-	}
-	var replayRecords int64
-	var replayBytes int64
-	if db.wal != nil {
-		count, bytes, err := scanWALAppendStats(db.wal.path)
-		if err != nil {
-			e.recordWALReplayMetrics(database, 0, 0, false)
-			_ = db.Close()
-			return nil, nil, fmt.Errorf("recover wal counters for database %q: %w", database, err)
-		}
-		db.wal.stats.AppendCount = count
-		db.wal.stats.AppendBytes = bytes
-		replayRecords = count
-		replayBytes = bytes
-	}
-	info, err := loadOrCreateDBInfo(db.RootDataDir, e.dbDefaults)
-	if err != nil {
-		return nil, nil, err
-	}
-	walSkipBefore, _ := time.ParseDuration(info.WALSkipBefore)
-	pageMaxAge, _ := time.ParseDuration(info.PageMaxAge)
-	rt := &dbRuntime{info: info, walSkipBefore: walSkipBefore, pageMaxAge: pageMaxAge, openDays: make(map[string]*Page), sealedDays: make(map[string]struct{})}
-	if err := e.replayWALIntoRuntime(db, rt, database); err != nil {
-		e.recordWALReplayMetrics(database, replayRecords, replayBytes, false)
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("replay wal for database %q: %w", database, err)
-	}
-	if database != internalStatsDatabase {
-		e.recordWALReplayMetrics(database, replayRecords, replayBytes, true)
-		e.captureWALStats(db, database)
-	}
-	e.dbs[database] = db
-	e.runtimes[database] = rt
-	return db, rt, nil
 }
 
 func (e *Engine) recordWALReplayMetrics(database string, records, bytes int64, success bool) {
@@ -1582,6 +1520,18 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	if strings.TrimSpace(info.Rollups.DefaultGrace) == "" {
 		info.Rollups.DefaultGrace = strings.TrimSpace(def.Rollups.DefaultGrace)
 	}
+	if strings.TrimSpace(info.Rollups.DefaultInterval) == "" {
+		info.Rollups.DefaultInterval = strings.TrimSpace(def.Rollups.DefaultInterval)
+	}
+	if strings.TrimSpace(info.Rollups.DefaultDestinationDB) == "" {
+		info.Rollups.DefaultDestinationDB = strings.TrimSpace(def.Rollups.DefaultDestinationDB)
+	}
+	if len(info.Rollups.DefaultAggregates) == 0 {
+		info.Rollups.DefaultAggregates = append([]string(nil), def.Rollups.DefaultAggregates...)
+	}
+	if len(info.Rollups.GlobalExcludePatterns) == 0 {
+		info.Rollups.GlobalExcludePatterns = append([]string(nil), def.Rollups.GlobalExcludePatterns...)
+	}
 	if _, err := time.ParseDuration(info.Grace); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid grace: %w", err)
 	}
@@ -1607,10 +1557,26 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 			return DBInfo{}, fmt.Errorf("invalid rollups.default_grace: %w", err)
 		}
 	}
+	if strings.TrimSpace(info.Rollups.DefaultInterval) != "" {
+		if _, err := time.ParseDuration(info.Rollups.DefaultInterval); err != nil {
+			return DBInfo{}, fmt.Errorf("invalid rollups.default_interval: %w", err)
+		}
+	}
+	for i, pat := range info.Rollups.GlobalExcludePatterns {
+		pat = strings.TrimSpace(pat)
+		if pat == "" {
+			continue
+		}
+		if _, err := path.Match(pat, "metric"); err != nil {
+			return DBInfo{}, fmt.Errorf("invalid rollups.global_exclude_patterns[%d]: %w", i, err)
+		}
+		info.Rollups.GlobalExcludePatterns[i] = pat
+	}
 	for idx := range info.Rollups.Jobs {
 		job := &info.Rollups.Jobs[idx]
 		job.ID = strings.TrimSpace(job.ID)
 		job.SourceMetric = strings.TrimSpace(job.SourceMetric)
+		job.SourcePattern = strings.TrimSpace(job.SourcePattern)
 		job.Interval = strings.TrimSpace(job.Interval)
 		job.DestinationDB = strings.TrimSpace(job.DestinationDB)
 		job.DestinationMetricPrefix = strings.TrimSpace(job.DestinationMetricPrefix)
@@ -1618,8 +1584,30 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 		if job.ID == "" {
 			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].id: empty", idx)
 		}
-		if job.SourceMetric == "" {
-			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].source_metric: empty", idx)
+		hasSourceMetric := job.SourceMetric != ""
+		hasSourcePattern := job.SourcePattern != ""
+		if hasSourceMetric == hasSourcePattern {
+			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d]: exactly one of source_metric or source_pattern must be set", idx)
+		}
+		if hasSourcePattern {
+			if _, err := path.Match(job.SourcePattern, "metric"); err != nil {
+				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].source_pattern: %w", idx, err)
+			}
+		}
+
+		for patIdx, pat := range job.ExcludePatterns {
+			pat = strings.TrimSpace(pat)
+			if pat == "" {
+				continue
+			}
+			if _, err := path.Match(pat, "metric"); err != nil {
+				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].exclude_patterns[%d]: %w", idx, patIdx, err)
+			}
+			job.ExcludePatterns[patIdx] = pat
+		}
+
+		if job.Interval == "" {
+			job.Interval = strings.TrimSpace(info.Rollups.DefaultInterval)
 		}
 		if job.Interval == "" {
 			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].interval: empty", idx)
@@ -1628,10 +1616,15 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].interval: %w", idx, err)
 		}
 		if job.DestinationDB == "" {
+			job.DestinationDB = strings.TrimSpace(info.Rollups.DefaultDestinationDB)
+		}
+		if job.DestinationDB == "" {
 			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].destination_db: empty", idx)
 		}
 		if job.DestinationMetricPrefix == "" {
-			job.DestinationMetricPrefix = job.SourceMetric
+			if job.SourceMetric != "" {
+				job.DestinationMetricPrefix = job.SourceMetric
+			}
 		}
 		if job.Grace != "" {
 			if _, err := time.ParseDuration(job.Grace); err != nil {
@@ -1639,7 +1632,11 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 			}
 		}
 		if len(job.Aggregates) == 0 {
-			job.Aggregates = defaultRollupAggregates()
+			if len(info.Rollups.DefaultAggregates) > 0 {
+				job.Aggregates = append([]string(nil), info.Rollups.DefaultAggregates...)
+			} else {
+				job.Aggregates = defaultRollupAggregates()
+			}
 		}
 		for aggIdx, agg := range job.Aggregates {
 			agg = strings.TrimSpace(strings.ToLower(agg))
@@ -1696,7 +1693,29 @@ func writeDBInfoTOML(path string, info DBInfo) error {
 	return os.WriteFile(path, buf.Bytes(), 0644)
 }
 
+func writeRollupDBInfoTOML(path string, info DBInfo, interval time.Duration) error {
+	buf := bytes.NewBuffer(nil)
+	partitionWhy := "month"
+	pageAgeWhy := "6h"
+	if interval >= 24*time.Hour {
+		partitionWhy = "year"
+		pageAgeWhy = "168h"
+	}
+	fmt.Fprintf(buf, "# Auto-created rollup destination manifest.\n")
+	fmt.Fprintf(buf, "# WAL is disabled because rollup data is derived from source metrics and can be rebuilt.\n")
+	fmt.Fprintf(buf, "# partition = \"%s\" keeps sparse rollup outputs out of many tiny daily files.\n", partitionWhy)
+	fmt.Fprintf(buf, "# page.max_age = \"%s\" allows more derived samples to accumulate before flush, reducing tiny pages.\n\n", pageAgeWhy)
+	if err := toml.NewEncoder(buf).Encode(dbManifestFromInfo(info)); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0644)
+}
+
 func loadOrCreateDBInfo(root string, defaults DBInfo) (DBInfo, error) {
+	return loadOrCreateDBInfoWithOptions(root, defaults, false, 0)
+}
+
+func loadOrCreateDBInfoWithOptions(root string, defaults DBInfo, rollupManifest bool, rollupInterval time.Duration) (DBInfo, error) {
 	path := filepath.Join(root, manifestFileName)
 	if raw, err := os.ReadFile(path); err == nil {
 		manifest := DBManifestTOML{}
@@ -1717,8 +1736,14 @@ func loadOrCreateDBInfo(root string, defaults DBInfo) (DBInfo, error) {
 	if err != nil {
 		return DBInfo{}, err
 	}
-	if err := writeDBInfoTOML(path, info); err != nil {
-		return DBInfo{}, err
+	if rollupManifest {
+		if err := writeRollupDBInfoTOML(path, info, rollupInterval); err != nil {
+			return DBInfo{}, err
+		}
+	} else {
+		if err := writeDBInfoTOML(path, info); err != nil {
+			return DBInfo{}, err
+		}
 	}
 	return info, nil
 }

@@ -1,0 +1,17 @@
+[Unit]
+Description=NanoDB Metrics Collector (drip)
+After=network.target nanotdb.service
+Wants=nanotdb.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/nanotdb/drip -config /home/pi/nanotdb/drip.toml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

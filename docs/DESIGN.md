@@ -107,7 +107,7 @@ Recommended frame metadata fields:
   - `max_active_days`: maximum number of simultaneous open partition files (default 2)
   - `partition`: partition mode (`day|month|year|forever`)
   - `grace`: grace period for out-of-order sample tolerance (v0 placeholder)
-  - `rollups`: source-defined rollup jobs + checkpoint settings
+  - `rollups`: source-defined rollup jobs + checkpoint settings, including selector-based jobs with wildcard exclusions and per-DB defaults
 
 ---
 
@@ -247,6 +247,10 @@ This maps config keys to runtime fields in `internal/engine/engine.go`.
 | `manifest_defaults.rollups.enabled` | `EngineConfig.ManifestDefaults.Rollups.Enabled` | Per-DB rollups toggle | Copied only when DB is created |
 | `manifest_defaults.rollups.checkpoint_file` | `EngineConfig.ManifestDefaults.Rollups.CheckpointFile` | Per-DB source checkpoint log file | Defaults to `rollup.checkpoints.log` |
 | `manifest_defaults.rollups.default_grace` | `EngineConfig.ManifestDefaults.Rollups.DefaultGrace` | Per-DB default rollup grace | Duration string or empty |
+| `manifest_defaults.rollups.default_interval` | `EngineConfig.ManifestDefaults.Rollups.DefaultInterval` | Per-DB default rollup interval | Duration string or empty |
+| `manifest_defaults.rollups.default_destination_db` | `EngineConfig.ManifestDefaults.Rollups.DefaultDestinationDB` | Per-DB default rollup target DB | Empty means per-job required |
+| `manifest_defaults.rollups.default_aggregates` | `EngineConfig.ManifestDefaults.Rollups.DefaultAggregates` | Per-DB default rollup aggregate list | Subset of `min|max|sum|avg|count` |
+| `manifest_defaults.rollups.global_exclude_patterns` | `EngineConfig.ManifestDefaults.Rollups.GlobalExcludePatterns` | Per-DB wildcard exclusions for selector jobs | Applied before job-specific exclusions |
 
 Durability profile to runtime sync behavior:
 

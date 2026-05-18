@@ -141,7 +141,7 @@ func runInspectDB(args []string) error {
 		fmt.Fprintf(w, "\nData\n")
 		fmt.Fprintf(w, "  files=%d bytes=%d frames=%d records=%d\n", report.Data.Files, report.Data.TotalBytes, report.Data.TotalFrames, report.Data.TotalRecords)
 		if report.Data.MinTimestamp > 0 {
-			fmt.Fprintf(w, "  range=%s .. %s\n", report.Data.MinUTC, report.Data.MaxUTC)
+			fmt.Fprintf(w, "  start=%s duration=%s\n", report.Data.MinUTC, formatDurationNS(report.Data.MinTimestamp, report.Data.MaxTimestamp))
 		}
 		fmt.Fprintf(w, "\nWAL\n")
 		fmt.Fprintf(w, "  files=%d bytes=%d records=%d tail_present=%t\n", report.WAL.Files, report.WAL.TotalBytes, report.WAL.TotalRecords, report.WAL.HasTail)
@@ -151,17 +151,36 @@ func runInspectDB(args []string) error {
 			if report.DataDetail.FileCount == 0 {
 				fmt.Fprintf(w, "  no data files discovered\n")
 			} else {
+				rows := make([][]string, 0, len(report.DataDetail.Files))
 				for _, f := range report.DataDetail.Files {
+					displayPath := shortenTablePath(report.DataDetail.DatabaseDir, f.Path)
 					if f.ScanError != "" {
-						fmt.Fprintf(w, "  - %s error=%s\n", f.Path, f.ScanError)
+						rows = append(rows, []string{displayPath, "ERR", "ERR", "ERR", "ERR", "ERR", "ERR", "-", f.ScanError})
 						continue
 					}
+					start := "-"
+					duration := "-"
 					if f.Frames > 0 {
-						fmt.Fprintf(w, "  - %s bytes=%d frames=%d records=%d range=%s .. %s\n", f.Path, f.Bytes, f.Frames, f.Records, f.MinUTC, f.MaxUTC)
-					} else {
-						fmt.Fprintf(w, "  - %s bytes=%d frames=0 records=0\n", f.Path, f.Bytes)
+						start = f.MinUTC
+						duration = formatDurationNS(f.MinTimestamp, f.MaxTimestamp)
 					}
+					rows = append(rows, []string{
+						displayPath,
+						fmt.Sprintf("%d", f.Bytes),
+						fmt.Sprintf("%d", f.Frames),
+						fmt.Sprintf("%d", f.Records),
+						fmt.Sprintf("%d", f.AvgFrameBytes),
+						fmt.Sprintf("%d", f.MinFrameBytes),
+						fmt.Sprintf("%d", f.MaxFrameBytes),
+						start,
+						duration,
+					})
 				}
+				printAlignedTable(w,
+					[]string{"file", "bytes", "frames", "records", "avg_page", "min_page", "max_page", "start", "duration"},
+					rows,
+					map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true},
+				)
 			}
 		}
 
@@ -170,21 +189,41 @@ func runInspectDB(args []string) error {
 			if report.WALDetail.FileCount == 0 {
 				fmt.Fprintf(w, "  no wal files discovered\n")
 			} else {
+				rows := make([][]string, 0, len(report.WALDetail.Files))
 				for _, f := range report.WALDetail.Files {
+					displayPath := shortenTablePath(report.WALDetail.DatabaseDir, f.Path)
 					if f.ScanError != "" {
-						fmt.Fprintf(w, "  - %s error=%s\n", f.Path, f.ScanError)
+						rows = append(rows, []string{displayPath, "ERR", "ERR", "ERR", "-", "-", "-", "-", "-", f.ScanError})
 						continue
 					}
-					rangeText := "-"
+					start := "-"
+					duration := "-"
 					if f.Records > 0 {
-						rangeText = f.MinUTC + " .. " + f.MaxUTC
+						start = f.MinUTC
+						duration = formatDurationNS(f.MinTimestamp, f.MaxTimestamp)
 					}
-					fmt.Fprintf(w, "  - %s bytes=%d records=%d decoded=%d range=%s tail=%t", f.Path, f.Bytes, f.Records, f.DecodedBytes, rangeText, f.HasTail)
-					if f.HasTail {
-						fmt.Fprintf(w, " tail_bytes=%d stop_off=%d reason=%s", f.TailBytes, f.StopOffset, f.StopReason)
+					reason := "-"
+					if f.StopReason != "" {
+						reason = f.StopReason
 					}
-					fmt.Fprintln(w)
+					rows = append(rows, []string{
+						displayPath,
+						fmt.Sprintf("%d", f.Bytes),
+						fmt.Sprintf("%d", f.Records),
+						fmt.Sprintf("%d", f.DecodedBytes),
+						start,
+						duration,
+						fmt.Sprintf("%t", f.HasTail),
+						fmt.Sprintf("%d", f.TailBytes),
+						fmt.Sprintf("%d", f.StopOffset),
+						reason,
+					})
 				}
+				printAlignedTable(w,
+					[]string{"file", "bytes", "records", "decoded", "start", "duration", "tail", "tail_bytes", "stop_off", "reason"},
+					rows,
+					map[int]bool{1: true, 2: true, 3: true, 7: true, 8: true},
+				)
 			}
 		}
 	})
@@ -290,7 +329,7 @@ func buildInspectReport(ctx dbContext, verbose bool) (inspectDBReport, error) {
 	}
 
 	if verbose {
-		datDetail, err := buildInspectDatReport(ctx)
+		datDetail, err := buildInspectDatReport(ctx, true)
 		if err != nil {
 			return inspectDBReport{}, err
 		}

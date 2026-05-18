@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -28,12 +29,16 @@ func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
 	if !sourceRT.info.Rollups.Enabled || len(sourceRT.info.Rollups.Jobs) == 0 {
 		return
 	}
+	jobs := expandRollupJobs(sourceDB, sourceRT.info.Rollups)
+	if len(jobs) == 0 {
+		return
+	}
 
 	checkpoints, err := loadRollupCheckpoints(sourceDB.RootDataDir, sourceRT.info.Rollups.CheckpointFile)
 	if err != nil {
 		return
 	}
-	for _, job := range sourceRT.info.Rollups.Jobs {
+	for _, job := range jobs {
 		completed := e.processRollupJob(sourceDB, sourceRT, job, checkpoints[job.ID])
 		if completed <= checkpoints[job.ID] {
 			continue
@@ -43,6 +48,66 @@ func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
 		}
 		checkpoints[job.ID] = completed
 	}
+}
+
+func expandRollupJobs(sourceDB *Database, cfg DBManifestRollups) []DBManifestRollupJob {
+	metrics := sourceDB.catalog.ListMetrics()
+	out := make([]DBManifestRollupJob, 0, len(cfg.Jobs))
+
+	for _, job := range cfg.Jobs {
+		if strings.TrimSpace(job.SourceMetric) != "" {
+			out = append(out, job)
+			continue
+		}
+
+		pattern := strings.TrimSpace(job.SourcePattern)
+		if pattern == "" {
+			continue
+		}
+
+		for _, info := range metrics {
+			name := info.Name
+			if !matchMetricPattern(pattern, name) {
+				continue
+			}
+			if isRollupMetricExcluded(name, cfg.GlobalExcludePatterns, job.ExcludePatterns) {
+				continue
+			}
+
+			expanded := job
+			expanded.SourceMetric = name
+			expanded.SourcePattern = ""
+			expanded.ExcludePatterns = nil
+			expanded.ID = job.ID + "::" + name
+			if strings.TrimSpace(expanded.DestinationMetricPrefix) == "" {
+				expanded.DestinationMetricPrefix = name
+			}
+			out = append(out, expanded)
+		}
+	}
+
+	return out
+}
+
+func matchMetricPattern(pattern, name string) bool {
+	ok, err := path.Match(pattern, name)
+	return err == nil && ok
+}
+
+func isRollupMetricExcluded(name string, globalPatterns, jobPatterns []string) bool {
+	for _, pat := range globalPatterns {
+		pat = strings.TrimSpace(pat)
+		if pat != "" && matchMetricPattern(pat, name) {
+			return true
+		}
+	}
+	for _, pat := range jobPatterns {
+		pat = strings.TrimSpace(pat)
+		if pat != "" && matchMetricPattern(pat, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // TriggerRollupsForSources computes rollups for each unique source database name.
@@ -71,7 +136,13 @@ func (e *Engine) triggerRollups(sourceDBName string) {
 }
 
 func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job DBManifestRollupJob, lastCompleted Timestamp) Timestamp {
-	rollupDB, _, err := e.getOrCreateDB(job.DestinationDB)
+	interval, err := time.ParseDuration(job.Interval)
+	if err != nil || interval <= 0 {
+		return lastCompleted
+	}
+
+	rollupDefaults := defaultRollupDestinationDBInfo(e.dbDefaults, interval)
+	rollupDB, _, err := e.getOrCreateDBWithDefaults(job.DestinationDB, rollupDefaults, true, interval)
 	if err != nil {
 		return lastCompleted
 	}
@@ -84,11 +155,6 @@ func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job D
 	grace, err := resolveRollupGrace(sourceRT.info, job)
 	if err != nil {
 		grace = 1 * time.Hour
-	}
-
-	interval, err := time.ParseDuration(job.Interval)
-	if err != nil || interval <= 0 {
-		return lastCompleted
 	}
 
 	safeTS := Timestamp(time.Now().Add(-grace).UnixNano())

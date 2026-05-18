@@ -3,3 +3,8 @@ devdata-*/
 .tmp/
 test-data/
 .vscode/
+
+# Build artifacts
+/drip
+/nanocli
+/nanotdb

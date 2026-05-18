@@ -216,6 +216,15 @@ Example:
 enabled = true
 checkpoint_file = "rollup.checkpoints.log"
 default_grace = "5m"
+default_interval = "1h"
+default_destination_db = "sensors_rollup_1h"
+default_aggregates = ["min", "max", "avg", "count"]
+global_exclude_patterns = ["nanotdb.*", "*.debug"]
+
+[[rollups.jobs]]
+id = "all_metrics_1h"
+source_pattern = "*"
+exclude_patterns = ["disk.sd_write_probe_ms", "net.*"]
 
 [[rollups.jobs]]
 id = "outside_temp_1h"
@@ -233,18 +242,37 @@ Rollup config reference:
 | `rollups.enabled` | DB | no | `true|false` (default `false`) | Enables rollup processing for this DB as a source. |
 | `rollups.checkpoint_file` | DB | no | string (default `rollup.checkpoints.log`) | Checkpoint log path, relative to source DB directory. |
 | `rollups.default_grace` | DB | no | Go duration or empty | Used when job `grace` is omitted. |
+| `rollups.default_interval` | DB | no | Go duration or empty | Used when job `interval` is omitted. |
+| `rollups.default_destination_db` | DB | no | string or empty | Used when job `destination_db` is omitted. |
+| `rollups.default_aggregates` | DB | no | subset of `min|max|sum|avg|count` | Used when job `aggregates` is omitted. |
+| `rollups.global_exclude_patterns` | DB | no | wildcard list | Excluded from selector-based jobs before expansion. |
 | `rollups.jobs[].id` | Job | yes | non-empty string | Unique per source DB for checkpoint tracking. |
-| `rollups.jobs[].source_metric` | Job | yes | non-empty string | Metric to read from source DB. |
-| `rollups.jobs[].interval` | Job | yes | valid Go duration (`>0`) | Rollup bucket size (for example `1h`, `24h`). |
-| `rollups.jobs[].aggregates` | Job | no | `min|max|sum|avg|count` (default all five) | Aggregate outputs written as suffix metrics. |
-| `rollups.jobs[].destination_db` | Job | yes | non-empty string | Target DB receiving rollup samples. |
+| `rollups.jobs[].source_metric` | Job | yes* | non-empty string | Exact metric to read from source DB. |
+| `rollups.jobs[].source_pattern` | Job | yes* | wildcard pattern supporting `*` | Selector-based job that expands to concrete metrics. |
+| `rollups.jobs[].exclude_patterns` | Job | no | wildcard list | Additional per-job exclusions for selector-based jobs. |
+| `rollups.jobs[].interval` | Job | no | valid Go duration (`>0`) | Rollup bucket size; may inherit `rollups.default_interval`. |
+| `rollups.jobs[].aggregates` | Job | no | `min|max|sum|avg|count` | Aggregate outputs; may inherit `rollups.default_aggregates`, otherwise defaults to all five. |
+| `rollups.jobs[].destination_db` | Job | no | non-empty string | Target DB; may inherit `rollups.default_destination_db`. |
 | `rollups.jobs[].destination_metric_prefix` | Job | no | string (default `source_metric`) | Output names are `<prefix>.<agg>`. |
 | `rollups.jobs[].grace` | Job | no | Go duration or empty | Overrides `default_grace` for this job. |
 
 Notes:
+- Each job must set exactly one of `source_metric` or `source_pattern`.
 - Checkpoints are stored in the source DB (default `rollup.checkpoints.log`).
+- Selector-based jobs expand to deterministic checkpoint keys: `<job-id>::<metric-name>`.
 - Destination DBs can also define their own rollup jobs to create cascades (for example `1h -> 1d`).
-- For low-frequency rollup outputs, use coarser partitions on destination DBs (for example `month` or `year`) to avoid many tiny day files.
+- Auto-created rollup destination DBs are written with rollup-tuned manifests: WAL disabled, `partition = "month"` for sub-daily rollups or `"year"` for daily-or-larger rollups, and a longer `page.max_age` to reduce tiny sparse pages.
+
+### `nanocli` inspection helpers
+
+For deeper file inspection, use the dedicated DAT/WAL inspect commands:
+
+```bash
+./nanocli inspect dat --root ./devdata --db internal --verbose
+./nanocli inspect wal --root ./devdata --db internal --verbose
+```
+
+Terminal output uses aligned tables. Verbose DAT output shows per-page size/compression stats; WAL verbose output adds tail diagnostics. Human-readable output shows `start` plus `duration`; `--json` retains the full machine-readable timestamps.
 
 ---
 
@@ -278,9 +306,9 @@ Also exposes discovery endpoints:
 Operates directly on the data directory without a running server.
 
 ```
-nanocli inspect db  --root <dir> [--db <name>] [--json]  — overview of all/one database
-nanocli inspect dat --root <dir>  --db <name>  [--json]  — page frame headers in .dat files
-nanocli inspect wal --root <dir>  --db <name>  [--json]  — WAL record dump
+nanocli inspect db  --root <dir> --db <name> [--verbose] [--json]  — database overview + optional detailed DAT/WAL tables
+nanocli inspect dat --root <dir> --db <name> [--verbose] [--json]  — .dat file/page inspection tables
+nanocli inspect wal --root <dir> --db <name> [--verbose] [--json]  — WAL inspection tables + optional tail diagnostics
 
 nanocli import --root <dir> --in <file.lp>  [--json]     — bulk import line-protocol file
 nanocli export --root <dir> --db <name> [--out <file.lp>] — export database to line protocol (stdout when --out is omitted)
@@ -294,6 +322,11 @@ and also accept raw Unix nanoseconds on import.
 
 `--start` / `--end` accept RFC3339 strings, `YYYY-MM-DD [HH[:MM[:SS[.nnnnnnnnn]]]]`,
 or Unix timestamps (seconds or nanoseconds).
+
+### `drip` — metrics collector
+
+`drip` is an optional host metrics collector intended for small edge systems such as Raspberry Pi.
+It gathers CPU, memory, disk, IO, network, load average, one-wire temperature, and SD write probe metrics and POSTs them to NanoTDB using line protocol.
 
 ### Rollup full-cycle check script
 

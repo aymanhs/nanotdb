@@ -45,9 +45,10 @@ func runInspectWAL(args []string) error {
 
 	rootDir := fs.String("root", "", "root data directory that contains engine.toml")
 	dbName := fs.String("db", "", "database name")
+	verbose := fs.Bool("verbose", false, "include tail diagnostics columns")
 	jsonOut := fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli inspect wal --root <root-dir> --db <database> [--json]")
+		return fmt.Errorf("usage: nanocli inspect wal --root <root-dir> --db <database> [--verbose] [--json]")
 	}
 
 	ctx, err := resolveDBContext(*rootDir, *dbName)
@@ -76,21 +77,55 @@ func runInspectWAL(args []string) error {
 			fmt.Fprintf(w, "no wal files discovered\n")
 			return
 		}
+
+		headers := []string{"file", "bytes", "records", "decoded", "start", "duration", "tail"}
+		right := map[int]bool{1: true, 2: true, 3: true}
+		if *verbose {
+			headers = append(headers, "tail_bytes", "stop_off", "reason")
+			right[7] = true
+			right[8] = true
+		}
+
+		rows := make([][]string, 0, len(report.Files))
 		for _, f := range report.Files {
+			displayPath := shortenTablePath(report.DatabaseDir, f.Path)
 			if f.ScanError != "" {
-				fmt.Fprintf(w, "- %s error=%s\n", f.Path, f.ScanError)
+				base := []string{displayPath, "ERR", "ERR", "ERR", "-", "-", "-"}
+				if *verbose {
+					base = append(base, "-", "-", f.ScanError)
+				}
+				rows = append(rows, base)
 				continue
 			}
-			rangeText := "-"
+			start := "-"
+			duration := "-"
 			if f.Records > 0 {
-				rangeText = f.MinUTC + " .. " + f.MaxUTC
+				start = f.MinUTC
+				duration = formatDurationNS(f.MinTimestamp, f.MaxTimestamp)
 			}
-			fmt.Fprintf(w, "- %s bytes=%d records=%d decoded=%d range=%s tail=%t", f.Path, f.Bytes, f.Records, f.DecodedBytes, rangeText, f.HasTail)
-			if f.HasTail {
-				fmt.Fprintf(w, " tail_bytes=%d stop_off=%d reason=%s", f.TailBytes, f.StopOffset, f.StopReason)
+			row := []string{
+				displayPath,
+				fmt.Sprintf("%d", f.Bytes),
+				fmt.Sprintf("%d", f.Records),
+				fmt.Sprintf("%d", f.DecodedBytes),
+				start,
+				duration,
+				fmt.Sprintf("%t", f.HasTail),
 			}
-			fmt.Fprintln(w)
+			if *verbose {
+				reason := "-"
+				if f.StopReason != "" {
+					reason = f.StopReason
+				}
+				row = append(row,
+					fmt.Sprintf("%d", f.TailBytes),
+					fmt.Sprintf("%d", f.StopOffset),
+					reason,
+				)
+			}
+			rows = append(rows, row)
 		}
+		printAlignedTable(w, headers, rows, right)
 	})
 }
 

@@ -353,6 +353,130 @@ func TestTriggerRollups_MultiJobSameDestinationDoesNotDropSecondJob(t *testing.T
 	}
 }
 
+func TestTriggerRollups_AutoJobWildcardWithExclusions(t *testing.T) {
+	e, err := OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-3 * time.Hour).Truncate(time.Hour)
+
+	if err := e.AddLine("prod/temp.outside 30 " + itoa64(base.Add(10*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine outside failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 10 " + itoa64(base.Add(15*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine office failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.outside 1 " + itoa64(base.Add(1*time.Hour).UnixNano())); err != nil {
+		t.Fatalf("AddLine outside close failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 1 " + itoa64(base.Add(1*time.Hour+5*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine office close failed: %v", err)
+	}
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	rt.info.Rollups = DBManifestRollups{
+		Enabled:               true,
+		CheckpointFile:        defaultRollupCheckpointFile,
+		DefaultGrace:          "0s",
+		GlobalExcludePatterns: []string{"temp.out*"},
+		Jobs: []DBManifestRollupJob{{
+			ID:            "all-temp-1h",
+			SourcePattern: "temp.*",
+			ExcludePatterns: []string{
+				"*.debug",
+			},
+			Interval:      "1h",
+			Aggregates:    []string{"sum"},
+			DestinationDB: "prod_rollup_1h",
+		}},
+	}
+
+	e.TriggerRollupsForSource("prod")
+
+	assertRollupValue(t, e, "prod_rollup_1h", "temp.office.sum", Timestamp(base.UnixNano()), 10)
+
+	if _, found, err := e.QueryLast("prod_rollup_1h", "temp.outside.sum"); err != nil {
+		t.Fatalf("QueryLast outside failed: %v", err)
+	} else if found {
+		t.Fatalf("expected temp.outside to be excluded from auto rollup job")
+	}
+}
+
+func TestTriggerRollups_CreatedRollupDBUsesHourlyDefaults(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-3 * time.Hour).Truncate(time.Hour)
+	if err := e.AddLine("prod/temp.office 10 " + itoa64(base.Add(10*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine sample failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 1 " + itoa64(base.Add(1*time.Hour).UnixNano())); err != nil {
+		t.Fatalf("AddLine close sample failed: %v", err)
+	}
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	rt.info.Rollups = DBManifestRollups{
+		Enabled:        true,
+		CheckpointFile: defaultRollupCheckpointFile,
+		DefaultGrace:   "0s",
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp-1h",
+			SourceMetric:            "temp.office",
+			Interval:                "1h",
+			Aggregates:              []string{"sum"},
+			DestinationDB:           "prod_rollup_1h",
+			DestinationMetricPrefix: "temp.office",
+		}},
+	}
+
+	e.TriggerRollupsForSource("prod")
+
+	raw, err := os.ReadFile(filepath.Join(root, "prod_rollup_1h", "manifest.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile manifest failed: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "WAL is disabled because rollup data is derived") {
+		t.Fatalf("expected rollup manifest rationale comment, got: %s", text)
+	}
+	if !strings.Contains(text, "enabled = false") {
+		t.Fatalf("expected rollup wal disabled in manifest")
+	}
+	if !strings.Contains(text, "partition = \"month\"") {
+		t.Fatalf("expected monthly partition for hourly rollups")
+	}
+	if !strings.Contains(text, "max_age = \"6h\"") {
+		t.Fatalf("expected 6h page max_age for hourly rollups")
+	}
+}
+
+func TestDefaultRollupDestinationDBInfoForDailyRollups(t *testing.T) {
+	info := defaultRollupDestinationDBInfo(defaultDBInfo(), 24*time.Hour)
+	if info.WALEnabled {
+		t.Fatalf("expected WAL disabled for rollup destination")
+	}
+	if info.Partition != "year" {
+		t.Fatalf("partition mismatch: got=%q want=%q", info.Partition, "year")
+	}
+	if info.PageMaxAge != "168h" {
+		t.Fatalf("page max age mismatch: got=%q want=%q", info.PageMaxAge, "168h")
+	}
+}
+
 func assertRollupValue(t *testing.T, e *Engine, dbName, metric string, wantTS Timestamp, want float32) {
 	t.Helper()
 

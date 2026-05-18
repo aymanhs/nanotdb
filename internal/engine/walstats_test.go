@@ -14,10 +14,10 @@ func TestScanWALFile(t *testing.T) {
 	}
 	defer w.Close()
 
-	if _, err := AppendSample[int32](w, 11, Timestamp(1001), int32(7)); err != nil {
+	if _, err := AppendSample(w, 11, Timestamp(1001), int32(7)); err != nil {
 		t.Fatalf("AppendSample 1 failed: %v", err)
 	}
-	if _, err := AppendSample[float32](w, 12, Timestamp(1002), float32(3.25)); err != nil {
+	if _, err := AppendSample(w, 12, Timestamp(1002), float32(3.25)); err != nil {
 		t.Fatalf("AppendSample 2 failed: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestScanWALFileTruncatedTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWAL failed: %v", err)
 	}
-	if _, err := AppendSample[int32](w, 1, Timestamp(10), int32(99)); err != nil {
+	if _, err := AppendSample(w, 1, Timestamp(10), int32(99)); err != nil {
 		t.Fatalf("AppendSample failed: %v", err)
 	}
 	if err := w.Close(); err != nil {
