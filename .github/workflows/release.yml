@@ -82,7 +82,9 @@ jobs:
 
           go build -trimpath -ldflags "-s -w" -o "dist/nanotdb-${{ matrix.id }}${ext}" ./cmd/nanotdb
           go build -trimpath -ldflags "-s -w" -o "dist/nanocli-${{ matrix.id }}${ext}" ./cmd/nanocli
-          go build -trimpath -ldflags "-s -w" -o "dist/drip-${{ matrix.id }}${ext}" ./cmd/drip
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            go build -trimpath -ldflags "-s -w" -o "dist/drip-${{ matrix.id }}${ext}" ./cmd/drip
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

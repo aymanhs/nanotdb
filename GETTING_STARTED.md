@@ -17,10 +17,10 @@ Pick the files that match your device:
 - Raspberry Pi 2/3/4 with 32-bit OS: `nanotdb-linux-armv7-rpi3-rpi4`, `nanocli-linux-armv7-rpi3-rpi4`, `drip-linux-armv7-rpi3-rpi4`
 - Raspberry Pi with 64-bit OS: `nanotdb-linux-arm64`, `nanocli-linux-arm64`, `drip-linux-arm64`
 - Linux PC/server (x86_64): `nanotdb-linux-amd64`, `nanocli-linux-amd64`, `drip-linux-amd64`
-- macOS Intel: `nanotdb-darwin-amd64`, `nanocli-darwin-amd64`, `drip-darwin-amd64`
-- macOS Apple Silicon: `nanotdb-darwin-arm64`, `nanocli-darwin-arm64`, `drip-darwin-arm64`
-- Windows x64: `nanotdb-windows-amd64.exe`, `nanocli-windows-amd64.exe`, `drip-windows-amd64.exe`
-- Windows ARM64: `nanotdb-windows-arm64.exe`, `nanocli-windows-arm64.exe`, `drip-windows-arm64.exe`
+- macOS Intel: `nanotdb-darwin-amd64`, `nanocli-darwin-amd64`
+- macOS Apple Silicon: `nanotdb-darwin-arm64`, `nanocli-darwin-arm64`
+- Windows x64: `nanotdb-windows-amd64.exe`, `nanocli-windows-amd64.exe`
+- Windows ARM64: `nanotdb-windows-arm64.exe`, `nanocli-windows-arm64.exe`
 
 Make binaries executable on Linux/macOS:
 
@@ -30,7 +30,7 @@ chmod +x nanotdb-* nanocli-* drip-*
 
 Then run them directly from the download directory or move them into your `$PATH`.
 
-`drip` is optional. You only need it if you want NanoTDB to collect and push host metrics automatically.
+`drip` is optional. You only need it if you want NanoTDB to collect and push host metrics automatically. Prebuilt `drip` release assets are currently published for Linux targets only.
 
 ---
 
@@ -64,7 +64,7 @@ If you also want the optional host metrics collector:
 go build -o drip ./cmd/drip
 ```
 
-`drip` can then POST host metrics into your running `nanotdb` instance using line protocol.
+`drip` is intended for Linux-style host metric surfaces such as `/proc` and `/sys`. It can then POST host metrics into your running `nanotdb` instance using line protocol.
 
 ---
 

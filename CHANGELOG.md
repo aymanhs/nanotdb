@@ -7,13 +7,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-05-18
+
+### Changed
+- GitHub release publishing now builds and uploads `drip` binaries only for Linux targets, matching the collector's Linux-oriented implementation.
+- Getting-started install docs now describe `drip` release assets as Linux-only and keep macOS/Windows release lists to `nanotdb` and `nanocli`.
+
 ## [1.1.1] - 2026-05-18
 
 ### Added
-- `drip` binaries are now published as GitHub release assets for all supported release targets.
+- Release workflow support for publishing `drip` binaries was added.
 
 ### Changed
-- Getting-started install docs now list prebuilt `drip` binaries alongside `nanotdb` and `nanocli`.
+- Getting-started install docs were updated to mention prebuilt `drip` binaries.
 
 ## [1.1.0] - 2026-05-18
 
@@ -64,7 +70,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   https://github.com/aymanhs/nanotdb/releases
 - Detailed project history: this file (`CHANGELOG.md`)
 
-[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.2
 [1.1.1]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.0
 [1.0.1]: https://github.com/aymanhs/nanotdb/releases/tag/v1.0.1
