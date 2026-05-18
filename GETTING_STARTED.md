@@ -222,6 +222,46 @@ List metrics in one database:
 curl "http://localhost:8428/api/v1/metrics?db=sensors"
 ```
 
+---
+
+## Rollup Backfill
+
+If you add or change rollup config and want to rebuild derived databases from existing source data, use one of these paths.
+
+### Offline rebuild with `nanocli`
+
+When the server is not running, recompute all discovered rollup sources:
+
+```bash
+./nanocli rollup --root ~/nanotdb-data
+```
+
+Or limit the rebuild to one source DB:
+
+```bash
+./nanocli rollup --root ~/nanotdb-data --db weather
+```
+
+### Online rebuild through the server API
+
+When `nanotdb` is already running, use the engine-owned HTTP endpoint instead of editing files under a live server:
+
+```bash
+curl -X POST "http://localhost:8428/api/v1/rollup/backfill" \
+    -H 'Content-Type: application/json' \
+    -d '{"source_db":"weather"}'
+```
+
+To rebuild every discovered rollup source:
+
+```bash
+curl -X POST "http://localhost:8428/api/v1/rollup/backfill" \
+    -H 'Content-Type: application/json' \
+    -d '{}'
+```
+
+This endpoint clears rebuildable rollup destination state, reruns the rollups in the engine, and persists rebuilt destination files before returning.
+
 Example response:
 
 ```json

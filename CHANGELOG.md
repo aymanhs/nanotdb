@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-18
+
 ### Added
 - Code cleanup, addressing linter warnings.
 - `drip`: Raspberry Pi/edge metrics collector with CPU, memory, disk, IO, network, loadavg, one-wire, and SD write probe collectors.
@@ -18,6 +20,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Changed
 - Rollup config docs and default engine template now document wildcard job expansion, defaults, and exclusion semantics.
 - Rollup destination manifests now persist resolved rollup defaults so reopened chained rollup DBs keep the same partition and page settings used during rollup writes.
+- Rollup backfill now persists rebuilt destination data and catalog state to disk before returning so offline tools can immediately inspect/export rebuilt DBs.
+- Same-destination rollup jobs are executed period-by-period in grouped order to reduce tiny overlapping frames during backfill and chained rollups.
 - `nanocli inspect db --verbose` now uses aligned DAT/WAL detail tables with `start` + `duration` summaries.
 
 ## [1.0.1] - 2026-05-17
@@ -52,6 +56,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   https://github.com/aymanhs/nanotdb/releases
 - Detailed project history: this file (`CHANGELOG.md`)
 
-[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.0
 [1.0.1]: https://github.com/aymanhs/nanotdb/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.0.0

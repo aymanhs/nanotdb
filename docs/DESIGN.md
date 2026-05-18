@@ -108,6 +108,7 @@ Recommended frame metadata fields:
   - `partition`: partition mode (`day|month|year|forever`)
   - `grace`: grace period for out-of-order sample tolerance (v0 placeholder)
   - `rollups`: source-defined rollup jobs + checkpoint settings, including selector-based jobs with wildcard exclusions and per-DB defaults
+- Auto-created rollup destination manifests are specialized from normal DB defaults: WAL disabled, coarser partitions (`month` for sub-daily, `year` for daily-or-larger), and longer page age to reduce sparse tiny files.
 
 ---
 
@@ -263,6 +264,7 @@ Durability profile to runtime sync behavior:
 Notes:
 - `default_engine.toml` is embedded (`//go:embed`) and written to `<root_data_dir>/engine.toml` when missing.
 - Existing per-database manifests are not retroactively rewritten by `manifest_defaults.*`; those defaults apply at DB creation time.
+- Rollup backfill is engine-owned. Both `nanocli rollup` and `POST /api/v1/rollup/backfill` call the same engine workflow to clear rebuildable destination state, recompute chained rollups, and flush rebuilt destination data to disk before returning.
 
 ---
 

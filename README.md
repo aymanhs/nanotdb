@@ -263,6 +263,12 @@ Notes:
 - Destination DBs can also define their own rollup jobs to create cascades (for example `1h -> 1d`).
 - Auto-created rollup destination DBs are written with rollup-tuned manifests: WAL disabled, `partition = "month"` for sub-daily rollups or `"year"` for daily-or-larger rollups, and a longer `page.max_age` to reduce tiny sparse pages.
 
+Backfill helpers:
+
+- `nanocli rollup --root <dir> [--db <source-db>] [--json]` resets rebuildable rollup destination state and recomputes rollups offline.
+- `POST /api/v1/rollup/backfill` runs the same engine-owned workflow inside a running `nanotdb` server.
+- Online backfill persists rebuilt destination `.dat` pages and `catalog.json` before returning, so offline `nanocli inspect/export` can read the rebuilt DB immediately.
+
 ### `nanocli` inspection helpers
 
 For deeper file inspection, use the dedicated DAT/WAL inspect commands:
@@ -300,6 +306,7 @@ Also exposes discovery endpoints:
 
 - `GET /api/v1/databases` (use `?include_internal=true` to include the internal DB)
 - `GET /api/v1/metrics?db=<name>` (use `&details=true` for id/type metadata)
+- `POST /api/v1/rollup/backfill` (optional JSON body: `{"source_db":"name"}` or `{"source_dbs":[...]}`)
 
 ### `nanocli` — offline CLI tool
 
@@ -311,6 +318,7 @@ nanocli inspect dat --root <dir> --db <name> [--verbose] [--json]  — .dat file
 nanocli inspect wal --root <dir> --db <name> [--verbose] [--json]  — WAL inspection tables + optional tail diagnostics
 
 nanocli import --root <dir> --in <file.lp>  [--json]     — bulk import line-protocol file
+nanocli rollup --root <dir> [--db <source-db>] [--json]  — reset and recompute rollup destinations from source manifests
 nanocli export --root <dir> --db <name> [--out <file.lp>] — export database to line protocol (stdout when --out is omitted)
 
 nanocli query  --root <dir> --db <name> --metric <regex>
