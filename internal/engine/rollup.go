@@ -15,6 +15,23 @@ import (
 
 const defaultRollupCheckpointFile = "rollup.checkpoints.log"
 
+type RollupBackfillReport struct {
+	RequestedSources       []string `json:"requested_sources"`
+	SourceDatabases        []string `json:"source_databases"`
+	DestinationDatabases   []string `json:"destination_databases"`
+	ClearedCheckpointFiles []string `json:"cleared_checkpoint_files"`
+	ClearedDataFiles       []string `json:"cleared_data_files"`
+	ClearedWALFiles        []string `json:"cleared_wal_files"`
+	ClearedCatalogFiles    []string `json:"cleared_catalog_files"`
+	ReplayPasses           int      `json:"replay_passes"`
+}
+
+type rollupBackfillPlan struct {
+	sources         []string
+	destinations    []string
+	checkpointPaths map[string]string
+}
+
 // TriggerRollupsForSource computes rollups for one source database using jobs
 // configured in the source database manifest.
 func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
@@ -38,16 +55,146 @@ func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
 	if err != nil {
 		return
 	}
-	for _, job := range jobs {
-		completed := e.processRollupJob(sourceDB, sourceRT, job, checkpoints[job.ID])
-		if completed <= checkpoints[job.ID] {
+	updated := e.processRollupJobGroups(sourceDB, sourceRT, jobs, checkpoints)
+	for jobID, completed := range updated {
+		if completed <= checkpoints[jobID] {
 			continue
 		}
-		if err := appendRollupCheckpoint(sourceDB.RootDataDir, sourceRT.info.Rollups.CheckpointFile, job.ID, completed); err != nil {
+		if err := appendRollupCheckpoint(sourceDB.RootDataDir, sourceRT.info.Rollups.CheckpointFile, jobID, completed); err != nil {
 			continue
 		}
-		checkpoints[job.ID] = completed
+		checkpoints[jobID] = completed
 	}
+}
+
+type rollupJobGroup struct {
+	destinationDB string
+	interval      time.Duration
+	jobs          []DBManifestRollupJob
+}
+
+type rollupJobState struct {
+	job       DBManifestRollupJob
+	safeTS    Timestamp
+	nextStart Timestamp
+	completed Timestamp
+}
+
+func (e *Engine) processRollupJobGroups(sourceDB *Database, sourceRT *dbRuntime, jobs []DBManifestRollupJob, checkpoints map[string]Timestamp) map[string]Timestamp {
+	updated := make(map[string]Timestamp, len(jobs))
+	for _, group := range groupRollupJobs(jobs) {
+		groupUpdated := e.processRollupJobGroup(sourceDB, sourceRT, group, checkpoints)
+		for jobID, completed := range groupUpdated {
+			updated[jobID] = completed
+		}
+	}
+	return updated
+}
+
+func groupRollupJobs(jobs []DBManifestRollupJob) []rollupJobGroup {
+	groupsByKey := make(map[string]*rollupJobGroup)
+	order := make([]string, 0, len(jobs))
+
+	for _, job := range jobs {
+		interval, err := time.ParseDuration(job.Interval)
+		if err != nil || interval <= 0 {
+			continue
+		}
+		key := job.DestinationDB + "\x00" + strconv.FormatInt(int64(interval), 10)
+		group := groupsByKey[key]
+		if group == nil {
+			group = &rollupJobGroup{destinationDB: job.DestinationDB, interval: interval}
+			groupsByKey[key] = group
+			order = append(order, key)
+		}
+		group.jobs = append(group.jobs, job)
+	}
+
+	out := make([]rollupJobGroup, 0, len(order))
+	for _, key := range order {
+		group := groupsByKey[key]
+		sort.Slice(group.jobs, func(i, j int) bool {
+			return group.jobs[i].ID < group.jobs[j].ID
+		})
+		out = append(out, *group)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].destinationDB == out[j].destinationDB {
+			return out[i].interval < out[j].interval
+		}
+		return out[i].destinationDB < out[j].destinationDB
+	})
+	return out
+}
+
+func (e *Engine) processRollupJobGroup(sourceDB *Database, sourceRT *dbRuntime, group rollupJobGroup, checkpoints map[string]Timestamp) map[string]Timestamp {
+	rollupDefaults := defaultRollupDestinationDBInfo(e.dbDefaults, group.interval)
+	rollupDB, _, err := e.getOrCreateDBWithDefaults(group.destinationDB, rollupDefaults, true, group.interval)
+	if err != nil {
+		return nil
+	}
+
+	states := make([]rollupJobState, 0, len(group.jobs))
+	for _, job := range group.jobs {
+		if _, ok := sourceDB.catalog.GetMetricEntry(job.SourceMetric); !ok {
+			continue
+		}
+		safeTS, ok := latestMetricTimestamp(sourceDB, sourceRT, job.SourceMetric)
+		if !ok {
+			continue
+		}
+		grace, err := resolveRollupGrace(sourceRT.info, job)
+		if err != nil {
+			grace = 1 * time.Hour
+		}
+		cutoff := Timestamp(time.Now().Add(-grace).UnixNano())
+		if safeTS > cutoff {
+			safeTS = cutoff
+		}
+		startTS := checkpoints[job.ID]
+		if startTS == 0 {
+			startTS = initialRollupStart(sourceDB, sourceRT, group.interval)
+		}
+		if startTS == 0 {
+			continue
+		}
+		states = append(states, rollupJobState{job: job, safeTS: safeTS, nextStart: startTS, completed: checkpoints[job.ID]})
+	}
+	if len(states) == 0 {
+		return nil
+	}
+
+	updated := make(map[string]Timestamp, len(states))
+	for {
+		nextPeriodStart := Timestamp(0)
+		for _, state := range states {
+			if state.nextStart == 0 || state.nextStart+Timestamp(group.interval) > state.safeTS {
+				continue
+			}
+			if nextPeriodStart == 0 || state.nextStart < nextPeriodStart {
+				nextPeriodStart = state.nextStart
+			}
+		}
+		if nextPeriodStart == 0 {
+			break
+		}
+
+		periodEnd := nextPeriodStart + Timestamp(group.interval)
+		for idx := range states {
+			state := &states[idx]
+			if state.nextStart != nextPeriodStart || periodEnd > state.safeTS {
+				continue
+			}
+			if err := e.buildRollupJobPeriod(rollupDB, sourceDB, state.job, nextPeriodStart, periodEnd); err != nil {
+				continue
+			}
+			state.nextStart = periodEnd
+			state.completed = periodEnd
+			updated[state.job.ID] = periodEnd
+		}
+	}
+
+	return updated
 }
 
 func expandRollupJobs(sourceDB *Database, cfg DBManifestRollups) []DBManifestRollupJob {
@@ -130,6 +277,239 @@ func (e *Engine) TriggerRollupsForSources(sourceDBNames []string) {
 	}
 }
 
+func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, error) {
+	report := RollupBackfillReport{RequestedSources: normalizeDatabaseNames(sourceDBNames)}
+
+	e.rollupBackfill.Lock()
+	defer e.rollupBackfill.Unlock()
+
+	plan, err := e.planRollupBackfill(report.RequestedSources)
+	if err != nil {
+		return report, err
+	}
+	report.SourceDatabases = append(report.SourceDatabases, plan.sources...)
+	report.DestinationDatabases = append(report.DestinationDatabases, plan.destinations...)
+	if len(plan.sources) == 0 {
+		return report, nil
+	}
+
+	for _, dbName := range plan.destinations {
+		dataFiles, walFiles, catalogFiles, err := e.resetRollupDestination(dbName)
+		if err != nil {
+			return report, err
+		}
+		report.ClearedDataFiles = append(report.ClearedDataFiles, dataFiles...)
+		report.ClearedWALFiles = append(report.ClearedWALFiles, walFiles...)
+		report.ClearedCatalogFiles = append(report.ClearedCatalogFiles, catalogFiles...)
+	}
+
+	for _, sourceDBName := range plan.sources {
+		path := plan.checkpointPaths[sourceDBName]
+		if path == "" {
+			continue
+		}
+		if err := os.Remove(path); err == nil {
+			report.ClearedCheckpointFiles = append(report.ClearedCheckpointFiles, path)
+		} else if !os.IsNotExist(err) {
+			return report, err
+		}
+	}
+
+	passes := len(plan.sources)
+	if passes < 1 {
+		passes = 1
+	}
+	for pass := 0; pass < passes; pass++ {
+		for _, sourceDBName := range plan.sources {
+			e.TriggerRollupsForSource(sourceDBName)
+		}
+	}
+	if err := e.flushDatabases(plan.destinations); err != nil {
+		return report, err
+	}
+	report.ReplayPasses = passes
+	return report, nil
+}
+
+func normalizeDatabaseNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (e *Engine) planRollupBackfill(requested []string) (rollupBackfillPlan, error) {
+	requested = normalizeDatabaseNames(requested)
+	queue := append([]string(nil), requested...)
+	if len(queue) == 0 {
+		queue = e.discoverRollupSourceCandidates()
+	}
+
+	seen := make(map[string]struct{}, len(queue))
+	sourceSet := make(map[string]struct{})
+	destinationSet := make(map[string]struct{})
+	checkpointPaths := make(map[string]string)
+
+	for len(queue) > 0 {
+		dbName := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[dbName]; ok {
+			continue
+		}
+		seen[dbName] = struct{}{}
+
+		info, ok, err := e.rollupInfoForDB(dbName)
+		if err != nil {
+			return rollupBackfillPlan{}, err
+		}
+		if !ok || !info.Rollups.Enabled || len(info.Rollups.Jobs) == 0 {
+			continue
+		}
+
+		sourceSet[dbName] = struct{}{}
+		checkpointFile := strings.TrimSpace(info.Rollups.CheckpointFile)
+		if checkpointFile == "" {
+			checkpointFile = defaultRollupCheckpointFile
+		}
+		checkpointPaths[dbName] = filepath.Join(e.RootDataDir, dbName, checkpointFile)
+
+		for _, job := range info.Rollups.Jobs {
+			dest := strings.TrimSpace(job.DestinationDB)
+			if dest == "" {
+				continue
+			}
+			destinationSet[dest] = struct{}{}
+			queue = append(queue, dest)
+		}
+	}
+
+	plan := rollupBackfillPlan{checkpointPaths: checkpointPaths}
+	for name := range sourceSet {
+		plan.sources = append(plan.sources, name)
+	}
+	for name := range destinationSet {
+		plan.destinations = append(plan.destinations, name)
+	}
+	sort.Strings(plan.sources)
+	sort.Strings(plan.destinations)
+	return plan, nil
+}
+
+func (e *Engine) discoverRollupSourceCandidates() []string {
+	seen := make(map[string]struct{})
+
+	e.mu.RLock()
+	for name, rt := range e.runtimes {
+		if name == internalStatsDatabase || rt == nil {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	e.mu.RUnlock()
+
+	entries, err := os.ReadDir(e.RootDataDir)
+	if err == nil {
+		for _, ent := range entries {
+			if !ent.IsDir() {
+				continue
+			}
+			name := strings.TrimSpace(ent.Name())
+			if name == "" || name == internalStatsDatabase {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (e *Engine) rollupInfoForDB(database string) (DBInfo, bool, error) {
+	e.mu.RLock()
+	rt := e.runtimes[database]
+	e.mu.RUnlock()
+	if rt != nil {
+		return rt.info, true, nil
+	}
+
+	root := filepath.Join(e.RootDataDir, database)
+	info, exists, err := loadExistingDBInfo(root, e.dbDefaults)
+	if err != nil {
+		return DBInfo{}, false, err
+	}
+	if !exists {
+		return DBInfo{}, false, nil
+	}
+	return info, true, nil
+}
+
+func (e *Engine) resetRollupDestination(database string) ([]string, []string, []string, error) {
+	var db *Database
+
+	e.mu.Lock()
+	db = e.dbs[database]
+	delete(e.dbs, database)
+	delete(e.runtimes, database)
+	e.mu.Unlock()
+
+	if db != nil {
+		if err := db.Close(); err != nil {
+			return nil, nil, nil, fmt.Errorf("close rollup destination %q: %w", database, err)
+		}
+	}
+
+	root := filepath.Join(e.RootDataDir, database)
+	dataFiles, err := filepath.Glob(filepath.Join(root, "data-*.dat"))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	walFiles, err := filepath.Glob(filepath.Join(root, "*.wal"))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	removedData := make([]string, 0, len(dataFiles))
+	for _, path := range dataFiles {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, nil, nil, err
+		}
+		removedData = append(removedData, path)
+	}
+
+	removedWAL := make([]string, 0, len(walFiles))
+	for _, path := range walFiles {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, nil, nil, err
+		}
+		removedWAL = append(removedWAL, path)
+	}
+
+	removedCatalog := make([]string, 0, 1)
+	catalogPath := filepath.Join(root, "catalog.json")
+	if err := os.Remove(catalogPath); err == nil {
+		removedCatalog = append(removedCatalog, catalogPath)
+	} else if !os.IsNotExist(err) {
+		return nil, nil, nil, err
+	}
+
+	return removedData, removedWAL, removedCatalog, nil
+}
+
 // triggerRollups is called after a file is closed/flushed.
 func (e *Engine) triggerRollups(sourceDBName string) {
 	e.TriggerRollupsForSource(sourceDBName)
@@ -147,8 +527,11 @@ func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job D
 		return lastCompleted
 	}
 
-	sourceEntry, ok := sourceDB.catalog.GetMetricEntry(job.SourceMetric)
-	if !ok || !sourceEntry.LastValid {
+	if _, ok := sourceDB.catalog.GetMetricEntry(job.SourceMetric); !ok {
+		return lastCompleted
+	}
+	maxSafeBySource, ok := latestMetricTimestamp(sourceDB, sourceRT, job.SourceMetric)
+	if !ok {
 		return lastCompleted
 	}
 
@@ -160,7 +543,6 @@ func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job D
 	safeTS := Timestamp(time.Now().Add(-grace).UnixNano())
 	// Only compute fully closed periods. Allowing partial intervals to checkpoint
 	// causes incorrect aggregates when more source points arrive later.
-	maxSafeBySource := sourceEntry.LastTS
 	if maxSafeBySource < safeTS {
 		safeTS = maxSafeBySource
 	}
@@ -230,7 +612,7 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 }
 
 func (e *Engine) insertRollupSample(dbName, metricName string, ts Timestamp, val float32) error {
-	return e.addFloatSample(dbName, metricName, ts, val, false, true)
+	return e.addParsedSample(dbName, metricName, ts, Float32Sample, 0, val, false, false, true)
 }
 
 func resolveRollupGrace(info DBInfo, job DBManifestRollupJob) (time.Duration, error) {
@@ -243,8 +625,68 @@ func resolveRollupGrace(info DBInfo, job DBManifestRollupJob) (time.Duration, er
 	return time.ParseDuration(info.Grace)
 }
 
+func latestMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric string) (Timestamp, bool) {
+	entry, ok := sourceDB.catalog.GetMetricEntry(metric)
+	if !ok {
+		return 0, false
+	}
+	if entry.LastValid {
+		return entry.LastTS, true
+	}
+
+	fromTS, toTS, ok := databaseTimeBounds(sourceDB, sourceRT)
+	if !ok {
+		return 0, false
+	}
+
+	lastTS := Timestamp(0)
+	count := 0
+	lastPath := ""
+	for d := dayStartUTC(fromTS); !d.After(dayStartUTC(toTS)); d = d.Add(24 * time.Hour) {
+		part := partitionKey(sourceRT, Timestamp(d.UnixNano()))
+		path := filepath.Join(sourceDB.RootDataDir, "data-"+part+".dat")
+		if path != lastPath {
+			lastPath = path
+			if err := collectMetricFromFile(sourceDB.Name, metric, entry, path, fromTS, toTS, 1, &count, func(s Sample) error {
+				if s.TS > lastTS {
+					lastTS = s.TS
+				}
+				return nil
+			}); err != nil && !os.IsNotExist(err) {
+				return 0, false
+			}
+		}
+
+		if p := sourceRT.openDays[part]; p != nil {
+			if err := collectMetricFromPage(sourceDB.Name, metric, entry, p, fromTS, toTS, 1, &count, func(s Sample) error {
+				if s.TS > lastTS {
+					lastTS = s.TS
+				}
+				return nil
+			}); err != nil {
+				return 0, false
+			}
+		}
+	}
+
+	if lastTS == 0 {
+		return 0, false
+	}
+	return lastTS, true
+}
+
 func initialRollupStart(sourceDB *Database, sourceRT *dbRuntime, interval time.Duration) Timestamp {
-	var earliest Timestamp
+	earliest, _, ok := databaseTimeBounds(sourceDB, sourceRT)
+	if !ok {
+		return 0
+	}
+	return floorTimestamp(earliest, interval)
+}
+
+func databaseTimeBounds(sourceDB *Database, sourceRT *dbRuntime) (Timestamp, Timestamp, bool) {
+	earliest := Timestamp(0)
+	latest := Timestamp(0)
+
 	for _, page := range sourceRT.openDays {
 		if page == nil {
 			continue
@@ -252,7 +694,11 @@ func initialRollupStart(sourceDB *Database, sourceRT *dbRuntime, interval time.D
 		if earliest == 0 || page.Start < earliest {
 			earliest = page.Start
 		}
+		if latest == 0 || page.End > latest {
+			latest = page.End
+		}
 	}
+
 	entries, err := os.ReadDir(sourceDB.RootDataDir)
 	if err == nil {
 		for _, ent := range entries {
@@ -261,21 +707,22 @@ func initialRollupStart(sourceDB *Database, sourceRT *dbRuntime, interval time.D
 				continue
 			}
 			stats, err := WalkDataFileHeaders(filepath.Join(sourceDB.RootDataDir, name), nil)
-			if err != nil {
-				continue
-			}
-			if stats.Frames == 0 {
+			if err != nil || stats.Frames == 0 {
 				continue
 			}
 			if earliest == 0 || stats.MinStart < earliest {
 				earliest = stats.MinStart
 			}
+			if latest == 0 || stats.MaxEnd > latest {
+				latest = stats.MaxEnd
+			}
 		}
 	}
-	if earliest == 0 {
-		return 0
+
+	if earliest == 0 || latest == 0 {
+		return 0, 0, false
 	}
-	return floorTimestamp(earliest, interval)
+	return earliest, latest, true
 }
 
 func floorTimestamp(ts Timestamp, interval time.Duration) Timestamp {

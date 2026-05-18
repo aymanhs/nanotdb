@@ -160,6 +160,7 @@ type Engine struct {
 	mu             sync.RWMutex
 	dbs            map[string]*Database
 	runtimes       map[string]*dbRuntime
+	rollupBackfill sync.Mutex
 	stats          engineStatStore
 	statsLastFlush time.Time
 	statsLastMu    sync.Mutex
@@ -434,6 +435,57 @@ func (e *Engine) Close() error {
 	return nil
 }
 
+func (e *Engine) flushDatabases(databaseNames []string) error {
+	seen := make(map[string]struct{}, len(databaseNames))
+	names := make([]string, 0, len(databaseNames))
+	for _, name := range databaseNames {
+		name = strings.TrimSpace(name)
+		if name == "" || name == internalStatsDatabase {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, name := range names {
+		db := e.dbs[name]
+		rt := e.runtimes[name]
+		if db == nil || rt == nil {
+			continue
+		}
+		for day, p := range rt.openDays {
+			if p == nil {
+				continue
+			}
+			if err := e.writePageToDailyFile(db, name, day, p); err != nil {
+				return fmt.Errorf("flush database %q day %s: %w", name, day, err)
+			}
+			rt.openDays[day] = nil
+		}
+		if err := maybeResetWAL(db, rt); err != nil {
+			return fmt.Errorf("reset wal for database %q: %w", name, err)
+		}
+		if !rt.info.WALEnabled && db.wal != nil {
+			if err := db.wal.Reset(); err != nil {
+				return fmt.Errorf("reset disabled wal for database %q: %w", name, err)
+			}
+		}
+		e.captureWALStats(db, name)
+		if db.catalog != nil && db.catalog.IsDirty() {
+			if err := db.catalog.WriteCatalog(); err != nil {
+				return fmt.Errorf("write catalog for database %q: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // GetAllDatabaseNames returns all database names managed by this engine.
 func (e *Engine) GetAllDatabaseNames() []string {
 	e.mu.Lock()
@@ -489,15 +541,15 @@ func (e *Engine) AddSample(database, metric string, ts Timestamp, value any) err
 
 	switch v := value.(type) {
 	case int32:
-		return e.addParsedSample(database, metric, ts, Int32Sample, v, 0, true, false)
+		return e.addParsedSample(database, metric, ts, Int32Sample, v, 0, true, false, false)
 	case float32:
-		return e.addParsedSample(database, metric, ts, Float32Sample, 0, v, true, false)
+		return e.addParsedSample(database, metric, ts, Float32Sample, 0, v, true, false, false)
 	default:
 		return fmt.Errorf("unsupported sample type")
 	}
 }
 
-func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte, i32 int32, f32 float32, triggerRollups bool, forceWAL bool) error {
+func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte, i32 int32, f32 float32, triggerRollups bool, forceWAL bool, allowOutOfOrderRetry bool) error {
 	db, rt, err := e.getOrCreateDB(dbName)
 	if err != nil {
 		return err
@@ -556,7 +608,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		// Rollup writes can revisit older period starts for a day after another
 		// rollup job already appended newer timestamps into that open day page.
 		// In that case, flush the existing page and retry once.
-		if err == ErrOutOfOrderTimestamp && forceWAL {
+		if err == ErrOutOfOrderTimestamp && allowOutOfOrderRetry {
 			if existing := rt.openDays[day]; existing != nil {
 				if werr := e.writePageToDailyFile(db, dbName, day, existing); werr != nil {
 					return werr
@@ -594,7 +646,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 }
 
 func (e *Engine) addFloatSample(dbName, metric string, ts Timestamp, val float32, triggerRollups bool, forceWAL bool) error {
-	return e.addParsedSample(dbName, metric, ts, Float32Sample, 0, val, triggerRollups, forceWAL)
+	return e.addParsedSample(dbName, metric, ts, Float32Sample, 0, val, triggerRollups, forceWAL, false)
 }
 
 // addToOpenDay appends a sample to the active day page and updates catalog last-value.
@@ -1081,10 +1133,18 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 		return nil, nil, fmt.Errorf("invalid page_max_age for database %q: %w", database, err)
 	}
 	rt = &dbRuntime{info: info, walSkipBefore: walSkipBefore, pageMaxAge: pageMaxAge, openDays: make(map[string]*Page), sealedDays: make(map[string]struct{})}
-	if err := e.replayWALIntoRuntime(db, rt, database); err != nil {
-		e.recordWALReplayMetrics(database, replayRecords, replayBytes, false)
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("replay wal for database %q: %w", database, err)
+	if info.WALEnabled {
+		if err := e.replayWALIntoRuntime(db, rt, database); err != nil {
+			e.recordWALReplayMetrics(database, replayRecords, replayBytes, false)
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("replay wal for database %q: %w", database, err)
+		}
+	} else if db.wal != nil {
+		if err := db.wal.Reset(); err != nil {
+			e.recordWALReplayMetrics(database, replayRecords, replayBytes, false)
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("reset disabled wal for database %q: %w", database, err)
+		}
 	}
 	if database != internalStatsDatabase {
 		e.recordWALReplayMetrics(database, replayRecords, replayBytes, true)
@@ -1711,25 +1771,42 @@ func writeRollupDBInfoTOML(path string, info DBInfo, interval time.Duration) err
 	return os.WriteFile(path, buf.Bytes(), 0644)
 }
 
+func loadExistingDBInfo(root string, defaults DBInfo) (DBInfo, bool, error) {
+	path := filepath.Join(root, manifestFileName)
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		manifest := DBManifestTOML{}
+		if _, err := toml.Decode(string(raw), &manifest); err != nil {
+			return DBInfo{}, false, fmt.Errorf("parse %s: %w", path, err)
+		}
+		info := dbInfoFromManifest(manifest)
+		info, err = normalizeDBInfo(info, defaults)
+		if err != nil {
+			return DBInfo{}, false, fmt.Errorf("invalid %s: %w", path, err)
+		}
+		return info, true, nil
+	}
+	if !os.IsNotExist(err) {
+		return DBInfo{}, false, err
+	}
+	return DBInfo{}, false, nil
+}
+
 func loadOrCreateDBInfo(root string, defaults DBInfo) (DBInfo, error) {
 	return loadOrCreateDBInfoWithOptions(root, defaults, false, 0)
 }
 
 func loadOrCreateDBInfoWithOptions(root string, defaults DBInfo, rollupManifest bool, rollupInterval time.Duration) (DBInfo, error) {
 	path := filepath.Join(root, manifestFileName)
-	if raw, err := os.ReadFile(path); err == nil {
-		manifest := DBManifestTOML{}
-		if _, err := toml.Decode(string(raw), &manifest); err != nil {
-			return DBInfo{}, fmt.Errorf("parse %s: %w", path, err)
-		}
-		info := dbInfoFromManifest(manifest)
-		info, err = normalizeDBInfo(info, defaults)
-		if err != nil {
-			return DBInfo{}, fmt.Errorf("invalid %s: %w", path, err)
+	if info, exists, err := loadExistingDBInfo(root, defaults); err != nil {
+		return DBInfo{}, err
+	} else if exists {
+		if rollupManifest {
+			if err := writeRollupDBInfoTOML(path, info, rollupInterval); err != nil {
+				return DBInfo{}, err
+			}
 		}
 		return info, nil
-	} else if !os.IsNotExist(err) {
-		return DBInfo{}, err
 	}
 
 	info, err := normalizeDBInfo(defaults, defaults)

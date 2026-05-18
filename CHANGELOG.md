@@ -11,11 +11,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - Code cleanup, addressing linter warnings.
 - `drip`: Raspberry Pi/edge metrics collector with CPU, memory, disk, IO, network, loadavg, one-wire, and SD write probe collectors.
 - Selector-based rollup config with `source_pattern`, per-DB rollup defaults, and wildcard exclusion lists.
+- Engine-owned rollup backfill workflow with `nanocli rollup` and `POST /api/v1/rollup/backfill` entry points.
 - `nanocli inspect dat --verbose` per-page table output with page size/compression stats.
 - `nanocli inspect wal --verbose` aligned table output with optional tail diagnostics.
 
 ### Changed
 - Rollup config docs and default engine template now document wildcard job expansion, defaults, and exclusion semantics.
+- Rollup destination manifests now persist resolved rollup defaults so reopened chained rollup DBs keep the same partition and page settings used during rollup writes.
 - `nanocli inspect db --verbose` now uses aligned DAT/WAL detail tables with `start` + `duration` summaries.
 
 ## [1.0.1] - 2026-05-17

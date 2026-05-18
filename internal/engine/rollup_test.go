@@ -278,11 +278,11 @@ func TestTriggerRollupsDoesNotComputePartialInterval(t *testing.T) {
 }
 
 func TestTriggerRollups_MultiJobSameDestinationDoesNotDropSecondJob(t *testing.T) {
-	e, err := OpenEngine(t.TempDir(), 1024*1024)
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
 	if err != nil {
 		t.Fatalf("OpenEngine failed: %v", err)
 	}
-	defer e.Close()
 
 	now := time.Now().UTC().Truncate(time.Second)
 	base := now.Add(-4 * time.Hour).Truncate(time.Hour)
@@ -350,6 +350,109 @@ func TestTriggerRollups_MultiJobSameDestinationDoesNotDropSecondJob(t *testing.T
 	}
 	if rowsOutside == 0 {
 		t.Fatalf("expected outside rollup rows")
+	}
+
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	reopened, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	rowsOffice = 0
+	err = reopened.QueryRange("prod_rollup_1h", "temp.office.min", Timestamp(base.UnixNano()), Timestamp(now.UnixNano()), 1, func(s Sample) error {
+		rowsOffice++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("QueryRange office after reopen failed: %v", err)
+	}
+	if rowsOffice == 0 {
+		t.Fatalf("expected office rollup rows after reopen")
+	}
+
+	rowsOutside = 0
+	err = reopened.QueryRange("prod_rollup_1h", "temp.out_dry.min", Timestamp(base.UnixNano()), Timestamp(now.UnixNano()), 1, func(s Sample) error {
+		rowsOutside++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("QueryRange outside after reopen failed: %v", err)
+	}
+	if rowsOutside == 0 {
+		t.Fatalf("expected outside rollup rows after reopen")
+	}
+}
+
+func TestTriggerRollups_MultiJobSameDestinationCoalescesFrames(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-4 * time.Hour).Truncate(time.Hour)
+
+	for i := 0; i < 3; i++ {
+		tsA := Timestamp(base.Add(time.Duration(i)*time.Hour + 10*time.Minute).UnixNano())
+		tsB := Timestamp(base.Add(time.Duration(i)*time.Hour + 20*time.Minute).UnixNano())
+		if err := e.AddLine("prod/temp.office_dry 10 " + itoa64(int64(tsA))); err != nil {
+			t.Fatalf("AddLine office failed: %v", err)
+		}
+		if err := e.AddLine("prod/temp.out_dry 20 " + itoa64(int64(tsB))); err != nil {
+			t.Fatalf("AddLine outside failed: %v", err)
+		}
+	}
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	rt.info.Rollups = DBManifestRollups{
+		Enabled:        true,
+		CheckpointFile: defaultRollupCheckpointFile,
+		DefaultGrace:   "0s",
+		Jobs: []DBManifestRollupJob{
+			{
+				ID:                      "office_1h",
+				SourceMetric:            "temp.office_dry",
+				Interval:                "1h",
+				Aggregates:              []string{"min"},
+				DestinationDB:           "prod_rollup_1h",
+				DestinationMetricPrefix: "temp.office",
+			},
+			{
+				ID:                      "outside_1h",
+				SourceMetric:            "temp.out_dry",
+				Interval:                "1h",
+				Aggregates:              []string{"min"},
+				DestinationDB:           "prod_rollup_1h",
+				DestinationMetricPrefix: "temp.out_dry",
+			},
+		},
+	}
+
+	e.TriggerRollupsForSource("prod")
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	stats, frames, err := ScanDataFileHeaders(filepath.Join(root, "prod_rollup_1h", "data-"+base.Format("2006-01")+".dat"))
+	if err != nil {
+		t.Fatalf("ScanDataFileHeaders failed: %v", err)
+	}
+	if stats.Frames != 1 {
+		t.Fatalf("expected one coalesced frame, got %d", stats.Frames)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("expected one frame entry, got %d", len(frames))
+	}
+	if frames[0].NumRecords != 4 {
+		t.Fatalf("expected 4 coalesced records from two fully closed periods, got %d", frames[0].NumRecords)
 	}
 }
 
@@ -474,6 +577,109 @@ func TestDefaultRollupDestinationDBInfoForDailyRollups(t *testing.T) {
 	}
 	if info.PageMaxAge != "168h" {
 		t.Fatalf("page max age mismatch: got=%q want=%q", info.PageMaxAge, "168h")
+	}
+}
+
+func TestBackfillRollups_RebuildsDestinationState(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-3 * time.Hour).Truncate(time.Hour)
+	if err := e.AddLine("prod/temp.office 10 " + itoa64(base.Add(10*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine first sample failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 20 " + itoa64(base.Add(40*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine second sample failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 1 " + itoa64(base.Add(1*time.Hour).UnixNano())); err != nil {
+		t.Fatalf("AddLine close sample failed: %v", err)
+	}
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	rt.info.Rollups = DBManifestRollups{
+		Enabled:        true,
+		CheckpointFile: defaultRollupCheckpointFile,
+		DefaultGrace:   "0s",
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp-1h",
+			SourceMetric:            "temp.office",
+			Interval:                "1h",
+			Aggregates:              []string{"sum"},
+			DestinationDB:           "prod_rollup_1h",
+			DestinationMetricPrefix: "temp.office",
+		}},
+	}
+
+	e.TriggerRollupsForSource("prod")
+
+	if err := e.AddLine("prod_rollup_1h/stale.metric 99 " + itoa64(base.Add(90*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine stale destination metric failed: %v", err)
+	}
+
+	manifestPath := filepath.Join(root, "prod_rollup_1h", "manifest.toml")
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatalf("Remove manifest failed: %v", err)
+	}
+
+	report, err := e.BackfillRollups([]string{"prod"})
+	if err != nil {
+		t.Fatalf("BackfillRollups failed: %v", err)
+	}
+	if len(report.SourceDatabases) != 1 || report.SourceDatabases[0] != "prod" {
+		t.Fatalf("unexpected source databases: %v", report.SourceDatabases)
+	}
+	if len(report.DestinationDatabases) != 1 || report.DestinationDatabases[0] != "prod_rollup_1h" {
+		t.Fatalf("unexpected destination databases: %v", report.DestinationDatabases)
+	}
+
+	assertRollupValue(t, e, "prod_rollup_1h", "temp.office.sum", Timestamp(base.UnixNano()), 30)
+
+	if _, found, err := e.QueryLast("prod_rollup_1h", "stale.metric"); err != nil {
+		t.Fatalf("QueryLast stale.metric failed: %v", err)
+	} else if found {
+		t.Fatalf("expected stale destination metric to be removed by backfill")
+	}
+
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile rebuilt manifest failed: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "WAL is disabled because rollup data is derived") {
+		t.Fatalf("expected rebuilt rollup manifest comments, got: %s", text)
+	}
+
+	checkpointRaw, err := os.ReadFile(filepath.Join(root, "prod", defaultRollupCheckpointFile))
+	if err != nil {
+		t.Fatalf("ReadFile checkpoint failed: %v", err)
+	}
+	if !strings.Contains(string(checkpointRaw), "temp-1h,") {
+		t.Fatalf("expected checkpoint to be recreated, got: %s", string(checkpointRaw))
+	}
+
+	dataPath := filepath.Join(root, "prod_rollup_1h", "data-"+base.Format("2006-01")+".dat")
+	stats, err := WalkDataFileHeaders(dataPath, nil)
+	if err != nil {
+		t.Fatalf("WalkDataFileHeaders failed: %v", err)
+	}
+	if stats.Frames == 0 {
+		t.Fatalf("expected persisted rollup frames on disk after backfill")
+	}
+
+	catalogRaw, err := os.ReadFile(filepath.Join(root, "prod_rollup_1h", "catalog.json"))
+	if err != nil {
+		t.Fatalf("ReadFile rebuilt catalog failed: %v", err)
+	}
+	if !strings.Contains(string(catalogRaw), "temp.office.sum") {
+		t.Fatalf("expected rebuilt catalog to contain rollup metric, got: %s", string(catalogRaw))
 	}
 }
 

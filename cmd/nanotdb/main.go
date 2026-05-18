@@ -76,6 +76,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/v1/import", handleImport(eng))
 	mux.HandleFunc("/api/v1/import/prometheus", handleImport(eng))
+	mux.HandleFunc("/api/v1/rollup/backfill", handleRollupBackfill(eng))
 	mux.HandleFunc("/api/v1/query", handleQuery(eng))
 	mux.HandleFunc("/api/v1/query_range", handleQueryRange(eng))
 	mux.HandleFunc("/api/v1/databases", handleDatabases(eng))
@@ -185,6 +186,53 @@ func handleImport(eng *engine.Engine) http.HandlerFunc {
 			Status: "success",
 			Data: map[string]interface{}{
 				"imported": imported,
+			},
+		})
+	}
+}
+
+func handleRollupBackfill(eng *engine.Engine) http.HandlerFunc {
+	type backfillReq struct {
+		SourceDB  string   `json:"source_db"`
+		SourceDBs []string `json:"source_dbs"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeVMError(w, http.StatusMethodNotAllowed, "bad_data", "method not allowed")
+			return
+		}
+
+		var req backfillReq
+		if r.Body != nil {
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid JSON body: %v", err))
+				return
+			}
+		}
+
+		requested := make([]string, 0, len(req.SourceDBs)+1)
+		if db := strings.TrimSpace(req.SourceDB); db != "" {
+			requested = append(requested, db)
+		}
+		for _, db := range req.SourceDBs {
+			if db = strings.TrimSpace(db); db != "" {
+				requested = append(requested, db)
+			}
+		}
+
+		report, err := eng.BackfillRollups(requested)
+		if err != nil {
+			writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusOK, vmResponse{
+			Status: "success",
+			Data: map[string]interface{}{
+				"resultType": "rollup_backfill",
+				"result":     report,
 			},
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type dbContext struct {
@@ -39,6 +40,11 @@ func resolveRootDir(rootDir string) (string, string, error) {
 }
 
 func resolveDBContext(rootDir string, database string) (dbContext, error) {
+	database, err := normalizeDatabaseName(database)
+	if err != nil {
+		return dbContext{}, err
+	}
+
 	if database == "" {
 		return dbContext{}, fmt.Errorf("--db is required")
 	}
@@ -70,4 +76,13 @@ func resolveDBContext(rootDir string, database string) (dbContext, error) {
 		DataFilePaths: dataFiles,
 		WALFilePaths:  walFiles,
 	}, nil
+}
+
+func normalizeDatabaseName(database string) (string, error) {
+	database = strings.TrimSpace(database)
+	database = strings.Trim(database, "/")
+	if database == "" {
+		return "", fmt.Errorf("--db is required")
+	}
+	return database, nil
 }

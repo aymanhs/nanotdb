@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -274,5 +276,80 @@ func TestHandleMetrics_DatabaseNotFound(t *testing.T) {
 	}
 	if resp.Status != "error" || resp.ErrorType != "not_found" {
 		t.Fatalf("error payload mismatch: got status=%q type=%q", resp.Status, resp.ErrorType)
+	}
+}
+
+func TestHandleRollupBackfill(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll prod failed: %v", err)
+	}
+	manifest := `[rollups]
+enabled = true
+checkpoint_file = "rollup.checkpoints.log"
+default_grace = "0s"
+
+[[rollups.jobs]]
+id = "temp_1h"
+source_metric = "temp.office"
+interval = "1h"
+aggregates = ["sum"]
+destination_db = "prod_rollup_1h"
+destination_metric_prefix = "temp.office"
+`
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte(manifest), 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-3 * time.Hour).Truncate(time.Hour)
+	if err := eng.AddLine("prod/temp.office 10 " + strconv.FormatInt(base.Add(10*time.Minute).UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine first sample failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 20 " + strconv.FormatInt(base.Add(30*time.Minute).UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine second sample failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 1 " + strconv.FormatInt(base.Add(1*time.Hour).UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine close sample failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollup/backfill", bytes.NewBufferString(`{"source_db":"prod"}`))
+	rec := httptest.NewRecorder()
+	handleRollupBackfill(eng)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=%d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string                      `json:"resultType"`
+			Result     engine.RollupBackfillReport `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode response failed: %v", err)
+	}
+	if resp.Status != "success" {
+		t.Fatalf("status mismatch: got=%q want=success", resp.Status)
+	}
+	if resp.Data.ResultType != "rollup_backfill" {
+		t.Fatalf("resultType mismatch: got=%q want=rollup_backfill", resp.Data.ResultType)
+	}
+	if len(resp.Data.Result.DestinationDatabases) != 1 || resp.Data.Result.DestinationDatabases[0] != "prod_rollup_1h" {
+		t.Fatalf("unexpected destination databases: %v", resp.Data.Result.DestinationDatabases)
+	}
+
+	if _, found, err := eng.QueryLast("prod_rollup_1h", "temp.office.sum"); err != nil {
+		t.Fatalf("QueryLast rollup failed: %v", err)
+	} else if !found {
+		t.Fatalf("expected rollup sample after handler backfill")
 	}
 }
