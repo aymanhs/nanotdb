@@ -1,22 +1,106 @@
 # NanoTDB
 
-A small, embedded time-series database designed for resource-constrained hosts
-(Raspberry Pi, edge nodes, IoT gateways). No external dependencies at runtime.
-All data lives in plain files under a single root directory.
+<p align="center">
+  <img src="docs/NanoTDB.png" alt="NanoTDB mascot" width="220">
+</p>
 
-> **Important:** NanoTDB supports automatic aggregates and rollups.
-> When you ingest time-series samples, the engine can automatically maintain
-> aggregate summaries for higher-level time buckets, reducing query cost and
-> improving query performance for long-range or downsampled queries.
-> 
-> This behavior is built into the storage engine and is one of the core
-> differentiators of NanoTDB.
+A small embedded time-series database for Raspberry Pi, edge devices, appliances,
+and other single-node systems where you want local metrics storage without a big
+stack behind it.
+
+NanoTDB is built for the case where InfluxDB-, VictoriaMetrics-, or Prometheus-
+style tooling can feel heavier than the problem. It stores metrics as plain
+files under one directory, supports offline inspection with `nanocli`, and keeps
+rollups inside the engine instead of pushing you into extra services.
+
+## Why NanoTDB
+
+- Plain files on disk: WAL, catalog, manifests, and partitioned `.dat` files are easy to inspect, back up, and reason about.
+- Small-system fit: designed for Raspberry Pi, edge nodes, and other resource-constrained hosts.
+- Offline workflow: `nanocli` can inspect data, export line protocol, inspect WAL files, and rebuild rollups without a running server.
+- Engine-owned rollups: hourly or daily summaries live in the database workflow instead of a separate pipeline.
+- Operationally simple: no external dependencies at runtime, no separate index service, and retention maps cleanly to file deletion.
+
+## Best Fit
+
+NanoTDB is a good fit when you want:
+
+- Local metrics storage on one machine.
+- Something you can understand from the filesystem.
+- A TSDB for hundreds of metrics, not huge multi-tenant cardinality.
+- A small self-hosted stack for sensors, host telemetry, appliances, or embedded apps.
+
+## Not A Fit
+
+NanoTDB is not trying to be:
+
+- A distributed or horizontally scaled TSDB.
+- A high-cardinality metrics backend for large fleets.
+- A system that accepts arbitrary out-of-order writes.
+- A system that hides its durability tradeoffs behind marketing language.
+
+## Use Cases
+
+### Raspberry Pi and edge host telemetry
+
+NanoTDB is a strong fit for small Linux systems where you want to keep metrics
+local, survive restart, and avoid wearing out SD storage with unnecessarily
+heavy write patterns. Pair it with `drip` when you want CPU, memory, disk, IO,
+network, load, one-wire, or SD write probe metrics on one box.
+
+### Local app metrics without a bigger stack
+
+If you have one appliance, one embedded app, or one self-hosted node, NanoTDB
+gives you metric writes, queries, rollups, and offline inspection without
+standing up a larger metrics platform just to answer simple history questions.
+
+### Sensor retention you can inspect directly
+
+If your data is fundamentally numeric time-series data, NanoTDB is often easier
+to live with than plain logs. You keep a queryable history, can inspect the WAL
+or `.dat` files directly with `nanocli`, and can delete old partitions as a
+simple retention policy.
+
+### Long-horizon summaries on small disks
+
+When you want recent raw detail plus longer-term summaries, NanoTDB's built-in
+rollups let you keep local aggregates without building a separate compaction or
+downsampling pipeline.
 
 ---
 
 ## 🚀 Quick Start
 
-**New to NanoDB?** See [**Getting Started**](GETTING_STARTED.md) for installation, compilation, and practical examples using shell scripts and Python.
+Start here:
+
+- [Hello World](docs/HELLO_WORLD.md) for the fastest copy/paste path.
+- [Getting Started](GETTING_STARTED.md) for installation, examples, and a longer guided tour.
+- [Run As A Service](docs/RUN_AS_A_SERVICE.md) for a brief systemd setup path.
+- [Glossary](docs/GLOSSARY.md) for the canonical meaning of database, metric, sample, WAL, and related terms.
+
+### 60-Second Hello World
+
+Terminal 1:
+
+```bash
+mkdir -p ~/nanotdb-data
+./nanotdb --init --config ~/nanotdb-data/engine.toml
+./nanotdb --config ~/nanotdb-data/engine.toml
+```
+
+Terminal 2:
+
+```bash
+curl -X POST "http://localhost:8428/api/v1/import" \
+  -d $'demo/room.temp 21.5\ndemo/room.humidity 48'
+
+curl "http://localhost:8428/api/v1/query?query=demo/room.temp"
+
+./nanocli inspect wal --root ~/nanotdb-data --db demo --verbose
+```
+
+That flow is the point of NanoTDB: start one binary, write a few metrics, query
+them back, and inspect the local files without standing up anything else.
 
 Prefer ready-to-use binaries? Download the latest release assets from
 [GitHub Releases](https://github.com/aymanhs/nanotdb/releases/latest):
@@ -34,143 +118,148 @@ For technical deep-dives, continue below.
 
 ---
 
-## Architecture overview
+## Core Concepts
 
-```
-Engine
- ├── "prod"    Database  → WAL (prod.wal) + Catalog (catalog.json) + partitioned .dat files
- ├── "sensors" Database  → WAL + Catalog + partitioned .dat files
- └── "internal"          → engine self-metrics (same layout, never exposed to users)
-```
+### What is a database?
 
-The `Engine` is the single entry point. It owns a collection of named databases
-and routes ingested samples to the right one based on the line-protocol prefix.
+A database in NanoTDB is an isolated local namespace such as `prod`, `sensors`,
+or `weather`.
 
-Each `Database` has three storage layers:
+Each database has its own:
 
-| Layer | File | Purpose |
-|---|---|---|
-| WAL | `<db>.wal` | Crash-safety: records every sample before it enters the page |
-| Catalog | `catalog.json` | Maps metric names ↔ compact MetricIDs + value types |
-| Data files | `data-<partition>.dat` | Immutable compressed pages flushed from memory |
+- metrics
+- WAL file
+- catalog
+- manifest
+- partitioned `.dat` files
 
----
+That makes it easy to reason about retention, inspection, backup, and failure
+isolation one database at a time.
 
-## Data flow
+### What is a metric?
 
-### Ingest (`AddLine`)
-
-```
-AddLine("prod/room.temp 21.5 1715000000000000000")
-  │
-  ├─ parse line protocol  →  dbName="prod"  metric="room.temp"  ts=…  value=21.5
-  ├─ getOrCreateDB        →  open or reuse prod Database
-  ├─ WAL append           →  write compact record to prod.wal  (crash-safe)
-  ├─ addToOpenDay         →  append to in-memory Page for today's bucket
-  └─ if page full         →  compress + write page frame to data-<partition>.dat
-                              reset WAL (replay no longer needed)
-```
-
-Timestamps must be monotonically non-decreasing per metric across the entire
-write stream. Out-of-order or stale samples are rejected.
-
-### Replay (on engine open)
-
-When a database is opened, the WAL is replayed into the in-memory page if the
-data file is behind. The catalog is used to resolve ValueTypes for metrics that
-omit them (compact format optimization). After a full replay the engine is
-ready to accept new writes.
-
-### Query (`QueryRange`)
-
-```
-QueryRange("prod", "room.temp", fromTS, toTS, stride, callback)
-  │
-  ├─ iterate UTC days in [fromTS, toTS]
-  │    ├─ open data-<partition>.dat  →  scan page frame headers
-  │    │    skip frames outside time window (no decompression)
-  │    │    decompress + scan matching frames
-  │    └─ check in-memory page for today's data
-  └─ call callback for each sample (every Nth if stride > 1)
-```
-
----
-
-## Line protocol
-
-```
-DB/metric.name value [ts]
-```
-
-- `DB` — database name (created automatically on first write)
-- `metric.name` — arbitrary metric identifier (slash-separated namespaces work well)
-- `value` — integer (`42`, `-7`) or float (`3.14`, `1e-3`). An integer literal
-  always creates an `int32` metric; a float literal creates a `float32` metric.
-  Type is fixed on first write; mixing types for the same metric is an error.
-- `ts` — Unix nanosecond timestamp (optional; defaults to `time.Now()`)
+A metric is one numeric time-ordered stream inside a database.
 
 Examples:
 
+- `room.temp`
+- `room.humidity`
+- `cpu.usage_active`
+- `disk.sd_write_probe_ms`
+
+Each metric keeps one numeric type for its lifetime: `int32` or `float32`.
+
+### What does a sample look like?
+
+NanoTDB writes and reads line protocol in this shape:
+
+```text
+DB/metric.name value [timestamp]
 ```
+
+Examples:
+
+```text
 prod/room.temp 21.5 1715000000000000000
 sensors/pressure.hpa 1013
-internal/batch.size 256i
+weather/outdoor.humidity 48
 ```
 
-The `i` suffix forces integer interpretation for values that look like floats.
+- `DB` is the database name.
+- `metric.name` is the metric identifier.
+- `value` is an integer or float.
+- `timestamp` is optional; if omitted, NanoTDB uses the current time.
 
----
+For a deeper storage and query walkthrough, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## WAL format (compact v2)
+### What is the WAL?
 
-Each record is a **uvarint length prefix** followed by a fixed-layout payload:
+WAL means write-ahead log.
 
-```
-[uvarint: payload_len] [payload]
-```
+In NanoTDB, each database has a local `<db>.wal` file that protects the newest
+samples before they are flushed into durable `.dat` pages.
 
-Payload layout:
+That matters for both crashes and normal shutdown:
 
-```
-Offset  Size  Field
-  0      2    MetricID          uint16 LE
-  2      3    TS delta          uint24 LE nanoseconds from baseline
-  5      1    CompactTL flags   bit 7 = new baseline, bit 6 = new metric
-  6      8    Baseline TS       int64 LE  (only when bit 7 set)
-  —      var  name_len+name+vtype         (only when bit 6 set)
-  —      4    Value             int32 or float32 LE, always present
-```
+- On clean shutdown, NanoTDB flushes open pages before exit so recent samples move into durable data files.
+- On restart after a crash or power loss, NanoTDB replays the WAL so unflushed samples can be recovered into the in-memory open page state.
+- Once a page is flushed and no open page still depends on that WAL content, the WAL can be reset.
 
-- **Hot path** (known metric, same baseline): `2+3+1+4 = 10 bytes` + 1 varint = **11 bytes**.
-- A new baseline is emitted on the first record of each WAL and whenever the
-  timestamp gap exceeds ~16.7 ms (2²⁴ ns). Typical sensor streams fit hundreds
-  of seconds between baseline resets.
-- Known metrics (previously seen in the session) omit the name and value type;
-  those fields are recovered from the catalog during replay.
+This is one of NanoTDB's strongest operational properties for edge systems: the
+latest data is not only local, it is recoverable after restart without needing
+an external service.
 
----
+### How WAL and recovery can be tuned
 
-## On-disk layout
+The main WAL and durability knobs are in `engine.toml` and per-database
+manifests:
 
-```
-<root>/
-  engine.toml          — engine configuration (auto-created on first start)
-  <db>/
-    catalog.json       — metric registry: name → id + type
-    manifest.toml      — per-database settings (retention, WAL, page limits)
-    <db>.wal           — write-ahead log (single reusable file)
-    data-<partition>.dat — compressed page frames for completed partitions
-```
+- `wal.max_segment_size`: how large the WAL is allowed to grow before reset after flush.
+- `wal.fsync_policy`: `segment` for better throughput, `always` for stronger per-append durability.
+- `durability.profile`: `strict`, `balanced`, or `throughput` for page/catalog fsync behavior.
+- `manifest_defaults.wal.enabled`: enable or disable WAL for newly created databases.
+- `manifest_defaults.wal.skip_before`: skip WAL for older backfill samples.
+- `manifest_defaults.page.max_records`, `max_bytes`, and `max_age`: control how quickly in-memory pages roll over and flush, which affects how long data remains WAL-backed before landing in `.dat` files.
 
-Data files are append-only sequences of page frames:
+If you want the strongest local recovery posture, the conservative end of the
+range is:
 
-```
-Frame = PageHeader(18 bytes) + compressed_len(uvarint) + S2-compressed payload + CRC32(4 bytes)
-```
+- `wal.fsync_policy = "always"`
+- `durability.profile = "strict"`
 
-The payload is a flat array of interleaved (MetricID, Timestamp, Value) triples,
-sorted by timestamp. S2 compression typically achieves 3–4× on realistic sensor
-data.
+If you want less write overhead and can tolerate more crash risk, move toward
+`segment` and `balanced` or `throughput`.
+
+### Why the data files matter
+
+NanoTDB's durable `.dat` files are small, append-only, and friendly to simple
+retention and backup workflows.
+
+That matters operationally, especially on SD-backed systems:
+
+- small files are easier to inspect and copy
+- retention is just removing old partition files
+- append-only writes are easier on flash media than rewrite-heavy designs
+- compressed page files keep local history practical on small disks
+
+As one real Pi test point, a 69-metric workload sampled every 10 seconds
+produced about `0.7 MB` for a full day in one `.dat` file, which worked out to
+under `2 bytes` per metric point on disk after compression. Treat that as a
+real-world example, not a universal promise, but it shows why NanoTDB can be a
+very SD-friendly fit for local telemetry.
+
+### Why not plain logs?
+
+Plain logs are often enough until you want to ask metric-shaped questions like:
+
+- what was the last temperature?
+- show me the last 24 hours of humidity
+- downsample this series for a dashboard
+- inspect the local data without shipping it anywhere else
+
+You can force numeric history into logs, but querying, retention, aggregation,
+and inspection stay awkward. NanoTDB keeps the operational simplicity of local
+files while giving you metric-native writes, queries, rollups, and offline
+inspection.
+
+### Why not a heavier TSDB?
+
+Sometimes a larger metrics stack is the right answer. NanoTDB is for the cases
+where it is not.
+
+Choose NanoTDB when you want:
+
+- one local node instead of a broader platform
+- plain files you can inspect and back up directly
+- hundreds of metrics, not massive fleet-scale cardinality
+- built-in local rollups without extra components
+
+Choose a larger TSDB when you need:
+
+- very large scale or high-cardinality workloads
+- distributed storage and query execution
+- looser write-ordering expectations
+- a broader ecosystem of integrations than a small local stack needs
 
 ---
 

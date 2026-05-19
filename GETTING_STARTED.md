@@ -1,6 +1,8 @@
-# Getting Started with NanoDB
+# Getting Started with NanoTDB
 
-A beginner-friendly guide to installing, running, and using NanoDB. For technical details, see [README.md](README.md).
+A beginner-friendly guide to installing, running, and using NanoTDB. For technical details, see [README.md](README.md).
+
+If you want the shortest copy/paste path first, start with [docs/HELLO_WORLD.md](docs/HELLO_WORLD.md).
 
 ---
 
@@ -70,6 +72,8 @@ go build -o drip ./cmd/drip
 
 ## Quick Start
 
+This guide is the longer walkthrough. If you want the shortest path possible, use [docs/HELLO_WORLD.md](docs/HELLO_WORLD.md).
+
 ### 1. Create a data directory
 
 ```bash
@@ -108,14 +112,31 @@ output = "/tmp/nanotdb-debug.log"
 level = "debug"
 ```
 
+At this point NanoTDB is already WAL-protecting recent samples and will replay
+that WAL on restart after a crash. For the recovery model and tuning knobs, see
+[README.md](README.md) and [docs/GLOSSARY.md](docs/GLOSSARY.md).
+
 ---
 
 ## Pushing Data
 
-NanoDB accepts data in **line protocol** format:
+Before the examples: the name before the slash is the database, the name after
+the slash is the metric, and one written value is a sample. For the canonical
+definitions, see [README.md](README.md) and [docs/GLOSSARY.md](docs/GLOSSARY.md).
+
+NanoTDB accepts data in **line protocol** format:
 ```
 database/metric_name value [timestamp]
 ```
+
+Example:
+
+```text
+weather/outdoor.temp 22.1 1715000000000000000
+```
+
+That means database `weather`, metric `outdoor.temp`, value `22.1`, timestamp
+`1715000000000000000`.
 
 ### Example 1: Push data from the shell
 
@@ -129,7 +150,7 @@ curl -X POST "http://localhost:8428/api/v1/import" \
   -d "mydb/humidity 65"
 ```
 
-Each line becomes one data point. If you don't provide a timestamp, the current time is used.
+Each line becomes one sample. If you don't provide a timestamp, the current time is used.
 
 ### Example 2: Push data with timestamps
 
