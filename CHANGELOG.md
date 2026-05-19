@@ -7,21 +7,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-05-19
-
 ### Added
 - Structured `slog` logging configuration via `[logging]` / `[[logging.logger]]`, plus file-only diagnostic logging controls for `nanocli` with `--log-file` and `--log-level`.
 - Task-oriented onboarding docs with a copy/paste Hello World guide, a dedicated architecture page, a brief systemd service guide, and glossary-linked terminology references.
-- Rollup lineage metadata for metrics discovery endpoint (opt-in):
-  - `GET /api/v1/metrics?db=<name>&details=true&lineage=rollups`
-  - Supports bounded multi-hop traversal with `max_hops` (range `1..5`).
-- New `internal/web` package serving a built-in lightweight dashboard.
-- Dashboard can be opened from both `/` and `/dashboard`.
-- Added `[web]` runtime config section in `engine.toml`.
-- Added `/api/dashboard-config` endpoint to serve user-defined dashboard JSON to browser clients.
-- Split web UI into two pages:
-  - user-defined dashboard at `/` and `/dashboard`
-  - ad-hoc explorer at `/adhoc`
 
 ### Changed
 - The main README now positions NanoTDB more clearly around edge and single-node use cases, WAL-backed recovery, SD-friendly storage, and fit-versus-tradeoff guidance instead of leading with internals.

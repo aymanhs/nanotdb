@@ -53,7 +53,17 @@ type vmMatrixItem struct {
 func main() {
 	configPath := flag.String("config", "./devdata/engine.toml", "path to engine config TOML")
 	initOnly := flag.Bool("init", false, "create default config file and exit")
+	exportWebAssets := flag.String("export-web-assets", "", "export embedded web UI assets to a directory and exit")
 	flag.Parse()
+
+	if strings.TrimSpace(*exportWebAssets) != "" {
+		if err := web.ExportAssets(*exportWebAssets); err != nil {
+			fmt.Fprintf(os.Stderr, "export web assets failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "exported web assets to %s\n", *exportWebAssets)
+		return
+	}
 
 	if *initOnly {
 		if err := initConfigFile(*configPath); err != nil {
@@ -176,6 +186,8 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 			Title          string `toml:"title"`
 			RefreshSeconds int    `toml:"refresh_seconds"`
 			DashboardFile  string `toml:"dashboard_config"`
+			WebRoot        string `toml:"web_root"`
+			APIBaseURL     string `toml:"api_base_url"`
 		} `toml:"web"`
 	}
 	raw, err := os.ReadFile(configPath)
@@ -203,6 +215,12 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 	}
 	if v := strings.TrimSpace(webTOML.Web.DashboardFile); v != "" {
 		webCfg.DashboardFile = v
+	}
+	if v := strings.TrimSpace(webTOML.Web.WebRoot); v != "" {
+		webCfg.WebRoot = v
+	}
+	if v := strings.TrimSpace(webTOML.Web.APIBaseURL); v != "" {
+		webCfg.APIBaseURL = v
 	}
 	return runtimeConfig{DataDir: dataDir, EngineConfig: cfg, StatsInterval: statsInterval, DBDefaults: dbDefaults, WebConfig: webCfg}, nil
 }

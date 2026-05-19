@@ -4,25 +4,22 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ .Title }}</title>
+  <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css" />
   <link rel="stylesheet" href="/assets/common.css" />
   <link rel="stylesheet" href="{{ .AssetBase }}/dashboard.css" />
 </head>
 <body>
   <main class="page">
     <header class="page-header">
-      <nav class="top-nav" aria-label="Navigation">
-        <a href="/">Home</a>
-        <a href="{{ .DashboardPath }}">Dashboard</a>
-        <a href="{{ .AdhocPath }}">AdHoc</a>
-      </nav>
       <h1 id="dashboard-title">{{ .Title }}</h1>
       <nav id="group-nav" class="group-nav"></nav>
-      <p class="sub">User-defined dashboard config + client-side queries</p>
     </header>
 
     <div id="widgets"></div>
   </main>
 
+  <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>
+  <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js" defer></script>
   <script src="{{ .AssetBase }}/dashboard_app.js" defer></script>
 </body>
 </html>

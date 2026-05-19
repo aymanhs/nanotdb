@@ -18,27 +18,33 @@
       "type": "numbers",
       "title": "System Snapshot",
       "refresh_sec": 10,
-      "decimals": 2,
       "series": [
         {
           "label": "Load 1m",
-          "metric": "sys.load1"
+          "metric": "sys.load1",
+          "transform": { "decimals": 2 }
         },
         {
           "label": "Load 5m",
-          "metric": "sys.load5"
+          "metric": "sys.load5",
+          "transform": { "decimals": 2 }
         },
         {
-          "label": "Mem Avail KB",
-          "metric": "mem.available"
+          "label": "Mem Avail",
+          "metric": "mem.available",
+          "transform": { "factor": 0.000001, "unit": " GB", "decimals": 1 },
+          "thresholds": { "direction": "below", "warning": 1.0, "critical": 0.5 }
         },
         {
-          "label": "CPU kHz",
-          "metric": "cpu.freq_khz"
+          "label": "CPU Clock",
+          "metric": "cpu.freq_khz",
+          "transform": { "factor": 0.000001, "unit": " GHz", "decimals": 2 }
         },
         {
-          "label": "CPU Temp mC",
-          "metric": "temp.cpu"
+          "label": "CPU Temp",
+          "metric": "temp.cpu",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 },
+          "thresholds": { "direction": "above", "warning": 70, "critical": 80 }
         }
       ]
     },
@@ -67,19 +73,24 @@
       "type": "numbers",
       "title": "Storage Snapshot",
       "refresh_sec": 15,
-      "decimals": 2,
       "series": [
         {
           "label": "Root Used %",
-          "metric": "diskfs.root.used_pct"
+          "metric": "diskfs.root.used_pct",
+          "transform": { "unit": "%", "decimals": 1 },
+          "thresholds": { "direction": "above", "warning": 80, "critical": 90 }
         },
         {
-          "label": "Root Avail B",
-          "metric": "diskfs.root.bytes_avail"
+          "label": "Root Free",
+          "metric": "diskfs.root.bytes_avail",
+          "transform": { "factor": 0.0000000009313225746154785, "unit": " GiB", "decimals": 1 },
+          "thresholds": { "direction": "below", "warning": 8, "critical": 4 }
         },
         {
           "label": "SD Write ms",
-          "metric": "disk.sd_write_probe_ms"
+          "metric": "disk.sd_write_probe_ms",
+          "transform": { "unit": " ms", "decimals": 1 },
+          "thresholds": { "direction": "above", "warning": 25, "critical": 50 }
         }
       ]
     },
@@ -87,23 +98,27 @@
       "type": "numbers",
       "title": "Temperatures",
       "refresh_sec": 15,
-      "decimals": 0,
       "series": [
         {
           "label": "CPU",
-          "metric": "temp.cpu"
+          "metric": "temp.cpu",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 },
+          "thresholds": { "direction": "above", "warning": 70, "critical": 80 }
         },
         {
           "label": "Office Dry",
-          "metric": "temp.office_dry.mdeg"
+          "metric": "temp.office_dry.mdeg",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         },
         {
           "label": "Office Wet",
-          "metric": "temp.office_wet.mdeg"
+          "metric": "temp.office_wet.mdeg",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         },
         {
           "label": "Outdoor",
-          "metric": "temp.out_dry.mdeg"
+          "metric": "temp.out_dry.mdeg",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         }
       ]
     },
@@ -116,19 +131,23 @@
       "series": [
         {
           "label": "CPU",
-          "metric": "temp.cpu"
+          "metric": "temp.cpu",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         },
         {
           "label": "Office Dry",
-          "metric": "temp.office_dry.mdeg"
+          "metric": "temp.office_dry.mdeg",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         },
         {
           "label": "Office Wet",
-          "metric": "temp.office_wet.mdeg"
+          "metric": "temp.office_wet.mdeg",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         },
         {
           "label": "Outdoor",
-          "metric": "temp.out_dry.mdeg"
+          "metric": "temp.out_dry.mdeg",
+          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
         }
       ]
     }

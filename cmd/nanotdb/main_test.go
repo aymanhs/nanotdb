@@ -91,7 +91,7 @@ func TestLoadRuntimeConfig_Defaults(t *testing.T) {
 func TestLoadRuntimeConfig_WebOverrides(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "engine.toml")
-	content := []byte("[engine]\nlisten = \":9998\"\n[wal]\nmax_segment_size = 222\n[web]\nenabled = false\nbase_path = \"/dash\"\nadhoc_path = \"/quick\"\ntitle = \"My Dash\"\nrefresh_seconds = 7\ndashboard_config = \"custom/dashboard.json\"\n")
+	content := []byte("[engine]\nlisten = \":9998\"\n[wal]\nmax_segment_size = 222\n[web]\nenabled = false\nbase_path = \"/dash\"\nadhoc_path = \"/quick\"\ntitle = \"My Dash\"\nrefresh_seconds = 7\ndashboard_config = \"custom/dashboard.json\"\nweb_root = \"custom/ui\"\napi_base_url = \"https://api.example.test\"\n")
 	if err := os.WriteFile(configPath, content, 0644); err != nil {
 		t.Fatalf("WriteFile engine.toml failed: %v", err)
 	}
@@ -118,6 +118,12 @@ func TestLoadRuntimeConfig_WebOverrides(t *testing.T) {
 	}
 	if webCfg.DashboardFile != "custom/dashboard.json" {
 		t.Fatalf("web dashboard config override mismatch: got=%q want=%q", webCfg.DashboardFile, "custom/dashboard.json")
+	}
+	if webCfg.WebRoot != "custom/ui" {
+		t.Fatalf("web root override mismatch: got=%q want=%q", webCfg.WebRoot, "custom/ui")
+	}
+	if webCfg.APIBaseURL != "https://api.example.test" {
+		t.Fatalf("web api base override mismatch: got=%q want=%q", webCfg.APIBaseURL, "https://api.example.test")
 	}
 }
 

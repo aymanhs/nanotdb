@@ -25,6 +25,8 @@ type Config struct {
 	Title          string
 	RefreshSeconds int
 	DashboardFile  string
+	WebRoot        string
+	APIBaseURL     string
 }
 
 type indexTemplateData struct {
@@ -46,6 +48,34 @@ func DefaultConfig() Config {
 	}
 }
 
+func ExportAssets(dstDir string) error {
+	dstDir = strings.TrimSpace(dstDir)
+	if dstDir == "" {
+		return os.ErrInvalid
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	return fs.WalkDir(staticFS, "static", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(name, "static/")
+		if rel == "static" || rel == "" {
+			return nil
+		}
+		target := filepath.Join(dstDir, filepath.FromSlash(rel))
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		raw, err := fs.ReadFile(staticFS, name)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, raw, 0o644)
+	})
+}
+
 func DefaultDashboardConfig() []byte {
 	return append([]byte(nil), defaultDashboardConfig...)
 }
@@ -55,42 +85,10 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	if !cfg.Enabled {
 		return
 	}
-
-	dashboardIndexRaw, err := fs.ReadFile(staticFS, "static/dashboard.html")
-	if err != nil {
-		panic("internal/web: missing static/dashboard.html")
-	}
-	dashboardTmpl, err := template.New("dashboard-index").Parse(string(dashboardIndexRaw))
-	if err != nil {
-		panic("internal/web: invalid dashboard template")
-	}
-
-	adhocIndexRaw, err := fs.ReadFile(staticFS, "static/index.html")
-	if err != nil {
-		panic("internal/web: missing static/index.html")
-	}
-	adhocTmpl, err := template.New("adhoc-index").Parse(string(adhocIndexRaw))
-	if err != nil {
-		panic("internal/web: invalid adhoc template")
-	}
-
-	dashboardAssets, err := fs.Sub(staticFS, "static/dashboard_assets")
-	if err != nil {
-		panic("internal/web: dashboard assets unavailable")
-	}
-	mux.Handle(cfg.BasePath+"/assets/", http.StripPrefix(cfg.BasePath+"/assets/", http.FileServer(http.FS(dashboardAssets))))
-
-	adhocAssets, err := fs.Sub(staticFS, "static/assets")
-	if err != nil {
-		panic("internal/web: adhoc assets unavailable")
-	}
-	mux.Handle(cfg.AdhocPath+"/assets/", http.StripPrefix(cfg.AdhocPath+"/assets/", http.FileServer(http.FS(adhocAssets))))
-
-	commonAssets, err := fs.Sub(staticFS, "static/common_assets")
-	if err != nil {
-		panic("internal/web: common assets unavailable")
-	}
-	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(commonAssets))))
+	assetSource := newAssetSource(cfg, dataDir)
+	mux.Handle(cfg.BasePath+"/assets/", http.StripPrefix(cfg.BasePath+"/assets/", assetSource.dashboardAssetsHandler()))
+	mux.Handle(cfg.AdhocPath+"/assets/", http.StripPrefix(cfg.AdhocPath+"/assets/", assetSource.adhocAssetsHandler()))
+	mux.Handle("/assets/", http.StripPrefix("/assets/", assetSource.commonAssetsHandler()))
 
 	dashboardJSONPath := resolveDashboardPath(dataDir, cfg.DashboardFile)
 	mux.HandleFunc("/api/dashboard-config", func(w http.ResponseWriter, _ *http.Request) {
@@ -104,28 +102,39 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	})
 
 	serveDashboard := func(w http.ResponseWriter, _ *http.Request) {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"basePath":       cfg.BasePath,
+			"refreshSeconds": cfg.RefreshSeconds,
+			"apiBaseURL":     cfg.APIBaseURL,
+		})
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = dashboardTmpl.Execute(w, indexTemplateData{
+		if err := assetSource.executeDashboardTemplate(w, indexTemplateData{
 			Title:         cfg.Title,
 			AssetBase:     cfg.BasePath + "/assets",
+			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
 			AdhocPath:     cfg.AdhocPath,
-		})
+		}); err != nil {
+			http.Error(w, "failed to render dashboard", http.StatusInternalServerError)
+		}
 	}
 
 	serveAdhoc := func(w http.ResponseWriter, _ *http.Request) {
 		payload, _ := json.Marshal(map[string]interface{}{
 			"basePath":       cfg.BasePath,
 			"refreshSeconds": cfg.RefreshSeconds,
+			"apiBaseURL":     cfg.APIBaseURL,
 		})
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = adhocTmpl.Execute(w, indexTemplateData{
+		if err := assetSource.executeAdhocTemplate(w, indexTemplateData{
 			Title:         cfg.Title,
 			AssetBase:     cfg.AdhocPath + "/assets",
 			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
 			AdhocPath:     cfg.AdhocPath,
-		})
+		}); err != nil {
+			http.Error(w, "failed to render adhoc explorer", http.StatusInternalServerError)
+		}
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -182,10 +191,95 @@ func normalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.DashboardFile) == "" {
 		cfg.DashboardFile = "dashboard.json"
 	}
+	cfg.WebRoot = strings.TrimSpace(cfg.WebRoot)
+	cfg.APIBaseURL = strings.TrimRight(strings.TrimSpace(cfg.APIBaseURL), "/")
 	if cfg.RefreshSeconds <= 0 {
 		cfg.RefreshSeconds = 10
 	}
 	return cfg
+}
+
+type assetSource struct {
+	dashboardTemplatePath string
+	adhocTemplatePath     string
+	dashboardAssets       http.Handler
+	adhocAssets           http.Handler
+	commonAssets          http.Handler
+}
+
+func newAssetSource(cfg Config, dataDir string) assetSource {
+	webRoot := resolveWebRoot(dataDir, cfg.WebRoot)
+	if webRoot != "" {
+		return assetSource{
+			dashboardTemplatePath: filepath.Join(webRoot, "dashboard.html"),
+			adhocTemplatePath:     filepath.Join(webRoot, "index.html"),
+			dashboardAssets:       http.FileServer(http.Dir(filepath.Join(webRoot, "dashboard_assets"))),
+			adhocAssets:           http.FileServer(http.Dir(filepath.Join(webRoot, "assets"))),
+			commonAssets:          http.FileServer(http.Dir(filepath.Join(webRoot, "common_assets"))),
+		}
+	}
+
+	dashboardAssets, err := fs.Sub(staticFS, "static/dashboard_assets")
+	if err != nil {
+		panic("internal/web: dashboard assets unavailable")
+	}
+	adhocAssets, err := fs.Sub(staticFS, "static/assets")
+	if err != nil {
+		panic("internal/web: adhoc assets unavailable")
+	}
+	commonAssets, err := fs.Sub(staticFS, "static/common_assets")
+	if err != nil {
+		panic("internal/web: common assets unavailable")
+	}
+	return assetSource{
+		dashboardTemplatePath: "static/dashboard.html",
+		adhocTemplatePath:     "static/index.html",
+		dashboardAssets:       http.FileServer(http.FS(dashboardAssets)),
+		adhocAssets:           http.FileServer(http.FS(adhocAssets)),
+		commonAssets:          http.FileServer(http.FS(commonAssets)),
+	}
+}
+
+func (s assetSource) dashboardAssetsHandler() http.Handler { return s.dashboardAssets }
+func (s assetSource) adhocAssetsHandler() http.Handler     { return s.adhocAssets }
+func (s assetSource) commonAssetsHandler() http.Handler    { return s.commonAssets }
+
+func (s assetSource) executeDashboardTemplate(w http.ResponseWriter, data indexTemplateData) error {
+	return s.executeTemplate(w, s.dashboardTemplatePath, "dashboard-index", data)
+}
+
+func (s assetSource) executeAdhocTemplate(w http.ResponseWriter, data indexTemplateData) error {
+	return s.executeTemplate(w, s.adhocTemplatePath, "adhoc-index", data)
+}
+
+func (s assetSource) executeTemplate(w http.ResponseWriter, pathName, tmplName string, data indexTemplateData) error {
+	raw, err := s.readFile(pathName)
+	if err != nil {
+		return err
+	}
+	tmpl, err := template.New(tmplName).Parse(string(raw))
+	if err != nil {
+		return err
+	}
+	return tmpl.Execute(w, data)
+}
+
+func (s assetSource) readFile(pathName string) ([]byte, error) {
+	if strings.HasPrefix(pathName, "static/") {
+		return fs.ReadFile(staticFS, pathName)
+	}
+	return os.ReadFile(pathName)
+}
+
+func resolveWebRoot(dataDir, webRoot string) string {
+	webRoot = strings.TrimSpace(webRoot)
+	if webRoot == "" {
+		return ""
+	}
+	if filepath.IsAbs(webRoot) {
+		return webRoot
+	}
+	return filepath.Join(dataDir, webRoot)
 }
 
 func resolveDashboardPath(dataDir, dashboardFile string) string {

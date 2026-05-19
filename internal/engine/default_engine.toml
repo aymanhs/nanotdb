@@ -26,6 +26,14 @@ refresh_seconds = 10
 # Dashboard configuration JSON file path.
 # Relative paths are resolved against the engine root data directory.
 dashboard_config = "dashboard.json"
+# Optional UI asset/template override directory.
+# When set, NanoTDB serves dashboard.html, index.html, dashboard_assets/, assets/,
+# and common_assets/ from this directory instead of the embedded bundle.
+# Relative paths are resolved against the engine root data directory.
+web_root = ""
+# Optional API base URL injected into the browser UI.
+# Leave empty for same-origin requests. Set this when hosting the UI separately.
+api_base_url = ""
 
 [wal]
 # Max WAL segment size in bytes.

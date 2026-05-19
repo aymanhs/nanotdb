@@ -1,5 +1,10 @@
 (function () {
-  const cfg = window.NANOTDB_DASH_CONFIG || { basePath: "/dashboard", refreshSeconds: 10 };
+  const cfg = window.NANOTDB_DASH_CONFIG || { basePath: "/dashboard", refreshSeconds: 10, apiBaseURL: "" };
+
+  function apiURL(path) {
+    const base = typeof cfg.apiBaseURL === "string" ? cfg.apiBaseURL.replace(/\/$/, "") : "";
+    return base + path;
+  }
 
   const dbSelect = document.getElementById("dbSelect");
   const metricInput = document.getElementById("metricInput");
@@ -92,7 +97,7 @@
   }
 
   async function loadDatabases() {
-    const payload = await fetchJSON("/api/v1/databases");
+    const payload = await fetchJSON(apiURL("/api/v1/databases"));
     const items = (payload.data && payload.data.result) || [];
     dbSelect.innerHTML = "";
     items.forEach((name) => {
@@ -114,7 +119,7 @@
     if (!db) {
       return;
     }
-    const payload = await fetchJSON("/api/v1/metrics?db=" + encodeURIComponent(db));
+    const payload = await fetchJSON(apiURL("/api/v1/metrics?db=" + encodeURIComponent(db)));
     const items = (payload.data && payload.data.result) || [];
     metricCatalog = items.slice();
     metricsOptions.innerHTML = "";
@@ -135,7 +140,7 @@
     cards.innerHTML = "";
     const jobs = metrics.map(async (metric) => {
       const data = await fetchJSON(
-        "/api/v1/query?db=" + encodeURIComponent(db) + "&query=" + encodeURIComponent(metric)
+        apiURL("/api/v1/query?db=" + encodeURIComponent(db) + "&query=" + encodeURIComponent(metric))
       );
       const result = data.data && data.data.result && data.data.result[0];
       const card = document.createElement("div");
@@ -157,12 +162,12 @@
   }
 
   async function loadSeries(db, metric, fromIso, toIso, step) {
-    const url =
-      "/api/v1/query_range?db=" + encodeURIComponent(db) +
+  const url = apiURL(
+    "/api/v1/query_range?db=" + encodeURIComponent(db) +
       "&query=" + encodeURIComponent(metric) +
       "&start=" + encodeURIComponent(fromIso) +
       "&end=" + encodeURIComponent(toIso) +
-      "&step=" + encodeURIComponent(step);
+    "&step=" + encodeURIComponent(step));
     const payload = await fetchJSON(url);
     const result = payload.data && payload.data.result && payload.data.result[0];
     if (!result || !result.values) {
