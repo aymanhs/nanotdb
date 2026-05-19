@@ -7,8 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-19
+
 ### Added
 - Structured `slog` logging configuration via `[logging]` / `[[logging.logger]]`, plus file-only diagnostic logging controls for `nanocli` with `--log-file` and `--log-level`.
+- Task-oriented onboarding docs with a copy/paste Hello World guide, a dedicated architecture page, a brief systemd service guide, and glossary-linked terminology references.
+
+### Changed
+- The main README now positions NanoTDB more clearly around edge and single-node use cases, WAL-backed recovery, SD-friendly storage, and fit-versus-tradeoff guidance instead of leading with internals.
 
 ### Fixed
 - WAL reset now flushes eligible non-current open day pages during ingest, fixing a case where a stale pre-midnight page could block WAL truncation after midnight and let the active WAL grow far larger than expected.
