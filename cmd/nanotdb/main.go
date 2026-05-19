@@ -8,7 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,10 +18,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BurntSushi/toml"
-
 	"github.com/aymanhs/nanotdb/internal/engine"
 )
+
+type runtimeConfig struct {
+	DataDir       string
+	EngineConfig  engine.EngineConfig
+	StatsInterval time.Duration
+	DBDefaults    engine.DBInfo
+}
 
 type vmResponse struct {
 	Status    string      `json:"status"`
@@ -49,24 +54,38 @@ func main() {
 
 	if *initOnly {
 		if err := initConfigFile(*configPath); err != nil {
-			log.Fatalf("init failed: %v", err)
+			fmt.Fprintf(os.Stderr, "init failed: %v\n", err)
+			os.Exit(1)
 		}
-		log.Printf("initialized config at %s", *configPath)
+		fmt.Fprintf(os.Stderr, "initialized config at %s\n", *configPath)
 		return
 	}
 
-	listenAddr, dataDir, walMaxSegBytes, err := loadRuntimeConfig(*configPath)
+	runtimeCfg, err := loadRuntimeConfig(*configPath)
 	if err != nil {
-		log.Fatalf("load runtime config failed: %v", err)
+		fmt.Fprintf(os.Stderr, "load runtime config failed: %v\n", err)
+		os.Exit(1)
 	}
-
-	eng, err := engine.OpenEngine(dataDir, walMaxSegBytes)
+	logger, closeLogger, err := engine.NewLogger(runtimeCfg.EngineConfig.Logging)
 	if err != nil {
-		log.Fatalf("open engine failed: %v", err)
+		fmt.Fprintf(os.Stderr, "initialize logger failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := closeLogger(); err != nil {
+			fmt.Fprintf(os.Stderr, "close logger failed: %v\n", err)
+		}
+	}()
+	slog.SetDefault(logger)
+
+	eng, err := engine.OpenEngineWithConfig(runtimeCfg.DataDir, runtimeCfg.EngineConfig, runtimeCfg.StatsInterval, runtimeCfg.DBDefaults, logger)
+	if err != nil {
+		logger.Error("open engine failed", "error", err)
+		os.Exit(1)
 	}
 	defer func() {
 		if err := eng.Close(); err != nil {
-			log.Printf("engine close failed: %v", err)
+			logger.Error("engine close failed", "error", err)
 		}
 	}()
 
@@ -83,8 +102,8 @@ func main() {
 	mux.HandleFunc("/api/v1/metrics", handleMetrics(eng))
 
 	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           mux,
+		Addr:              runtimeCfg.EngineConfig.Engine.Listen,
+		Handler:           withRequestLogging(logger, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -92,14 +111,16 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
+		logger.Info("shutdown signal received")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	}()
 
-	log.Printf("nanotdb server listening on %s (config=%s data-dir=%s)", listenAddr, *configPath, dataDir)
+	logger.Info("nanotdb server listening", "listen", runtimeCfg.EngineConfig.Engine.Listen, "config", *configPath, "data_dir", runtimeCfg.DataDir)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server failed: %v", err)
+		logger.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -122,35 +143,48 @@ func initConfigFile(configPath string) error {
 	return eng.Close()
 }
 
-func loadRuntimeConfig(configPath string) (listenAddr string, dataDir string, walMaxSegBytes int64, err error) {
-	dataDir, err = configDataDir(configPath)
+func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
+	dataDir, err := configDataDir(configPath)
 	if err != nil {
-		return "", "", 0, err
+		return runtimeConfig{}, err
 	}
-	raw, err := os.ReadFile(configPath)
+	cfg, statsInterval, dbDefaults, err := engine.LoadEngineConfig(dataDir, 0)
 	if err != nil {
-		return "", "", 0, err
+		return runtimeConfig{}, err
 	}
-	var cfg struct {
-		Engine struct {
-			Listen string `toml:"listen"`
-		} `toml:"engine"`
-		WAL struct {
-			MaxSegmentSize int64 `toml:"max_segment_size"`
-		} `toml:"wal"`
+	return runtimeConfig{DataDir: dataDir, EngineConfig: cfg, StatsInterval: statsInterval, DBDefaults: dbDefaults}, nil
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecorder) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func withRequestLogging(logger *slog.Logger, next http.Handler) http.Handler {
+	if logger == nil {
+		return next
 	}
-	if _, err := toml.Decode(string(raw), &cfg); err != nil {
-		return "", "", 0, err
-	}
-	listenAddr = strings.TrimSpace(cfg.Engine.Listen)
-	if listenAddr == "" {
-		listenAddr = ":8428"
-	}
-	walMaxSegBytes = cfg.WAL.MaxSegmentSize
-	if walMaxSegBytes <= 0 {
-		walMaxSegBytes = 64 * 1024 * 1024
-	}
-	return listenAddr, dataDir, walMaxSegBytes, nil
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !logger.Enabled(r.Context(), engine.TraceSlogLevel) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		logger.Log(r.Context(), engine.TraceSlogLevel, "http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration", time.Since(start),
+			"remote_addr", r.RemoteAddr,
+		)
+	})
 }
 
 func handleImport(eng *engine.Engine) http.HandlerFunc {

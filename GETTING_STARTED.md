@@ -90,12 +90,23 @@ This creates a configuration file. You can edit it later if needed, but the defa
 ./nanotdb --config ~/nanotdb-data/engine.toml
 ```
 
-You should see output like:
-```
-Server listening on :8428
-```
+With the default config, startup emits sparse `info` logs to stderr, including the listen address.
 
 The server is now running and ready to receive data. Keep this terminal open, or run it in the background.
+
+If you want file-backed logs, edit `~/nanotdb-data/engine.toml` and add logger entries like:
+
+```toml
+[logging]
+
+[[logging.logger]]
+output = "console"
+level = "info"
+
+[[logging.logger]]
+output = "/tmp/nanotdb-debug.log"
+level = "debug"
+```
 
 ---
 
@@ -461,6 +472,8 @@ query_recent("home_sensors", "living_room.temperature", hours=1)
 
 The `nanocli` tool lets you inspect and manage data without running the server.
 
+`nanocli` stays quiet by default and only writes diagnostics if you opt in with `--log-file`. If you pass `--log-file` without `--log-level`, it defaults to `debug`. `--log-level` on its own is rejected.
+
 ### Inspect database
 
 ```bash
@@ -474,6 +487,7 @@ Inspect only data files or WAL files:
 ```bash
 ./nanocli inspect dat --root ~/nanotdb-data --db home_sensors --verbose
 ./nanocli inspect wal --root ~/nanotdb-data --db home_sensors --verbose
+./nanocli inspect wal --root ~/nanotdb-data --db home_sensors --log-file /tmp/nanocli.log --log-level trace
 ```
 
 Verbose terminal output is rendered as aligned tables. DAT output shows per-file and per-page size statistics; WAL output shows per-file size/decode/tail diagnostics. Human-readable output uses `start` plus `duration`; `--json` keeps raw timestamps.

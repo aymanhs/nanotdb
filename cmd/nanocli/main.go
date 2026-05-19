@@ -2,30 +2,52 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"strings"
+
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	args, logCfg, err := parseGlobalLoggingArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
+	logger, closeLogger, err := newCLILogger(logCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := closeLogger(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: close logger failed: %v\n", err)
+		}
+	}()
+	slog.SetDefault(logger)
+
+	if len(args) < 1 {
 		printUsage(os.Stderr)
 		os.Exit(2)
 	}
 
-	cmd := os.Args[1]
-	args := os.Args[2:]
+	cmd := args[0]
+	args = args[1:]
 
-	var err error
+	var runErr error
 	switch cmd {
 	case "inspect":
-		err = runInspect(args)
+		runErr = runInspect(args)
 	case "import":
-		err = runImport(args)
+		runErr = runImport(args)
 	case "rollup":
-		err = runRollup(args)
+		runErr = runRollup(args)
 	case "export":
-		err = runExport(args)
+		runErr = runExport(args)
 	case "query":
-		err = runQuery(args)
+		runErr = runQuery(args)
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return
@@ -35,10 +57,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err == nil {
+	if runErr == nil {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	logger.Debug("nanocli command failed", "command", cmd, "error", runErr)
+	fmt.Fprintf(os.Stderr, "error: %v\n", runErr)
 	os.Exit(1)
 }
 
@@ -53,4 +76,61 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  nanocli rollup --root <root-dir> [--db <source-database>] [--json]")
 	fmt.Fprintln(w, "  nanocli export --root <root-dir> --db <database> [--out <line-protocol-file>] [--json]")
 	fmt.Fprintln(w, "  nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--format table|json]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Global logging flags:")
+	fmt.Fprintln(w, "  --log-file <path>   append diagnostics to a file")
+	fmt.Fprintln(w, "  --log-level <level> set diagnostics level: debug or trace (requires --log-file)")
+}
+
+type cliLogConfig struct {
+	File  string
+	Level string
+}
+
+func parseGlobalLoggingArgs(args []string) ([]string, cliLogConfig, error) {
+	remaining := make([]string, 0, len(args))
+	var cfg cliLogConfig
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--log-file":
+			i++
+			if i >= len(args) {
+				return nil, cliLogConfig{}, fmt.Errorf("--log-file requires a value")
+			}
+			cfg.File = args[i]
+		case strings.HasPrefix(arg, "--log-file="):
+			cfg.File = strings.TrimPrefix(arg, "--log-file=")
+		case arg == "--log-level":
+			i++
+			if i >= len(args) {
+				return nil, cliLogConfig{}, fmt.Errorf("--log-level requires a value")
+			}
+			cfg.Level = args[i]
+		case strings.HasPrefix(arg, "--log-level="):
+			cfg.Level = strings.TrimPrefix(arg, "--log-level=")
+		default:
+			remaining = append(remaining, arg)
+		}
+	}
+
+	if cfg.File == "" && cfg.Level != "" {
+		return nil, cliLogConfig{}, fmt.Errorf("--log-level requires --log-file")
+	}
+	if cfg.File != "" && cfg.Level == "" {
+		cfg.Level = engine.LogLevelDebug
+	}
+	return remaining, cfg, nil
+}
+
+func newCLILogger(cfg cliLogConfig) (*slog.Logger, func() error, error) {
+	if cfg.File == "" {
+		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() error { return nil }, nil
+	}
+	logger, closeFn, err := engine.NewLogger(engine.EngineConfigLogging{Loggers: []engine.EngineConfigLogger{{Output: cfg.File, Level: cfg.Level}}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return logger, closeFn, nil
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path"
@@ -94,6 +95,7 @@ type EngineConfig struct {
 	Engine           EngineConfigEngine           `toml:"engine"`
 	WAL              EngineConfigWAL              `toml:"wal"`
 	Durability       EngineConfigDurability       `toml:"durability"`
+	Logging          EngineConfigLogging          `toml:"logging"`
 	Stats            EngineConfigStats            `toml:"stats"`
 	Defaults         EngineConfigDefaults         `toml:"defaults"`
 	ManifestDefaults EngineConfigManifestDefaults `toml:"manifest_defaults"`
@@ -110,6 +112,15 @@ type EngineConfigWAL struct {
 
 type EngineConfigDurability struct {
 	Profile string `toml:"profile"`
+}
+
+type EngineConfigLogging struct {
+	Loggers []EngineConfigLogger `toml:"logger"`
+}
+
+type EngineConfigLogger struct {
+	Output string `toml:"output"`
+	Level  string `toml:"level"`
 }
 
 type EngineConfigStats struct {
@@ -141,6 +152,12 @@ const (
 	DurabilityProfileThroughput = "throughput"
 )
 
+const (
+	LogLevelInfo  = "info"
+	LogLevelDebug = "debug"
+	LogLevelTrace = "trace"
+)
+
 //go:embed default_engine.toml
 var defaultEngineConfigTOML string
 
@@ -151,6 +168,8 @@ type Engine struct {
 	WALMaxSegSize  int64
 	WALFsyncPolicy string
 	Durability     string
+	Logging        EngineConfigLogging
+	logger         *slog.Logger
 	SyncDataFile   bool
 	SyncCatalog    bool
 	StatsEnabled   bool
@@ -216,12 +235,51 @@ func defaultEngineConfig(walMaxSegSize int64) EngineConfig {
 		Engine:     EngineConfigEngine{Listen: ":8428"},
 		WAL:        EngineConfigWAL{MaxSegmentSize: walMaxSegSize, FsyncPolicy: WALFsyncPolicySegment},
 		Durability: EngineConfigDurability{Profile: DurabilityProfileStrict},
-		Stats:      EngineConfigStats{Enabled: true, Interval: "30s"},
+		Logging: EngineConfigLogging{Loggers: []EngineConfigLogger{{
+			Output: "console",
+			Level:  LogLevelInfo,
+		}}},
+		Stats: EngineConfigStats{Enabled: true, Interval: "30s"},
 		Defaults: EngineConfigDefaults{
 			Databases: []string{},
 		},
 		ManifestDefaults: engineConfigManifestDefaultsFromInfo(dbDef),
 	}
+}
+
+func normalizeLoggingConfig(cfg EngineConfigLogging, def EngineConfigLogging) (EngineConfigLogging, error) {
+	if len(cfg.Loggers) == 0 {
+		cfg.Loggers = append([]EngineConfigLogger(nil), def.Loggers...)
+	}
+	if len(cfg.Loggers) == 0 {
+		return EngineConfigLogging{}, fmt.Errorf("logging.logger must contain at least one logger")
+	}
+
+	hasConsole := false
+	for i := range cfg.Loggers {
+		entry := &cfg.Loggers[i]
+		entry.Output = strings.TrimSpace(entry.Output)
+		entry.Level = strings.ToLower(strings.TrimSpace(entry.Level))
+		if entry.Output == "" {
+			return EngineConfigLogging{}, fmt.Errorf("invalid logging.logger[%d].output: empty", i)
+		}
+		if entry.Level == "" {
+			entry.Level = LogLevelInfo
+		}
+		switch entry.Level {
+		case LogLevelInfo, LogLevelDebug, LogLevelTrace:
+		default:
+			return EngineConfigLogging{}, fmt.Errorf("invalid logging.logger[%d].level: %q", i, entry.Level)
+		}
+		if entry.Output == "console" {
+			if hasConsole {
+				return EngineConfigLogging{}, fmt.Errorf("invalid logging.logger[%d].output: duplicate console logger", i)
+			}
+			hasConsole = true
+		}
+	}
+
+	return cfg, nil
 }
 
 func engineConfigManifestDefaultsFromInfo(info DBInfo) EngineConfigManifestDefaults {
@@ -272,6 +330,11 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	default:
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid durability.profile: %q", cfg.Durability.Profile)
 	}
+	loggingCfg, err := normalizeLoggingConfig(cfg.Logging, def.Logging)
+	if err != nil {
+		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid logging: %w", err)
+	}
+	cfg.Logging = loggingCfg
 	if strings.TrimSpace(cfg.Stats.Interval) == "" {
 		cfg.Stats.Interval = def.Stats.Interval
 	}
@@ -337,36 +400,11 @@ func OpenEngine(rootDataDir string, walMaxSegSize int64) (*Engine, error) {
 	if err := os.MkdirAll(rootDataDir, 0755); err != nil {
 		return nil, err
 	}
-	cfg, statsInterval, dbDefaults, err := loadOrCreateEngineConfig(rootDataDir, walMaxSegSize)
+	cfg, statsInterval, dbDefaults, err := LoadEngineConfig(rootDataDir, walMaxSegSize)
 	if err != nil {
 		return nil, err
 	}
-	syncData, syncCatalog := durabilitySyncPolicy(cfg.Durability.Profile)
-	e := &Engine{
-		RootDataDir:    rootDataDir,
-		WALMaxSegSize:  cfg.WAL.MaxSegmentSize,
-		WALFsyncPolicy: cfg.WAL.FsyncPolicy,
-		Durability:     cfg.Durability.Profile,
-		SyncDataFile:   syncData,
-		SyncCatalog:    syncCatalog,
-		StatsEnabled:   cfg.Stats.Enabled,
-		StatsInterval:  statsInterval,
-		dbDefaults:     dbDefaults,
-		dbs:            make(map[string]*Database),
-		runtimes:       make(map[string]*dbRuntime),
-		stats:          newEngineStatStore(),
-	}
-	e.rollupAuto.Store(true)
-	for _, dbName := range cfg.Defaults.Databases {
-		dbName = strings.TrimSpace(dbName)
-		if dbName == "" || dbName == internalStatsDatabase {
-			continue
-		}
-		if _, _, err := e.getOrCreateDB(dbName); err != nil {
-			return nil, fmt.Errorf("create default database %q: %w", dbName, err)
-		}
-	}
-	return e, nil
+	return OpenEngineWithConfig(rootDataDir, cfg, statsInterval, dbDefaults, nil)
 }
 
 // SetAutoRollupTrigger controls whether ingest-time flushes automatically
@@ -391,6 +429,7 @@ func durabilitySyncPolicy(profile string) (syncDataFile bool, syncCatalog bool) 
 // Close flushes all open day-pages, resets WAL files, emits a final stats snapshot,
 // and closes every open database. Always call Close before the process exits.
 func (e *Engine) Close() error {
+	e.logInfo("engine closing", "data_dir", e.RootDataDir)
 	e.mu.Lock()
 	for name, db := range e.dbs {
 		if name == internalStatsDatabase {
@@ -408,6 +447,9 @@ func (e *Engine) Close() error {
 				}
 				rt.openDays[day] = nil
 			}
+		}
+		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
+			e.logDebug("wal reset", "database", name, "buffer_bytes", db.wal.Stats().BufferBytes)
 		}
 		if err := maybeResetWAL(db, rt); err != nil {
 			e.mu.Unlock()
@@ -431,7 +473,9 @@ func (e *Engine) Close() error {
 		if err := db.Close(); err != nil {
 			return fmt.Errorf("close database %q: %w", name, err)
 		}
+		e.logDebug("database closed", "database", name)
 	}
+	e.logInfo("engine closed", "data_dir", e.RootDataDir)
 	return nil
 }
 
@@ -467,6 +511,9 @@ func (e *Engine) flushDatabases(databaseNames []string) error {
 				return fmt.Errorf("flush database %q day %s: %w", name, day, err)
 			}
 			rt.openDays[day] = nil
+		}
+		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
+			e.logDebug("wal reset", "database", name, "buffer_bytes", db.wal.Stats().BufferBytes)
 		}
 		if err := maybeResetWAL(db, rt); err != nil {
 			return fmt.Errorf("reset wal for database %q: %w", name, err)
@@ -557,6 +604,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 
 	entry, exists := db.catalog.GetMetricEntry(metric)
 	if exists && entry.LastValid && ts < entry.LastTS {
+		e.logTrace("stale sample rejected", "database", dbName, "metric", metric, "timestamp", ts, "last_timestamp", entry.LastTS)
 		return fmt.Errorf("stale sample rejected for %s/%s: ts=%d < last=%d", dbName, metric, ts, entry.LastTS)
 	}
 
@@ -575,6 +623,9 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		if err != nil {
 			return err
 		}
+		if !exists {
+			e.logTrace("metric registered", "database", dbName, "metric", metric, "metric_id", metricID, "sample_type", "int32")
+		}
 		if useWAL {
 			if !exists {
 				walSegment, err = AppendSampleWithMetricName(db.wal, metricID, metric, ts, i32)
@@ -590,6 +641,9 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		metricID, err = GetMetricID[float32](db.catalog, metric)
 		if err != nil {
 			return err
+		}
+		if !exists {
+			e.logTrace("metric registered", "database", dbName, "metric", metric, "metric_id", metricID, "sample_type", "float32")
 		}
 		if useWAL {
 			if !exists {
@@ -609,6 +663,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		// rollup job already appended newer timestamps into that open day page.
 		// In that case, flush the existing page and retry once.
 		if err == ErrOutOfOrderTimestamp && allowOutOfOrderRetry {
+			e.logTrace("out-of-order sample retry", "database", dbName, "metric", metric, "timestamp", ts, "day", day)
 			if existing := rt.openDays[day]; existing != nil {
 				if werr := e.writePageToDailyFile(db, dbName, day, existing); werr != nil {
 					return werr
@@ -619,6 +674,9 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 				return rerr
 			}
 		} else {
+			if err == ErrOutOfOrderTimestamp {
+				e.logTrace("out-of-order sample rejected", "database", dbName, "metric", metric, "timestamp", ts, "day", day)
+			}
 			return err
 		}
 	}
@@ -626,6 +684,10 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 
 	if useWAL && walSegment != 0 {
 		e.stats.incr(dbName+"/wal/append_count", 1)
+	}
+
+	if err := e.flushEligibleOpenDays(db, rt, dbName, day, triggerRollups); err != nil {
+		return err
 	}
 
 	if p.IsFull() {
@@ -636,12 +698,35 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 			e.triggerRollups(dbName)
 		}
 		rt.openDays[day] = nil
+		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
+			e.logDebug("wal reset", "database", dbName, "buffer_bytes", db.wal.Stats().BufferBytes)
+		}
 		if err := maybeResetWAL(db, rt); err != nil {
 			return err
 		}
 		e.captureWALStats(db, dbName)
 	}
+	e.logTrace("sample ingested", "database", dbName, "metric", metric, "timestamp", ts, "day", day, "wal", useWAL)
 	e.maybeFlushStats(dbName)
+	return nil
+}
+
+func (e *Engine) flushEligibleOpenDays(db *Database, rt *dbRuntime, dbName, currentDay string, triggerRollups bool) error {
+	if db == nil || rt == nil {
+		return nil
+	}
+	for day, p := range rt.openDays {
+		if day == currentDay || p == nil || !p.IsFull() {
+			continue
+		}
+		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
+			return err
+		}
+		if triggerRollups && e.rollupAuto.Load() {
+			e.triggerRollups(dbName)
+		}
+		rt.openDays[day] = nil
+	}
 	return nil
 }
 
@@ -1149,6 +1234,7 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 	if database != internalStatsDatabase {
 		e.recordWALReplayMetrics(database, replayRecords, replayBytes, true)
 		e.captureWALStats(db, database)
+		e.logInfo("database opened", "database", database, "wal_enabled", info.WALEnabled, "wal_replay_records", replayRecords, "wal_replay_bytes", replayBytes)
 	}
 	e.dbs[database] = db
 	e.runtimes[database] = rt
@@ -1360,6 +1446,9 @@ func sealDay(e *Engine, db *Database, rt *dbRuntime, dbName, day string, nowTS T
 		}
 	}
 	delete(rt.openDays, day)
+	if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
+		e.logDebug("wal reset", "database", dbName, "buffer_bytes", db.wal.Stats().BufferBytes)
+	}
 	if err := maybeResetWAL(db, rt); err != nil {
 		return err
 	}
@@ -1420,6 +1509,7 @@ func (e *Engine) writePageToDailyFile(db *Database, dbName, day string, page *Pa
 		e.stats.setMax(dbName+"/data/max_fsync_duration_ns", syncDurNs)
 		e.stats.setMin(dbName+"/data/min_fsync_duration_ns", syncDurNs)
 	}
+	e.logDebug("page flushed", "database", dbName, "day", day, "records", len(page.Times), "frame_bytes", st.FrameBytes, "compressed_bytes", st.CompressedBytes)
 	return nil
 }
 

@@ -23,18 +23,18 @@ func TestLoadRuntimeConfig(t *testing.T) {
 		t.Fatalf("WriteFile engine.toml failed: %v", err)
 	}
 
-	listen, dataDir, walMaxSeg, err := loadRuntimeConfig(configPath)
+	runtimeCfg, err := loadRuntimeConfig(configPath)
 	if err != nil {
 		t.Fatalf("loadRuntimeConfig failed: %v", err)
 	}
-	if listen != ":9999" {
-		t.Fatalf("listen mismatch: got=%q want=%q", listen, ":9999")
+	if runtimeCfg.EngineConfig.Engine.Listen != ":9999" {
+		t.Fatalf("listen mismatch: got=%q want=%q", runtimeCfg.EngineConfig.Engine.Listen, ":9999")
 	}
-	if dataDir != root {
-		t.Fatalf("dataDir mismatch: got=%q want=%q", dataDir, root)
+	if runtimeCfg.DataDir != root {
+		t.Fatalf("dataDir mismatch: got=%q want=%q", runtimeCfg.DataDir, root)
 	}
-	if walMaxSeg != 12345 {
-		t.Fatalf("walMaxSeg mismatch: got=%d want=%d", walMaxSeg, 12345)
+	if runtimeCfg.EngineConfig.WAL.MaxSegmentSize != 12345 {
+		t.Fatalf("walMaxSeg mismatch: got=%d want=%d", runtimeCfg.EngineConfig.WAL.MaxSegmentSize, 12345)
 	}
 }
 
@@ -45,15 +45,15 @@ func TestLoadRuntimeConfig_Defaults(t *testing.T) {
 		t.Fatalf("WriteFile engine.toml failed: %v", err)
 	}
 
-	listen, _, walMaxSeg, err := loadRuntimeConfig(configPath)
+	runtimeCfg, err := loadRuntimeConfig(configPath)
 	if err != nil {
 		t.Fatalf("loadRuntimeConfig failed: %v", err)
 	}
-	if listen != ":8428" {
-		t.Fatalf("listen default mismatch: got=%q want=%q", listen, ":8428")
+	if runtimeCfg.EngineConfig.Engine.Listen != ":8428" {
+		t.Fatalf("listen default mismatch: got=%q want=%q", runtimeCfg.EngineConfig.Engine.Listen, ":8428")
 	}
-	if walMaxSeg != 64*1024*1024 {
-		t.Fatalf("wal max default mismatch: got=%d want=%d", walMaxSeg, 64*1024*1024)
+	if runtimeCfg.EngineConfig.WAL.MaxSegmentSize != 64*1024*1024 {
+		t.Fatalf("wal max default mismatch: got=%d want=%d", runtimeCfg.EngineConfig.WAL.MaxSegmentSize, 64*1024*1024)
 	}
 }
 

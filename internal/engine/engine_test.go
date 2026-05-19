@@ -124,6 +124,9 @@ func TestOpenEngineCreatesConfigFiles(t *testing.T) {
 	if !strings.Contains(text, "[stats]") {
 		t.Fatalf("expected engine.toml to contain [stats] section")
 	}
+	if !strings.Contains(text, "[[logging.logger]]") {
+		t.Fatalf("expected engine.toml to contain [[logging.logger]] section")
+	}
 	if !strings.Contains(text, "[defaults]") {
 		t.Fatalf("expected engine.toml to contain [defaults] section")
 	}
@@ -157,8 +160,38 @@ func TestOpenEngineReadsEngineConfig(t *testing.T) {
 	if e.StatsInterval != 5*time.Second {
 		t.Fatalf("stats interval mismatch: got=%s want=5s", e.StatsInterval)
 	}
+	if len(e.Logging.Loggers) != 1 {
+		t.Fatalf("logger count mismatch: got=%d want=1", len(e.Logging.Loggers))
+	}
+	if e.Logging.Loggers[0].Output != "console" || e.Logging.Loggers[0].Level != LogLevelInfo {
+		t.Fatalf("default logger mismatch: got=%+v", e.Logging.Loggers[0])
+	}
 	if _, _, err := e.getOrCreateDB("prod"); err != nil {
 		t.Fatalf("expected default database to be available: %v", err)
+	}
+}
+
+func TestOpenEngineReadsLoggingConfig(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[logging]\n\n[[logging.logger]]\noutput = \"console\"\nlevel = \"info\"\n\n[[logging.logger]]\noutput = \"nanotdb.log\"\nlevel = \"trace\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	if len(e.Logging.Loggers) != 2 {
+		t.Fatalf("logger count mismatch: got=%d want=2", len(e.Logging.Loggers))
+	}
+	if e.Logging.Loggers[0].Output != "console" || e.Logging.Loggers[0].Level != LogLevelInfo {
+		t.Fatalf("first logger mismatch: got=%+v", e.Logging.Loggers[0])
+	}
+	if e.Logging.Loggers[1].Output != "nanotdb.log" || e.Logging.Loggers[1].Level != LogLevelTrace {
+		t.Fatalf("second logger mismatch: got=%+v", e.Logging.Loggers[1])
 	}
 }
 
@@ -924,6 +957,52 @@ func TestEngineWALResetAfterPageFlush(t *testing.T) {
 	}
 	if len(recs) != 0 {
 		t.Fatalf("expected WAL to be reset after flush, got=%d records", len(recs))
+	}
+}
+
+func TestEngineWALResetAfterMidnightFlushesStalePreviousDay(t *testing.T) {
+	root := t.TempDir()
+	dbDir := filepath.Join(root, "prod")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	manifest := []byte("[retention]\nmax_active_days = 2\npartition = \"day\"\n\n[page]\nmax_records = 16000\nmax_bytes = 1048576\nmax_age = \"1ms\"\n")
+	if err := os.WriteFile(filepath.Join(dbDir, "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	day1 := time.Date(2026, 5, 18, 23, 59, 59, 0, time.UTC).UnixNano()
+	day2a := time.Date(2026, 5, 19, 0, 0, 1, 0, time.UTC).UnixNano()
+	day2b := time.Date(2026, 5, 19, 0, 0, 2, 0, time.UTC).UnixNano()
+
+	if err := e.AddLine("prod/metric.flush 1 " + itoa64(day1)); err != nil {
+		t.Fatalf("AddLine day1 failed: %v", err)
+	}
+	time.Sleep(3 * time.Millisecond)
+	if err := e.AddLine("prod/metric.flush 2 " + itoa64(day2a)); err != nil {
+		t.Fatalf("AddLine day2a failed: %v", err)
+	}
+	time.Sleep(3 * time.Millisecond)
+	if err := e.AddLine("prod/metric.flush 3 " + itoa64(day2b)); err != nil {
+		t.Fatalf("AddLine day2b failed: %v", err)
+	}
+
+	db, _, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB failed: %v", err)
+	}
+	recs, err := db.wal.Records()
+	if err != nil {
+		t.Fatalf("WAL records failed: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("expected WAL reset after flushing stale previous-day page and current page, got=%d records", len(recs))
 	}
 }
 

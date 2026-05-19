@@ -56,3 +56,27 @@ func TestOpenEngineRejectsInvalidDurabilityProfile(t *testing.T) {
 		t.Fatal("expected OpenEngine to reject invalid durability profile")
 	}
 }
+
+func TestOpenEngineRejectsInvalidLoggingLevel(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[logging]\n\n[[logging.logger]]\noutput = \"console\"\nlevel = \"loud\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	if _, err := OpenEngine(root, 1024*1024); err == nil {
+		t.Fatal("expected OpenEngine to reject invalid logging level")
+	}
+}
+
+func TestOpenEngineRejectsDuplicateConsoleLoggers(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[logging]\n\n[[logging.logger]]\noutput = \"console\"\nlevel = \"info\"\n\n[[logging.logger]]\noutput = \"console\"\nlevel = \"debug\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	if _, err := OpenEngine(root, 1024*1024); err == nil {
+		t.Fatal("expected OpenEngine to reject duplicate console loggers")
+	}
+}

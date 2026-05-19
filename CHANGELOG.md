@@ -7,6 +7,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Structured `slog` logging configuration via `[logging]` / `[[logging.logger]]`, plus file-only diagnostic logging controls for `nanocli` with `--log-file` and `--log-level`.
+
+### Fixed
+- WAL reset now flushes eligible non-current open day pages during ingest, fixing a case where a stale pre-midnight page could block WAL truncation after midnight and let the active WAL grow far larger than expected.
+- `nanocli inspect wal` now reports sane WAL start/duration timestamps for live current-era WAL files, avoiding misleading `1970-01-01` ranges in inspection output.
+
 ## [1.1.2] - 2026-05-18
 
 ### Changed

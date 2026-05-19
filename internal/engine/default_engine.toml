@@ -27,6 +27,16 @@ fsync_policy = "segment"
 # - "throughput": no fsync on page flush and defer catalog persistence (fastest, more crash risk)
 profile = "strict"
 
+[logging]
+# Configure one or more loggers with TOML array-of-tables syntax.
+# `output = "console"` writes to the process console for service managers such as systemd.
+# Any other output value is treated as a file path and opened in append mode.
+# Levels use conventional ordering: info < debug < trace.
+
+[[logging.logger]]
+output = "console"
+level = "info"
+
 [stats]
 # Enable/disable periodic internal engine metrics emission to the internal DB.
 # This does not affect user data ingest; it only controls engine self-metrics.

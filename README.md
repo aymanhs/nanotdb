@@ -187,6 +187,37 @@ Created automatically at `<root>/engine.toml` on first start. Key settings:
 | `stats.enabled` | `true` | Emit engine self-metrics to the `internal` database |
 | `stats.interval` | `30s` | How often stats are flushed |
 
+### Logging (`engine.toml`)
+
+Engine and server logging are configured under `[logging]` with one or more `[[logging.logger]]` entries.
+
+Example:
+
+```toml
+[logging]
+
+[[logging.logger]]
+output = "console"
+level = "info"
+
+[[logging.logger]]
+output = "/var/log/nanotdb/debug.log"
+level = "debug"
+```
+
+Logging rules:
+
+- `output = "console"` writes to stderr.
+- Any other `output` value is treated as a file path and opened in append/create mode.
+- `level` can be `info`, `debug`, or `trace`.
+- Multiple logger entries are allowed, so you can keep sparse operator-facing console logs and more detailed file logs at the same time.
+
+Level guidance:
+
+- `info`: startup, shutdown, database open/replay, backfill begin/end.
+- `debug`: page flushes, WAL resets, rollup trigger boundaries, file lifecycle details.
+- `trace`: per-sample ingest flow, new metric creation, stale/out-of-order rejection, HTTP request summaries.
+
 **Durability profiles:**
 
 | Profile | Page file fsync | Catalog fsync |

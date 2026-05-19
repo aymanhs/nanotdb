@@ -50,6 +50,7 @@ func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
 	if len(jobs) == 0 {
 		return
 	}
+	e.logDebug("rollup trigger started", "source_database", sourceDBName, "jobs", len(jobs))
 
 	checkpoints, err := loadRollupCheckpoints(sourceDB.RootDataDir, sourceRT.info.Rollups.CheckpointFile)
 	if err != nil {
@@ -65,6 +66,7 @@ func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
 		}
 		checkpoints[jobID] = completed
 	}
+	e.logDebug("rollup trigger finished", "source_database", sourceDBName, "updated_jobs", len(updated))
 }
 
 type rollupJobGroup struct {
@@ -279,6 +281,7 @@ func (e *Engine) TriggerRollupsForSources(sourceDBNames []string) {
 
 func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, error) {
 	report := RollupBackfillReport{RequestedSources: normalizeDatabaseNames(sourceDBNames)}
+	e.logInfo("rollup backfill started", "sources", report.RequestedSources)
 
 	e.rollupBackfill.Lock()
 	defer e.rollupBackfill.Unlock()
@@ -328,6 +331,7 @@ func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, 
 		return report, err
 	}
 	report.ReplayPasses = passes
+	e.logInfo("rollup backfill finished", "sources", report.SourceDatabases, "destinations", report.DestinationDatabases, "replay_passes", report.ReplayPasses)
 	return report, nil
 }
 

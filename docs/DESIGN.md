@@ -142,6 +142,16 @@ Out-of-order inserts for a metric are rejected in v0.
 
 ---
 
+## Logging Model
+
+- Runtime logging uses `log/slog` with plain text handlers in v1.
+- Logging config is engine-owned via `engine.toml` `[logging]` / `[[logging.logger]]` entries.
+- The engine keeps thin `logInfo` / `logDebug` / `logTrace` helpers instead of exposing raw logger mutation as part of the public API.
+- `trace` is a custom level below `debug`, used for noisy flow events such as per-sample ingest and HTTP request summaries.
+- `nanocli` diagnostics are intentionally separate from normal command output and are file-only unless future requirements change that policy.
+
+---
+
 ## Durability & Acknowledgment (v0)
 
 - v0 accepts potential data loss after acknowledgment
