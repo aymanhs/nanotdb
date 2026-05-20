@@ -6,15 +6,19 @@ These items are intentionally deferred from the current design lock.
 
 - Specify crash-tail detection and truncation rules for variable-length `.dat` page frames.
 - Define exact framing/checksum strategy for on-disk page frames.
+- Add explicit on-disk format versioning for `.dat` frames/files so future layout changes can be detected and migrated safely.
+- Define whether `.dat` files should end with a trailer record containing file-level metadata such as partition, min/max time, metric summaries, frame index, and compatibility/version markers.
 
 ## Deferred API/Behavior Decisions
 
 - Define multi-metric insert semantics under crash (partial success behavior).
 - Revisit acknowledgment semantics once stronger durability (WAL or fsync policy changes) is introduced.
+- Decide how rollup checkpoint logs should compact or rewrite once append-only checkpoint files become large.
 
 ## Open Questions
 
 - Q5: fsync guarantees on clean shutdown versus buffered-loss model.
+- Q6: Should raw `.dat` layout stay multi-metric interleaved, or should a future compaction/rewrite mode support per-metric day pages with trailer-based lookup/index metadata?
 
 ## Planned Documentation
 
@@ -24,3 +28,5 @@ These items are intentionally deferred from the current design lock.
   - WAL record layout and replay rules
   - Startup replay metrics semantics
   - Versioning and compatibility rules
+  - File trailer/index format and lookup semantics if trailers are introduced
+  - Tradeoffs between interleaved multi-metric pages and per-metric rewritten pages

@@ -162,6 +162,42 @@ tbody tr:nth-child(odd) td {
   gap: 10px;
 }
 
+.action-note {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.action-status {
+  border: 1px solid rgba(42, 200, 154, 0.24);
+  border-radius: 10px;
+  background: rgba(42, 200, 154, 0.08);
+  color: #d8f6ec;
+  padding: 8px 10px;
+  font-size: 0.84rem;
+}
+
+.action-button {
+  width: auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #1d2635;
+  color: #d7e2f1;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.action-button:hover:not(:disabled),
+.action-button:focus-visible:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.action-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .toggle-control {
   display: inline-flex;
   align-items: center;

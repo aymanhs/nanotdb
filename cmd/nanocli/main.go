@@ -46,6 +46,10 @@ func main() {
 		runErr = runRollup(args)
 	case "export":
 		runErr = runExport(args)
+	case "compact":
+		runErr = runCompact(args)
+	case "recover":
+		runErr = runRecover(args)
 	case "query":
 		runErr = runQuery(args)
 	case "-h", "--help", "help":
@@ -75,6 +79,8 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  nanocli import --root <root-dir> --in <line-protocol-file> [--json]")
 	fmt.Fprintln(w, "  nanocli rollup --root <root-dir> [--db <source-database>] [--json]")
 	fmt.Fprintln(w, "  nanocli export --root <root-dir> --db <database> [--out <line-protocol-file>] [--json]")
+	fmt.Fprintln(w, "  nanocli compact --root <root-dir> --db <database> --part <partition> [--json]")
+	fmt.Fprintln(w, "  nanocli recover --root <root-dir> --db <database> --part <partition> --out <path> [--json]")
 	fmt.Fprintln(w, "  nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--format table|json]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Global logging flags:")

@@ -116,6 +116,7 @@ func main() {
 	mux.HandleFunc("/api/engine/overview", handleEngineOverview(eng, runtimeCfg))
 	mux.HandleFunc("/api/engine/database", handleEngineDatabase(eng))
 	mux.HandleFunc("/api/engine/files", handleEngineFiles(eng))
+	mux.HandleFunc("/api/engine/recompact", handleEngineRecompact(eng))
 	mux.HandleFunc("/api/engine/runtime", handleEngineRuntime(eng))
 	web.Register(mux, runtimeCfg.WebConfig, runtimeCfg.DataDir)
 

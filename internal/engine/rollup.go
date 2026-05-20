@@ -565,6 +565,8 @@ func rollupDestinationMetricName(job DBManifestRollupJob, aggregate string) stri
 }
 
 func (e *Engine) insertRollupSample(dbName, metricName string, ts Timestamp, val float32) error {
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 	return e.addParsedSample(dbName, metricName, ts, Float32Sample, 0, val, false, false, true)
 }
 

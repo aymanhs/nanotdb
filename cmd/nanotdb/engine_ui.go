@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -65,6 +66,8 @@ type engineDataPage struct {
 
 type engineDataFile struct {
 	Path         string           `json:"path"`
+	Part         string           `json:"part,omitempty"`
+	Active       bool             `json:"active"`
 	Bytes        int64            `json:"bytes"`
 	Frames       int              `json:"frames"`
 	Records      int64            `json:"records"`
@@ -323,6 +326,52 @@ func handleEngineRuntime(eng *engine.Engine) http.HandlerFunc {
 	}
 }
 
+func handleEngineRecompact(eng *engine.Engine) http.HandlerFunc {
+	type recompactReq struct {
+		Database string `json:"db"`
+		Part     string `json:"part"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeVMError(w, http.StatusMethodNotAllowed, "bad_data", "method not allowed")
+			return
+		}
+
+		var req recompactReq
+		if r.Body != nil {
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid JSON body: %v", err))
+				return
+			}
+		}
+
+		report, err := eng.RecompactDataFile(strings.TrimSpace(req.Database), strings.TrimSpace(req.Part))
+		if err != nil {
+			switch {
+			case errors.Is(err, engine.ErrDataFileActive):
+				writeVMError(w, http.StatusConflict, "conflict", err.Error())
+			case errors.Is(err, os.ErrNotExist):
+				writeVMError(w, http.StatusNotFound, "not_found", err.Error())
+			case strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid partition key") || strings.Contains(err.Error(), "does not match database partitioning"):
+				writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+			default:
+				writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, vmResponse{
+			Status: "success",
+			Data: map[string]interface{}{
+				"resultType": "engine_recompact",
+				"result":     report,
+			},
+		})
+	}
+}
+
 func buildEngineDatabaseSummary(eng *engine.Engine, database string) (engineDatabaseSummary, error) {
 	active := eng.IsDatabaseActive(database)
 	runtimeInspect, ok := eng.InspectDBRuntime(database)
@@ -369,6 +418,16 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 	if err != nil {
 		return engineFilesReport{}, err
 	}
+	runtimeInspect, ok := eng.InspectDBRuntime(database)
+	if !ok {
+		return engineFilesReport{}, fmt.Errorf("database not found: %s", database)
+	}
+	activeParts := make(map[string]bool, len(runtimeInspect.OpenPages))
+	for _, page := range runtimeInspect.OpenPages {
+		if !page.Persisted {
+			activeParts[page.Day] = true
+		}
+	}
 	metricNames, err := loadMetricNames(filepath.Join(ctx.DatabaseDir, "catalog.json"))
 	if err != nil {
 		return engineFilesReport{}, err
@@ -381,12 +440,15 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
 	for _, path := range ctx.DataFilePaths {
 		stats, err := engine.ScanDataFileStats(path)
+		part := dataFilePart(path)
 		if err != nil {
-			report.Data = append(report.Data, engineDataFile{Path: path, ScanError: err.Error()})
+			report.Data = append(report.Data, engineDataFile{Path: path, Part: part, Active: activeParts[part], ScanError: err.Error()})
 			continue
 		}
 		item := engineDataFile{
 			Path:    path,
+			Part:    part,
+			Active:  activeParts[part],
 			Bytes:   stats.FileBytes,
 			Frames:  stats.Frames,
 			Records: stats.TotalRecords,
@@ -478,6 +540,18 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 		return report.Records[i].Index < report.Records[j].Index
 	})
 	return report, nil
+}
+
+func dataFilePart(path string) string {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "data-") || !strings.HasSuffix(base, ".dat") {
+		return ""
+	}
+	part := strings.TrimSuffix(strings.TrimPrefix(base, "data-"), ".dat")
+	if part == base {
+		return ""
+	}
+	return part
 }
 
 func loadMetricNames(catalogPath string) (map[engine.MetricID]string, error) {

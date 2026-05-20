@@ -16,6 +16,7 @@
   let activeTab = "overview";
   let refreshTimer = null;
   let selectedDataFileByDB = Object.create(null);
+  let fileActionStatusByDB = Object.create(null);
   let showRuntimeWALByDB = Object.create(null);
 
   function apiURL(path) {
@@ -29,6 +30,20 @@
       throw new Error("HTTP " + res.status + " for " + url);
     }
     return res.json();
+  }
+
+  async function postJSON(url, payload) {
+    const res = await fetch(url, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error((data && data.error) || ("HTTP " + res.status + " for " + url));
+    }
+    return data;
   }
 
   function setStatus(text) {
@@ -319,6 +334,13 @@
       selectedDataFileByDB[db] = selectedPath;
     }
     const selectedFile = dataFiles.find((item) => item.path === selectedPath) || null;
+    const fileActionStatus = fileActionStatusByDB[db] || '';
+    const recompactDisabled = !selectedFile || !selectedFile.part || !!selectedFile.active || !!selectedFile.scan_error;
+    const recompactHelp = !selectedFile
+      ? 'No file selected.'
+      : selectedFile.active
+        ? 'This partition is still open in memory, so recompact is disabled.'
+        : 'Rewrite this sealed file using the current page size limits.';
     const pagesTable = selectedFile && selectedFile.pages && selectedFile.pages.length ? renderTable([
       { key: 'index', label: 'Idx' },
       { key: 'offset', label: 'Offset' },
@@ -345,7 +367,7 @@
     filesPane.innerHTML = '<div class="section-head"><h2>Files</h2><p>On-disk .dat/.wal inspection, plus decoded WAL records.</p></div>' +
       '<div class="stack">' +
       '<div class="subpanel"><div class="section-head"><h3>Data Files</h3><p>Select a .dat file to inspect only its pages.</p></div>' + renderSelectableFilesTable(datRows, selectedPath) + '</div>' +
-      '<div class="subpanel"><div class="section-head"><h3>Pages</h3><p>' + (selectedFile ? '<span class="codeish">' + escapeHTML(selectedFile.path) + '</span>' : 'No file selected.') + '</p></div>' + pagesTable + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Pages</h3><p>' + (selectedFile ? '<span class="codeish">' + escapeHTML(selectedFile.path) + '</span>' : 'No file selected.') + '</p></div><div class="subpanel-controls"><div class="action-note">' + recompactHelp + '</div><button type="button" class="action-button" id="recompactSelectedFile"' + (recompactDisabled ? ' disabled' : '') + '>Recompact Selected File</button></div>' + (fileActionStatus ? '<div class="action-status">' + escapeHTML(fileActionStatus) + '</div>' : '') + pagesTable + '</div>' +
       '<div class="subpanel"><div class="section-head"><h3>WAL Files</h3><p>Scan status and tail diagnostics.</p></div>' + renderTable([
         { key: 'path', label: 'Path' },
         { key: 'bytes', label: 'Bytes' },
@@ -371,6 +393,37 @@
         });
       });
     });
+    const recompactBtn = document.getElementById('recompactSelectedFile');
+    if (recompactBtn) {
+      recompactBtn.addEventListener('click', async () => {
+        if (!selectedFile || !selectedFile.part || selectedFile.active) {
+          return;
+        }
+        if (!window.confirm('Recompact ' + selectedFile.path + ' using the current page limits?')) {
+          return;
+        }
+        recompactBtn.disabled = true;
+        fileActionStatusByDB[db] = 'Recompacting ' + selectedFile.part + '...';
+        setStatus('Recompacting ' + selectedFile.part + '...');
+        loadFiles().catch((err) => {
+          console.error(err);
+        });
+        try {
+          const payload = await postJSON(apiURL('/api/engine/recompact'), { db: db, part: selectedFile.part });
+          const resultPayload = payload.data && payload.data.result;
+          fileActionStatusByDB[db] = 'Recompacted ' + selectedFile.part + ': ' + number(resultPayload.old_frames) + ' -> ' + number(resultPayload.new_frames) + ' frames';
+          await loadFiles();
+          setStatus('Recompacted ' + selectedFile.part + ': ' + number(resultPayload.old_frames) + ' -> ' + number(resultPayload.new_frames) + ' frames');
+        } catch (err) {
+          console.error(err);
+          fileActionStatusByDB[db] = err && err.message ? err.message : 'Recompact failed';
+          setStatus(err && err.message ? err.message : 'Recompact failed');
+          loadFiles().catch((loadErr) => {
+            console.error(loadErr);
+          });
+        }
+      });
+    }
   }
 
   async function loadRuntime() {

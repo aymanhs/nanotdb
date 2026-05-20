@@ -681,6 +681,75 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 }
 
+func TestHandleEngineRecompact(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll prod failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[page]\nmax_records = 1\nmax_bytes = 64\nmax_age = \"10m\"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	base := time.Date(2024, time.January, 3, 12, 0, 0, 0, time.UTC)
+	part := base.Format("2006-01-02")
+	if err := eng.AddLine("prod/temp.office 21.5 " + strconv.FormatInt(base.UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine first failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 22.5 " + strconv.FormatInt(base.Add(5*time.Minute).UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine second failed: %v", err)
+	}
+	if err := eng.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[page]\nmax_records = 128\nmax_bytes = 4096\nmax_age = \"10m\"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile manifest update failed: %v", err)
+	}
+
+	eng, err = engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("reopen engine failed: %v", err)
+	}
+	defer eng.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/engine/recompact", bytes.NewBufferString(`{"db":"prod","part":"`+part+`"}`))
+	rec := httptest.NewRecorder()
+	handleEngineRecompact(eng)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=200 body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     struct {
+				Database  string `json:"database"`
+				Part      string `json:"part"`
+				OldFrames int    `json:"old_frames"`
+				NewFrames int    `json:"new_frames"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if resp.Status != "success" || resp.Data.ResultType != "engine_recompact" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.Data.Result.Database != "prod" || resp.Data.Result.Part != part {
+		t.Fatalf("unexpected result identity: %+v", resp.Data.Result)
+	}
+	if resp.Data.Result.NewFrames >= resp.Data.Result.OldFrames {
+		t.Fatalf("expected fewer frames after recompact: %+v", resp.Data.Result)
+	}
+}
+
 func TestHandleRollupBackfill(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {

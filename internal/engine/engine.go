@@ -201,6 +201,7 @@ type Engine struct {
 	dbDefaults     DBInfo
 
 	mu             sync.RWMutex
+	writeMu        sync.Mutex
 	dbs            map[string]*Database
 	runtimes       map[string]*dbRuntime
 	rollupBackfill sync.Mutex
@@ -454,6 +455,8 @@ func durabilitySyncPolicy(profile string) (syncDataFile bool, syncCatalog bool) 
 // and closes every open database. Always call Close before the process exits.
 func (e *Engine) Close() error {
 	e.logInfo("engine closing", "data_dir", e.RootDataDir)
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 	e.mu.Lock()
 	for name, db := range e.dbs {
 		if name == internalStatsDatabase {
@@ -825,6 +828,9 @@ func (e *Engine) AddSample(database, metric string, ts Timestamp, value any) err
 	if strings.TrimSpace(metric) == "" {
 		return fmt.Errorf("metric cannot be empty")
 	}
+
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 
 	switch v := value.(type) {
 	case int32:
@@ -1626,7 +1632,7 @@ func (e *Engine) captureWALStats(db *Database, dbName string) {
 }
 
 // maybeFlushStats writes engine stats to the internal DB at most once per StatsInterval.
-// Safe to call without holding any lock. Skips for the internal DB itself.
+// Callers must already serialize writes through writeMu. Skips for the internal DB itself.
 func (e *Engine) maybeFlushStats(dbName string) {
 	if !e.StatsEnabled || dbName == internalStatsDatabase {
 		return
@@ -1642,9 +1648,8 @@ func (e *Engine) maybeFlushStats(dbName string) {
 	e.flushStatsToInternal(Timestamp(now.UnixNano()))
 }
 
-// flushStatsToInternal writes the current engine stat snapshot through AddLine,
-// so internal stats follow the same WAL/page/data-file path as external ingestion.
-// Safe to call without holding e.mu.
+// flushStatsToInternal writes the current engine stat snapshot through addParsedSample
+// while the caller already holds writeMu, so it does not recurse through AddLine/AddSample.
 func (e *Engine) flushStatsToInternal(ts Timestamp) {
 	if !e.StatsEnabled {
 		return
@@ -1654,12 +1659,9 @@ func (e *Engine) flushStatsToInternal(ts Timestamp) {
 		return
 	}
 
-	tsText := strconv.FormatInt(int64(ts), 10)
 	for k, v := range snap {
 		metric := internalStatsMetricPrefix + "/" + k
-		valText := strconv.FormatFloat(float64(float32(v)), 'f', -1, 32)
-		line := internalStatsDatabase + "/" + metric + " " + valText + " " + tsText
-		_ = e.AddLine(line)
+		_ = e.addParsedSample(internalStatsDatabase, metric, ts, Float32Sample, 0, float32(v), false, false, false)
 	}
 }
 
