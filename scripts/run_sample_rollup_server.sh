@@ -84,7 +84,7 @@ fi
 echo "server ready"
 echo "  dashboard: $BASE_URL/"
 echo "  dashboard: $BASE_URL/dashboard"
-echo "  adhoc:     $BASE_URL/adhoc"
+echo "  explore:   $BASE_URL/explore"
 echo "  api:       $BASE_URL/api/v1/query_range"
 echo ""
 echo "streaming synthetic points into $SOURCE_DB (Ctrl+C to stop)"

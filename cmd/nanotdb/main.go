@@ -113,6 +113,10 @@ func main() {
 	mux.HandleFunc("/api/v1/query_range", handleQueryRange(eng))
 	mux.HandleFunc("/api/v1/databases", handleDatabases(eng))
 	mux.HandleFunc("/api/v1/metrics", handleMetrics(eng))
+	mux.HandleFunc("/api/engine/overview", handleEngineOverview(eng, runtimeCfg))
+	mux.HandleFunc("/api/engine/database", handleEngineDatabase(eng))
+	mux.HandleFunc("/api/engine/files", handleEngineFiles(eng))
+	mux.HandleFunc("/api/engine/runtime", handleEngineRuntime(eng))
 	web.Register(mux, runtimeCfg.WebConfig, runtimeCfg.DataDir)
 
 	srv := &http.Server{
@@ -182,12 +186,13 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 		Web struct {
 			Enabled        *bool  `toml:"enabled"`
 			BasePath       string `toml:"base_path"`
-			AdhocPath      string `toml:"adhoc_path"`
+			ExplorePath    string `toml:"explore_path"`
 			Title          string `toml:"title"`
 			RefreshSeconds int    `toml:"refresh_seconds"`
 			DashboardFile  string `toml:"dashboard_config"`
 			WebRoot        string `toml:"web_root"`
 			APIBaseURL     string `toml:"api_base_url"`
+			EnginePath     string `toml:"engine_path"`
 		} `toml:"web"`
 	}
 	raw, err := os.ReadFile(configPath)
@@ -204,8 +209,8 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 	if v := strings.TrimSpace(webTOML.Web.BasePath); v != "" {
 		webCfg.BasePath = v
 	}
-	if v := strings.TrimSpace(webTOML.Web.AdhocPath); v != "" {
-		webCfg.AdhocPath = v
+	if v := strings.TrimSpace(webTOML.Web.ExplorePath); v != "" {
+		webCfg.ExplorePath = v
 	}
 	if v := strings.TrimSpace(webTOML.Web.Title); v != "" {
 		webCfg.Title = v
@@ -221,6 +226,9 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 	}
 	if v := strings.TrimSpace(webTOML.Web.APIBaseURL); v != "" {
 		webCfg.APIBaseURL = v
+	}
+	if v := strings.TrimSpace(webTOML.Web.EnginePath); v != "" {
+		webCfg.EnginePath = v
 	}
 	return runtimeConfig{DataDir: dataDir, EngineConfig: cfg, StatsInterval: statsInterval, DBDefaults: dbDefaults, WebConfig: webCfg}, nil
 }

@@ -13,7 +13,7 @@ func TestRegister_ServesIndexOnRootAndDashboard(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, DefaultConfig(), t.TempDir())
 
-	for _, p := range []string{"/", "/dashboard", "/dashboard/"} {
+	for _, p := range []string{"/", "/dashboard", "/dashboard/", "/engine", "/engine/"} {
 		req := httptest.NewRequest(http.MethodGet, p, nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
@@ -36,11 +36,17 @@ func TestRegister_ServesAssets(t *testing.T) {
 	if rec.Body.Len() == 0 {
 		t.Fatalf("expected non-empty asset body")
 	}
-	adhocReq := httptest.NewRequest(http.MethodGet, "/adhoc/assets/app.js", nil)
-	adhocRec := httptest.NewRecorder()
-	mux.ServeHTTP(adhocRec, adhocReq)
-	if adhocRec.Code != http.StatusOK {
-		t.Fatalf("adhoc asset status mismatch: got=%d want=200", adhocRec.Code)
+	exploreReq := httptest.NewRequest(http.MethodGet, "/explore/assets/app.js", nil)
+	exploreRec := httptest.NewRecorder()
+	mux.ServeHTTP(exploreRec, exploreReq)
+	if exploreRec.Code != http.StatusOK {
+		t.Fatalf("explore asset status mismatch: got=%d want=200", exploreRec.Code)
+	}
+	engineReq := httptest.NewRequest(http.MethodGet, "/engine/assets/engine_app.js", nil)
+	engineRec := httptest.NewRecorder()
+	mux.ServeHTTP(engineRec, engineReq)
+	if engineRec.Code != http.StatusOK {
+		t.Fatalf("engine asset status mismatch: got=%d want=200", engineRec.Code)
 	}
 	commonReq := httptest.NewRequest(http.MethodGet, "/assets/common.css", nil)
 	commonRec := httptest.NewRecorder()
@@ -104,7 +110,7 @@ func TestRegister_UsesWebRootOverrides(t *testing.T) {
 		t.Fatalf("mkdir dashboard assets: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(webRoot, "assets"), 0o755); err != nil {
-		t.Fatalf("mkdir adhoc assets: %v", err)
+		t.Fatalf("mkdir explore assets: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(webRoot, "common_assets"), 0o755); err != nil {
 		t.Fatalf("mkdir common assets: %v", err)
@@ -112,14 +118,14 @@ func TestRegister_UsesWebRootOverrides(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webRoot, "dashboard.html"), []byte(`<!doctype html><html><body>CUSTOM-DASH {{ .Title }}</body></html>`), 0o644); err != nil {
 		t.Fatalf("write dashboard html: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(webRoot, "index.html"), []byte(`<!doctype html><html><body>CUSTOM-ADHOC {{ .Title }}</body></html>`), 0o644); err != nil {
-		t.Fatalf("write adhoc html: %v", err)
+	if err := os.WriteFile(filepath.Join(webRoot, "index.html"), []byte(`<!doctype html><html><body>CUSTOM-EXPLORE {{ .Title }}</body></html>`), 0o644); err != nil {
+		t.Fatalf("write explore html: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(webRoot, "dashboard_assets", "dashboard_app.js"), []byte("console.log('custom dashboard');"), 0o644); err != nil {
 		t.Fatalf("write dashboard js: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(webRoot, "assets", "app.js"), []byte("console.log('custom adhoc');"), 0o644); err != nil {
-		t.Fatalf("write adhoc js: %v", err)
+	if err := os.WriteFile(filepath.Join(webRoot, "assets", "app.js"), []byte("console.log('custom explore');"), 0o644); err != nil {
+		t.Fatalf("write explore js: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(webRoot, "common_assets", "common.css"), []byte("body{}"), 0o644); err != nil {
 		t.Fatalf("write common css: %v", err)
@@ -167,7 +173,7 @@ func TestExportAssets_WritesBundle(t *testing.T) {
 	if err := ExportAssets(root); err != nil {
 		t.Fatalf("ExportAssets failed: %v", err)
 	}
-	for _, rel := range []string{"dashboard.html", "index.html", filepath.Join("dashboard_assets", "dashboard_app.js"), filepath.Join("assets", "app.js"), filepath.Join("common_assets", "common.css")} {
+	for _, rel := range []string{"dashboard.html", "index.html", "engine.html", filepath.Join("dashboard_assets", "dashboard_app.js"), filepath.Join("assets", "app.js"), filepath.Join("engine_assets", "engine_app.js"), filepath.Join("common_assets", "common.css")} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
 			t.Fatalf("expected exported file %s: %v", rel, err)
 		}

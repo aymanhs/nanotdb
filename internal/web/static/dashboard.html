@@ -11,6 +11,12 @@
 <body>
   <main class="page">
     <header class="page-header">
+      <nav class="top-nav" aria-label="Navigation">
+        <a href="/">Home</a>
+        <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .ExplorePath }}">Explore</a>
+        <a href="{{ .EnginePath }}">Engine</a>
+      </nav>
       <h1 id="dashboard-title">{{ .Title }}</h1>
       <nav id="group-nav" class="group-nav"></nav>
     </header>

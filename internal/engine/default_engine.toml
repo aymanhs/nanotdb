@@ -17,8 +17,8 @@ enabled = true
 # Primary dashboard route prefix.
 # Example: "/dashboard" (recommended), "/ui"
 base_path = "/dashboard"
-# Ad-hoc explorer route prefix (current manual metric picker view).
-adhoc_path = "/adhoc"
+# Explore route prefix (manual metric picker view).
+explore_path = "/explore"
 # Browser page title for the built-in dashboard.
 title = "NanoTDB Dashboard"
 # Automatic dashboard refresh period in seconds.

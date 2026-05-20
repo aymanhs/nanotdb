@@ -7,7 +7,8 @@ in the browser.
 ## Pages
 
 - `/` and `/dashboard` serve the configurable dashboard.
-- `/adhoc` serves the ad-hoc explorer for manual database and metric selection.
+- `/explore` serves the manual database and metric explorer.
+- `/engine` serves the operational engine view for database, file, runtime, and active settings inspection.
 
 ## Getting Started
 
@@ -32,7 +33,8 @@ Then open:
 
 - `http://localhost:8428/`
 - `http://localhost:8428/dashboard`
-- `http://localhost:8428/adhoc`
+- `http://localhost:8428/explore`
+- `http://localhost:8428/engine`
 
 ## Dashboard Config
 
@@ -130,12 +132,28 @@ The dashboard-related settings live under `[web]` in `engine.toml`:
 
 - `enabled` enables or disables the web handlers.
 - `base_path` sets the dashboard route prefix, default `/dashboard`.
-- `adhoc_path` sets the ad-hoc explorer route prefix, default `/adhoc`.
+- `explore_path` sets the manual explorer route prefix, default `/explore`.
+- `engine_path` sets the engine explorer route prefix, default `/engine`.
 - `title` sets the browser page title.
 - `refresh_seconds` sets the default UI refresh cadence.
 - `dashboard_config` points at the dashboard JSON file.
 - `web_root` points at a filesystem directory that overrides the embedded UI bundle.
 - `api_base_url` sets the absolute API base the browser should call when the UI is hosted separately.
+
+Example:
+
+```toml
+[web]
+enabled = true
+base_path = "/dashboard"
+explore_path = "/explore"
+engine_path = "/engine"
+title = "NanoTDB Dashboard"
+refresh_seconds = 10
+dashboard_config = "dashboard.json"
+web_root = "ui"
+api_base_url = ""
+```
 
 ## Editable UI Assets
 
@@ -150,11 +168,15 @@ disk instead of the embedded bundle:
 
 - `dashboard.html`
 - `index.html`
+- `engine.html`
 - `dashboard_assets/`
 - `assets/`
+- `engine_assets/`
 - `common_assets/`
 
 This lets you edit HTML, CSS, and JavaScript without rebuilding the Go binary.
+If you host the exported UI separately from the NanoTDB process, set `[web].api_base_url`
+so the browser pages call the NanoTDB API at the correct origin.
 
 ## API Endpoints Used By The UI
 
@@ -163,6 +185,10 @@ This lets you edit HTML, CSS, and JavaScript without rebuilding the Go binary.
 - `GET /api/v1/metrics?db=<name>`
 - `GET /api/v1/query`
 - `GET /api/v1/query_range`
+- `GET /api/engine/overview`
+- `GET /api/engine/database?db=<name>`
+- `GET /api/engine/files?db=<name>`
+- `GET /api/engine/runtime?db=<name>`
 
 ## Sample Rollup Fixture
 

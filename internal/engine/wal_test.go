@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"encoding/binary"
 	"math"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -115,6 +117,37 @@ func TestWALResetTruncatesAndReuses(t *testing.T) {
 	}
 	if recs[0].MetricID != 2 {
 		t.Fatalf("unexpected metric id after reuse: got=%d", recs[0].MetricID)
+	}
+}
+
+func TestWALRecordsSkipPrefixWithoutBaseline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.wal")
+	prefix := []byte{1, 0, 0, 0, 0, 0, 7, 0, 0, 0}
+	var lenBuf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(lenBuf[:], uint64(len(prefix)))
+	if err := os.WriteFile(path, append(append([]byte{}, lenBuf[:n]...), prefix...), 0644); err != nil {
+		t.Fatalf("write bad prefix failed: %v", err)
+	}
+
+	w, err := NewWAL(path, 0, WALFsyncPolicySegment)
+	if err != nil {
+		t.Fatalf("NewWAL failed: %v", err)
+	}
+	defer w.Close()
+
+	if _, err := AppendSampleWithMetricName(w, 7, "temp.office", Timestamp(1001), int32(25000)); err != nil {
+		t.Fatalf("AppendSampleWithMetricName failed: %v", err)
+	}
+
+	recs, err := w.Records()
+	if err != nil {
+		t.Fatalf("Records failed: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected only the valid record after skipping bad prefix, got=%d", len(recs))
+	}
+	if recs[0].Timestamp != 1001 {
+		t.Fatalf("timestamp mismatch: got=%d want=1001", recs[0].Timestamp)
 	}
 }
 

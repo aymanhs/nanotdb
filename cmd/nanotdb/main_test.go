@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aymanhs/nanotdb/internal/engine"
+	"github.com/aymanhs/nanotdb/internal/web"
 )
 
 func TestLoadRuntimeConfig(t *testing.T) {
@@ -55,6 +57,9 @@ func TestLoadRuntimeConfig(t *testing.T) {
 	if webCfg.BasePath != "/dashboard" {
 		t.Fatalf("web base path mismatch: got=%q want=%q", webCfg.BasePath, "/dashboard")
 	}
+	if webCfg.ExplorePath != "/explore" {
+		t.Fatalf("web explore path mismatch: got=%q want=%q", webCfg.ExplorePath, "/explore")
+	}
 }
 
 func TestLoadRuntimeConfig_Defaults(t *testing.T) {
@@ -91,7 +96,7 @@ func TestLoadRuntimeConfig_Defaults(t *testing.T) {
 func TestLoadRuntimeConfig_WebOverrides(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "engine.toml")
-	content := []byte("[engine]\nlisten = \":9998\"\n[wal]\nmax_segment_size = 222\n[web]\nenabled = false\nbase_path = \"/dash\"\nadhoc_path = \"/quick\"\ntitle = \"My Dash\"\nrefresh_seconds = 7\ndashboard_config = \"custom/dashboard.json\"\nweb_root = \"custom/ui\"\napi_base_url = \"https://api.example.test\"\n")
+	content := []byte("[engine]\nlisten = \":9998\"\n[wal]\nmax_segment_size = 222\n[web]\nenabled = false\nbase_path = \"/dash\"\nexplore_path = \"/quick\"\nengine_path = \"/ops\"\ntitle = \"My Dash\"\nrefresh_seconds = 7\ndashboard_config = \"custom/dashboard.json\"\nweb_root = \"custom/ui\"\napi_base_url = \"https://api.example.test\"\n")
 	if err := os.WriteFile(configPath, content, 0644); err != nil {
 		t.Fatalf("WriteFile engine.toml failed: %v", err)
 	}
@@ -107,8 +112,11 @@ func TestLoadRuntimeConfig_WebOverrides(t *testing.T) {
 	if webCfg.BasePath != "/dash" {
 		t.Fatalf("web base path override mismatch: got=%q want=/dash", webCfg.BasePath)
 	}
-	if webCfg.AdhocPath != "/quick" {
-		t.Fatalf("web adhoc path override mismatch: got=%q want=/quick", webCfg.AdhocPath)
+	if webCfg.ExplorePath != "/quick" {
+		t.Fatalf("web explore path override mismatch: got=%q want=/quick", webCfg.ExplorePath)
+	}
+	if webCfg.EnginePath != "/ops" {
+		t.Fatalf("web engine path override mismatch: got=%q want=/ops", webCfg.EnginePath)
 	}
 	if webCfg.Title != "My Dash" {
 		t.Fatalf("web title override mismatch: got=%q want=%q", webCfg.Title, "My Dash")
@@ -346,6 +354,330 @@ func TestHandleMetrics_DatabaseNotFound(t *testing.T) {
 	}
 	if resp.Status != "error" || resp.ErrorType != "not_found" {
 		t.Fatalf("error payload mismatch: got status=%q type=%q", resp.Status, resp.ErrorType)
+	}
+}
+
+func TestHandleEngineOverviewAndRuntime(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("prod/temp.office 21.5"); err != nil {
+		t.Fatalf("AddLine failed: %v", err)
+	}
+
+	overviewReq := httptest.NewRequest(http.MethodGet, "/api/engine/overview", nil)
+	overviewRec := httptest.NewRecorder()
+	overviewCfg := runtimeConfig{
+		EngineConfig: engine.EngineConfig{
+			Engine:     engine.EngineConfigEngine{Listen: ":8428"},
+			WAL:        engine.EngineConfigWAL{MaxSegmentSize: 67108864, FsyncPolicy: engine.WALFsyncPolicySegment},
+			Durability: engine.EngineConfigDurability{Profile: engine.DurabilityProfileStrict},
+			Stats:      engine.EngineConfigStats{Enabled: true, Interval: "30s"},
+		},
+		DBDefaults: engine.DBInfo{Grace: "5m", RetentionDays: 30, MaxActiveDays: 2, Partition: "day", WALEnabled: true, WALSkipBefore: "1h", PageMaxRecords: 16000, PageMaxBytes: 192000, PageMaxAge: "60s"},
+		WebConfig:  web.Config{Enabled: true, BasePath: "/dashboard", ExplorePath: "/explore", EnginePath: "/engine"},
+	}
+	handleEngineOverview(eng, overviewCfg)(overviewRec, overviewReq)
+	if overviewRec.Code != http.StatusOK {
+		t.Fatalf("overview status mismatch: got=%d want=200 body=%s", overviewRec.Code, overviewRec.Body.String())
+	}
+	var overviewResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Settings struct {
+				WALFsyncPolicy    string `json:"wal_fsync_policy"`
+				DurabilityProfile string `json:"durability_profile"`
+				StatsInterval     string `json:"stats_interval"`
+			} `json:"settings"`
+			Result []struct {
+				Name        string `json:"name"`
+				MetricCount int    `json:"metric_count"`
+				OpenPages   int    `json:"open_pages"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(overviewRec.Body).Decode(&overviewResp); err != nil {
+		t.Fatalf("decode overview failed: %v", err)
+	}
+	if overviewResp.Status != "success" || len(overviewResp.Data.Result) == 0 {
+		t.Fatalf("unexpected overview payload: %+v", overviewResp)
+	}
+	if overviewResp.Data.Settings.WALFsyncPolicy != engine.WALFsyncPolicySegment || overviewResp.Data.Settings.DurabilityProfile != engine.DurabilityProfileStrict || overviewResp.Data.Settings.StatsInterval != "30s" {
+		t.Fatalf("unexpected overview settings payload: %+v", overviewResp.Data.Settings)
+	}
+	prodIdx := -1
+	for i := range overviewResp.Data.Result {
+		if overviewResp.Data.Result[i].Name == "prod" {
+			prodIdx = i
+			break
+		}
+	}
+	if prodIdx < 0 {
+		t.Fatalf("expected prod in overview payload: %+v", overviewResp.Data.Result)
+	}
+	if overviewResp.Data.Result[prodIdx].MetricCount != 1 {
+		t.Fatalf("overview result mismatch: %+v", overviewResp.Data.Result[prodIdx])
+	}
+
+	runtimeReq := httptest.NewRequest(http.MethodGet, "/api/engine/runtime?db=prod", nil)
+	runtimeRec := httptest.NewRecorder()
+	handleEngineRuntime(eng)(runtimeRec, runtimeReq)
+	if runtimeRec.Code != http.StatusOK {
+		t.Fatalf("runtime status mismatch: got=%d want=200 body=%s", runtimeRec.Code, runtimeRec.Body.String())
+	}
+	var runtimeResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result struct {
+				Runtime struct {
+					OpenPages []struct {
+						Day     string `json:"day"`
+						Records int    `json:"records"`
+					} `json:"open_pages"`
+				} `json:"runtime"`
+				WAL []struct {
+					MetricName string `json:"metric_name"`
+				} `json:"wal"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(runtimeRec.Body).Decode(&runtimeResp); err != nil {
+		t.Fatalf("decode runtime failed: %v", err)
+	}
+	if runtimeResp.Status != "success" {
+		t.Fatalf("runtime payload mismatch: %+v", runtimeResp)
+	}
+	if len(runtimeResp.Data.Result.Runtime.OpenPages) == 0 {
+		t.Fatalf("expected open page in runtime payload")
+	}
+	if len(runtimeResp.Data.Result.WAL) == 0 || runtimeResp.Data.Result.WAL[0].MetricName != "temp.office" {
+		t.Fatalf("expected named WAL records in runtime payload: %+v", runtimeResp.Data.Result.WAL)
+	}
+}
+
+func TestHandleEngineOverviewIncludesOnDiskRollupDB(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("metrics/temp.office 21.5"); err != nil {
+		t.Fatalf("AddLine failed: %v", err)
+	}
+	rollupDir := filepath.Join(root, "metrics_rollup_1h")
+	if err := os.MkdirAll(rollupDir, 0755); err != nil {
+		t.Fatalf("MkdirAll rollup failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rollupDir, "manifest.toml"), []byte("[retention]\nretention_days = 30\n"), 0644); err != nil {
+		t.Fatalf("WriteFile rollup manifest failed: %v", err)
+	}
+
+	overviewCfg := runtimeConfig{
+		EngineConfig: engine.EngineConfig{
+			Engine:     engine.EngineConfigEngine{Listen: ":8428"},
+			WAL:        engine.EngineConfigWAL{MaxSegmentSize: 67108864, FsyncPolicy: engine.WALFsyncPolicySegment},
+			Durability: engine.EngineConfigDurability{Profile: engine.DurabilityProfileStrict},
+			Stats:      engine.EngineConfigStats{Enabled: true, Interval: "30s"},
+		},
+		DBDefaults: engine.DBInfo{Grace: "5m", RetentionDays: 30, MaxActiveDays: 2, Partition: "day", WALEnabled: true, WALSkipBefore: "1h", PageMaxRecords: 16000, PageMaxBytes: 192000, PageMaxAge: "60s"},
+		WebConfig:  web.Config{Enabled: true, BasePath: "/dashboard", ExplorePath: "/explore", EnginePath: "/engine"},
+	}
+	overviewReq := httptest.NewRequest(http.MethodGet, "/api/engine/overview", nil)
+	overviewRec := httptest.NewRecorder()
+	handleEngineOverview(eng, overviewCfg)(overviewRec, overviewReq)
+	if overviewRec.Code != http.StatusOK {
+		t.Fatalf("overview status mismatch: got=%d want=200 body=%s", overviewRec.Code, overviewRec.Body.String())
+	}
+	var overviewResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Name string `json:"name"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(overviewRec.Body).Decode(&overviewResp); err != nil {
+		t.Fatalf("decode overview failed: %v", err)
+	}
+	gotNames := make([]string, 0, len(overviewResp.Data.Result))
+	for _, item := range overviewResp.Data.Result {
+		gotNames = append(gotNames, item.Name)
+	}
+	if !reflect.DeepEqual(gotNames, []string{"internal", "metrics", "metrics_rollup_1h"}) {
+		t.Fatalf("overview database names mismatch: got=%v", gotNames)
+	}
+
+	dbReq := httptest.NewRequest(http.MethodGet, "/api/v1/databases", nil)
+	dbRec := httptest.NewRecorder()
+	handleDatabases(eng)(dbRec, dbReq)
+	if dbRec.Code != http.StatusOK {
+		t.Fatalf("databases status mismatch: got=%d want=200 body=%s", dbRec.Code, dbRec.Body.String())
+	}
+	var dbResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []string `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(dbRec.Body).Decode(&dbResp); err != nil {
+		t.Fatalf("decode databases failed: %v", err)
+	}
+	if !reflect.DeepEqual(dbResp.Data.Result, []string{"metrics", "metrics_rollup_1h"}) {
+		t.Fatalf("databases result mismatch: got=%v", dbResp.Data.Result)
+	}
+}
+
+func TestHandleEngineDatabaseIncludesLastValue(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	if err := eng.AddLine("prod/temp.office 21.5 1715000000000000000"); err != nil {
+		t.Fatalf("AddLine first failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 22.75 1715000001000000000"); err != nil {
+		t.Fatalf("AddLine second failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/engine/database?db=prod", nil)
+	rec := httptest.NewRecorder()
+	handleEngineDatabase(eng)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("database status mismatch: got=%d want=200 body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result struct {
+				Metrics []struct {
+					Name          string `json:"name"`
+					LastValue     string `json:"last_value"`
+					LastTimestamp string `json:"last_timestamp"`
+					LastTSNS      int64  `json:"last_timestamp_ns"`
+				} `json:"metrics"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode database failed: %v", err)
+	}
+	if resp.Status != "success" {
+		t.Fatalf("unexpected database payload: %+v", resp)
+	}
+	if len(resp.Data.Result.Metrics) != 1 {
+		t.Fatalf("expected one metric, got=%d", len(resp.Data.Result.Metrics))
+	}
+	metric := resp.Data.Result.Metrics[0]
+	if metric.Name != "temp.office" {
+		t.Fatalf("metric name mismatch: %+v", metric)
+	}
+	if metric.LastValue != "22.75" {
+		t.Fatalf("last value mismatch: got=%q want=22.75", metric.LastValue)
+	}
+	if metric.LastTSNS != 1715000001000000000 {
+		t.Fatalf("last timestamp ns mismatch: got=%d want=%d", metric.LastTSNS, int64(1715000001000000000))
+	}
+	if metric.LastTimestamp == "" {
+		t.Fatalf("expected formatted last timestamp")
+	}
+}
+
+func TestHandleEngineFiles(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 21.5 1715000000000000000"); err != nil {
+		t.Fatalf("AddLine failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 22.5 1715086400000000000"); err != nil {
+		t.Fatalf("AddLine second day failed: %v", err)
+	}
+	if err := eng.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	eng, err = engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("reopen engine failed: %v", err)
+	}
+	defer eng.Close()
+
+	dataPaths, err := filepath.Glob(filepath.Join(root, "prod", "data-*.dat"))
+	if err != nil {
+		t.Fatalf("Glob data files failed: %v", err)
+	}
+	if len(dataPaths) < 2 {
+		t.Fatalf("expected at least two data files, got=%v", dataPaths)
+	}
+	selectedFile := dataPaths[0]
+	filesReq := httptest.NewRequest(http.MethodGet, "/api/engine/files?db=prod&data_file="+url.QueryEscape(selectedFile), nil)
+	filesRec := httptest.NewRecorder()
+	handleEngineFiles(eng)(filesRec, filesReq)
+	if filesRec.Code != http.StatusOK {
+		t.Fatalf("files status mismatch: got=%d want=200 body=%s", filesRec.Code, filesRec.Body.String())
+	}
+	var filesResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result struct {
+				Database string `json:"database"`
+				Data     []struct {
+					Path   string `json:"path"`
+					Frames int    `json:"frames"`
+					Pages  []struct {
+						UncompressedLen      uint64  `json:"uncompressed_len"`
+						DurationNS           int64   `json:"duration_ns"`
+						AvgDiskBytesPerPoint float64 `json:"avg_disk_bytes_per_point"`
+					} `json:"pages"`
+				} `json:"data"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(filesRec.Body).Decode(&filesResp); err != nil {
+		t.Fatalf("decode files failed: %v", err)
+	}
+	if filesResp.Status != "success" || filesResp.Data.Result.Database != "prod" {
+		t.Fatalf("files payload mismatch: %+v", filesResp)
+	}
+	if len(filesResp.Data.Result.Data) < 2 || filesResp.Data.Result.Data[0].Frames == 0 {
+		t.Fatalf("expected scanned .dat frames in files payload: %+v", filesResp.Data.Result.Data)
+	}
+	selectedFound := false
+	for _, item := range filesResp.Data.Result.Data {
+		if item.Path == selectedFile {
+			selectedFound = true
+			if len(item.Pages) == 0 {
+				t.Fatalf("expected scanned page details for selected file: %+v", item)
+			}
+			if item.Pages[0].UncompressedLen == 0 {
+				t.Fatalf("expected positive uncompressed page size: %+v", item.Pages[0])
+			}
+			if item.Pages[0].AvgDiskBytesPerPoint <= 0 {
+				t.Fatalf("expected positive average disk bytes per point: %+v", item.Pages[0])
+			}
+			if item.Pages[0].DurationNS < 0 {
+				t.Fatalf("expected non-negative page duration: %+v", item.Pages[0])
+			}
+			continue
+		}
+		if len(item.Pages) != 0 {
+			t.Fatalf("expected unselected files to omit page details: %+v", item)
+		}
+	}
+	if !selectedFound {
+		t.Fatalf("selected file missing from files payload: selected=%q data=%+v", selectedFile, filesResp.Data.Result.Data)
 	}
 }
 

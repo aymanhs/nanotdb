@@ -34,6 +34,30 @@ type DBInfo struct {
 	PageMaxAge     string            `json:"page_max_age" toml:"page_max_age"`
 	Rollups        DBManifestRollups `json:"rollups" toml:"rollups"`
 }
+type OpenPageStats struct {
+	Day          string        `json:"day"`
+	Records      int           `json:"records"`
+	MetricSlots  int           `json:"metric_slots"`
+	UniqueMetric int           `json:"unique_metrics"`
+	ValueBytes   int           `json:"value_bytes"`
+	StartTS      Timestamp     `json:"start_timestamp_ns"`
+	EndTS        Timestamp     `json:"end_timestamp_ns"`
+	MaxRecords   int           `json:"max_records"`
+	MaxBytes     int           `json:"max_bytes"`
+	MaxAge       time.Duration `json:"max_age_ns"`
+	Age          time.Duration `json:"age_ns"`
+	WALSegmentID uint16        `json:"wal_segment_id"`
+	Full         bool          `json:"full"`
+	Persisted    bool          `json:"persisted"`
+}
+
+type DBRuntimeInspect struct {
+	Database    string          `json:"database"`
+	MetricCount int             `json:"metric_count"`
+	Manifest    DBInfo          `json:"manifest"`
+	Stats       DBStats         `json:"stats"`
+	OpenPages   []OpenPageStats `json:"open_pages"`
+}
 
 type dbRuntime struct {
 	info          DBInfo
@@ -535,14 +559,33 @@ func (e *Engine) flushDatabases(databaseNames []string) error {
 
 // GetAllDatabaseNames returns all database names managed by this engine.
 func (e *Engine) GetAllDatabaseNames() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	names := make([]string, 0, len(e.dbs))
+	nameSet := make(map[string]struct{})
+	e.mu.RLock()
 	for name := range e.dbs {
+		nameSet[name] = struct{}{}
+	}
+	e.mu.RUnlock()
+	for _, name := range e.discoverDatabaseNames() {
+		nameSet[name] = struct{}{}
+	}
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names
+}
+
+// IsDatabaseActive reports whether a database is currently loaded in memory.
+func (e *Engine) IsDatabaseActive(database string) bool {
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return false
+	}
+	e.mu.RLock()
+	_, ok := e.dbs[database]
+	e.mu.RUnlock()
+	return ok
 }
 
 // ListMetrics returns all known metrics for a database in stable name order.
@@ -551,14 +594,70 @@ func (e *Engine) ListMetrics(database string) ([]MetricInfo, error) {
 	if database == "" {
 		return nil, fmt.Errorf("database cannot be empty")
 	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	db, ok := e.dbs[database]
-	if !ok {
+	if !e.hasDatabase(database) {
 		return nil, fmt.Errorf("database not found: %s", database)
 	}
+	db, _, err := e.getOrCreateDB(database)
+	if err != nil {
+		return nil, err
+	}
 	return db.catalog.ListMetrics(), nil
+}
+
+func (e *Engine) discoverDatabaseNames() []string {
+	entries, err := os.ReadDir(e.RootDataDir)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(ent.Name())
+		if name == "" {
+			continue
+		}
+		if databaseDirLooksReal(filepath.Join(e.RootDataDir, name), name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (e *Engine) hasDatabase(database string) bool {
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return false
+	}
+	e.mu.RLock()
+	_, ok := e.dbs[database]
+	e.mu.RUnlock()
+	if ok {
+		return true
+	}
+	return databaseDirLooksReal(filepath.Join(e.RootDataDir, database), database)
+}
+
+func databaseDirLooksReal(dirPath, database string) bool {
+	st, err := os.Stat(dirPath)
+	if err != nil || !st.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dirPath, manifestFileName)); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dirPath, "catalog.json")); err == nil {
+		return true
+	}
+	if matches, err := filepath.Glob(filepath.Join(dirPath, "data-*.dat")); err == nil && len(matches) > 0 {
+		return true
+	}
+	if matches, err := filepath.Glob(filepath.Join(dirPath, database+".wal")); err == nil && len(matches) > 0 {
+		return true
+	}
+	return false
 }
 
 type MetricRollupDownstream struct {
@@ -871,10 +970,6 @@ func (e *Engine) flushEligibleOpenDays(db *Database, rt *dbRuntime, dbName, curr
 	return nil
 }
 
-func (e *Engine) addFloatSample(dbName, metric string, ts Timestamp, val float32, triggerRollups bool, forceWAL bool) error {
-	return e.addParsedSample(dbName, metric, ts, Float32Sample, 0, val, triggerRollups, forceWAL, false)
-}
-
 // addToOpenDay appends a sample to the active day page and updates catalog last-value.
 // WAL append must be performed by the caller before this method is invoked.
 func (e *Engine) addToOpenDay(db *Database, rt *dbRuntime, day string, ts Timestamp, metricID MetricID, raw []byte, walSegment uint16) error {
@@ -1028,7 +1123,14 @@ func (e *Engine) DBStats(database string) (DBStats, bool) {
 	db := e.dbs[database]
 	e.mu.RUnlock()
 	if db == nil {
-		return DBStats{}, false
+		if !e.hasDatabase(database) {
+			return DBStats{}, false
+		}
+		var err error
+		db, _, err = e.getOrCreateDB(database)
+		if err != nil {
+			return DBStats{}, false
+		}
 	}
 	pfx := database + "/"
 	snap := e.stats.snapshot()
@@ -1054,6 +1156,102 @@ func (e *Engine) DBStats(database string) (DBStats, bool) {
 		ds.WAL = db.wal.Stats()
 	}
 	return ds, true
+
+}
+
+func (e *Engine) InspectDBRuntime(database string) (DBRuntimeInspect, bool) {
+	e.mu.RLock()
+	db := e.dbs[database]
+	rt := e.runtimes[database]
+	e.mu.RUnlock()
+	if db == nil || rt == nil {
+		if !e.hasDatabase(database) {
+			return DBRuntimeInspect{}, false
+		}
+		var err error
+		db, rt, err = e.getOrCreateDB(database)
+		if err != nil {
+			return DBRuntimeInspect{}, false
+		}
+	}
+
+	stats, _ := e.DBStats(database)
+	inspect := DBRuntimeInspect{
+		Database:    database,
+		MetricCount: len(db.catalog.ListMetrics()),
+		Manifest:    rt.info,
+		Stats:       stats,
+		OpenPages:   make([]OpenPageStats, 0, len(rt.openDays)),
+	}
+
+	e.mu.RLock()
+	days := make([]string, 0, len(rt.openDays))
+	for day := range rt.openDays {
+		days = append(days, day)
+	}
+	sort.Strings(days)
+	for _, day := range days {
+		p := rt.openDays[day]
+		if p == nil {
+			inspect.OpenPages = append(inspect.OpenPages, OpenPageStats{Day: day, Persisted: true})
+			continue
+		}
+		metricSet := make(map[MetricID]struct{}, len(p.Metrics))
+		for _, mid := range p.Metrics {
+			metricSet[mid] = struct{}{}
+		}
+		inspect.OpenPages = append(inspect.OpenPages, OpenPageStats{
+			Day:          day,
+			Records:      len(p.Times),
+			MetricSlots:  len(p.Metrics),
+			UniqueMetric: len(metricSet),
+			ValueBytes:   p.Values.Len(),
+			StartTS:      p.Start,
+			EndTS:        p.End,
+			MaxRecords:   p.MaxRecords,
+			MaxBytes:     p.MaxBytes,
+			MaxAge:       p.MaxAge,
+			Age:          time.Since(p.createdAt),
+			WALSegmentID: p.WALSegmentID,
+			Full:         p.IsFull(),
+			Persisted:    false,
+		})
+	}
+	e.mu.RUnlock()
+
+	return inspect, true
+}
+
+func (e *Engine) InspectDBWAL(database string) ([]WALRecord, bool, error) {
+	e.mu.RLock()
+	db := e.dbs[database]
+	e.mu.RUnlock()
+	if db == nil {
+		if !e.hasDatabase(database) {
+			return nil, false, nil
+		}
+		var err error
+		db, _, err = e.getOrCreateDB(database)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	if db.wal == nil {
+		return []WALRecord{}, true, nil
+	}
+	records, err := db.wal.RecordsWithCatalog(db.catalog)
+	if err != nil {
+		return nil, true, err
+	}
+	for i := range records {
+		if strings.TrimSpace(records[i].MetricName) != "" {
+			continue
+		}
+		if name, _, ok := db.catalog.GetMetricByID(records[i].MetricID); ok {
+			records[i].MetricName = name
+		}
+	}
+	return records, true, nil
 }
 
 // SampleCallback is invoked for each sample in a range query.
@@ -2021,10 +2219,6 @@ func loadExistingDBInfo(root string, defaults DBInfo) (DBInfo, bool, error) {
 		return DBInfo{}, false, err
 	}
 	return DBInfo{}, false, nil
-}
-
-func loadOrCreateDBInfo(root string, defaults DBInfo) (DBInfo, error) {
-	return loadOrCreateDBInfoWithOptions(root, defaults, false, 0)
 }
 
 func loadOrCreateDBInfoWithOptions(root string, defaults DBInfo, rollupManifest bool, rollupInterval time.Duration) (DBInfo, error) {

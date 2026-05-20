@@ -519,65 +519,6 @@ func (e *Engine) triggerRollups(sourceDBName string) {
 	e.TriggerRollupsForSource(sourceDBName)
 }
 
-func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job DBManifestRollupJob, lastCompleted Timestamp) Timestamp {
-	interval, err := time.ParseDuration(job.Interval)
-	if err != nil || interval <= 0 {
-		return lastCompleted
-	}
-
-	rollupDefaults := defaultRollupDestinationDBInfo(e.dbDefaults, interval)
-	rollupDB, _, err := e.getOrCreateDBWithDefaults(job.DestinationDB, rollupDefaults, true, interval)
-	if err != nil {
-		return lastCompleted
-	}
-
-	if _, ok := sourceDB.catalog.GetMetricEntry(job.SourceMetric); !ok {
-		return lastCompleted
-	}
-	maxSafeBySource, ok := latestMetricTimestamp(sourceDB, sourceRT, job.SourceMetric)
-	if !ok {
-		return lastCompleted
-	}
-
-	grace, err := resolveRollupGrace(sourceRT.info, job)
-	if err != nil {
-		grace = 1 * time.Hour
-	}
-
-	safeTS := Timestamp(time.Now().Add(-grace).UnixNano())
-	// Only compute fully closed periods. Allowing partial intervals to checkpoint
-	// causes incorrect aggregates when more source points arrive later.
-	if maxSafeBySource < safeTS {
-		safeTS = maxSafeBySource
-	}
-	startTS := lastCompleted
-	if startTS == 0 {
-		startTS = initialRollupStart(sourceDB, sourceRT, interval)
-		if startTS == 0 {
-			return lastCompleted
-		}
-	}
-
-	newLastCompleted := lastCompleted
-
-	for {
-		periodStart := startTS
-		periodEnd := periodStart + Timestamp(interval)
-
-		if periodEnd > safeTS {
-			break // not safe to compute yet
-		}
-
-		if err := e.buildRollupJobPeriod(rollupDB, sourceDB, job, periodStart, periodEnd); err != nil {
-			break
-		}
-		startTS = periodEnd
-		newLastCompleted = periodEnd
-	}
-
-	return newLastCompleted
-}
-
 func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, job DBManifestRollupJob, periodStart, periodEnd Timestamp) error {
 	points := make([]float32, 0, 256)
 

@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-//go:embed static/* static/assets/* static/dashboard_assets/* static/common_assets/*
+//go:embed static
 var staticFS embed.FS
 
 //go:embed default_dashboard.json
@@ -21,12 +21,13 @@ var defaultDashboardConfig []byte
 type Config struct {
 	Enabled        bool
 	BasePath       string
-	AdhocPath      string
+	ExplorePath    string
 	Title          string
 	RefreshSeconds int
 	DashboardFile  string
 	WebRoot        string
 	APIBaseURL     string
+	EnginePath     string
 }
 
 type indexTemplateData struct {
@@ -34,17 +35,19 @@ type indexTemplateData struct {
 	AssetBase     string
 	ConfigJSON    template.JS
 	DashboardPath string
-	AdhocPath     string
+	ExplorePath   string
+	EnginePath    string
 }
 
 func DefaultConfig() Config {
 	return Config{
 		Enabled:        true,
 		BasePath:       "/dashboard",
-		AdhocPath:      "/adhoc",
+		ExplorePath:    "/explore",
 		Title:          "NanoTDB Dashboard",
 		RefreshSeconds: 10,
 		DashboardFile:  "dashboard.json",
+		EnginePath:     "/engine",
 	}
 }
 
@@ -86,9 +89,10 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 		return
 	}
 	assetSource := newAssetSource(cfg, dataDir)
-	mux.Handle(cfg.BasePath+"/assets/", http.StripPrefix(cfg.BasePath+"/assets/", assetSource.dashboardAssetsHandler()))
-	mux.Handle(cfg.AdhocPath+"/assets/", http.StripPrefix(cfg.AdhocPath+"/assets/", assetSource.adhocAssetsHandler()))
-	mux.Handle("/assets/", http.StripPrefix("/assets/", assetSource.commonAssetsHandler()))
+	mux.Handle(cfg.BasePath+"/assets/", http.StripPrefix(cfg.BasePath+"/assets/", assetSource.dashboardAssets))
+	mux.Handle(cfg.ExplorePath+"/assets/", http.StripPrefix(cfg.ExplorePath+"/assets/", assetSource.exploreAssets))
+	mux.Handle(cfg.EnginePath+"/assets/", http.StripPrefix(cfg.EnginePath+"/assets/", assetSource.engineAssets))
+	mux.Handle("/assets/", http.StripPrefix("/assets/", assetSource.commonAssets))
 
 	dashboardJSONPath := resolveDashboardPath(dataDir, cfg.DashboardFile)
 	mux.HandleFunc("/api/dashboard-config", func(w http.ResponseWriter, _ *http.Request) {
@@ -108,32 +112,54 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			"apiBaseURL":     cfg.APIBaseURL,
 		})
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := assetSource.executeDashboardTemplate(w, indexTemplateData{
+		if err := assetSource.executeTemplate(w, assetSource.dashboardTemplatePath, "dashboard-index", indexTemplateData{
 			Title:         cfg.Title,
 			AssetBase:     cfg.BasePath + "/assets",
 			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
-			AdhocPath:     cfg.AdhocPath,
+			ExplorePath:   cfg.ExplorePath,
+			EnginePath:    cfg.EnginePath,
 		}); err != nil {
 			http.Error(w, "failed to render dashboard", http.StatusInternalServerError)
 		}
 	}
 
-	serveAdhoc := func(w http.ResponseWriter, _ *http.Request) {
+	serveExplore := func(w http.ResponseWriter, _ *http.Request) {
 		payload, _ := json.Marshal(map[string]interface{}{
 			"basePath":       cfg.BasePath,
 			"refreshSeconds": cfg.RefreshSeconds,
 			"apiBaseURL":     cfg.APIBaseURL,
 		})
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := assetSource.executeAdhocTemplate(w, indexTemplateData{
+		if err := assetSource.executeTemplate(w, assetSource.exploreTemplatePath, "explore-index", indexTemplateData{
 			Title:         cfg.Title,
-			AssetBase:     cfg.AdhocPath + "/assets",
+			AssetBase:     cfg.ExplorePath + "/assets",
 			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
-			AdhocPath:     cfg.AdhocPath,
+			ExplorePath:   cfg.ExplorePath,
+			EnginePath:    cfg.EnginePath,
 		}); err != nil {
-			http.Error(w, "failed to render adhoc explorer", http.StatusInternalServerError)
+			http.Error(w, "failed to render explorer", http.StatusInternalServerError)
+		}
+	}
+
+	serveEngine := func(w http.ResponseWriter, _ *http.Request) {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"basePath":       cfg.BasePath,
+			"refreshSeconds": cfg.RefreshSeconds,
+			"apiBaseURL":     cfg.APIBaseURL,
+			"enginePath":     cfg.EnginePath,
+		})
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := assetSource.executeTemplate(w, assetSource.engineTemplatePath, "engine-index", indexTemplateData{
+			Title:         cfg.Title,
+			AssetBase:     cfg.EnginePath + "/assets",
+			ConfigJSON:    template.JS(payload),
+			DashboardPath: cfg.BasePath,
+			ExplorePath:   cfg.ExplorePath,
+			EnginePath:    cfg.EnginePath,
+		}); err != nil {
+			http.Error(w, "failed to render engine explorer", http.StatusInternalServerError)
 		}
 	}
 
@@ -154,10 +180,19 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 		http.NotFound(w, r)
 	})
 
-	mux.HandleFunc(cfg.AdhocPath, serveAdhoc)
-	mux.HandleFunc(cfg.AdhocPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == cfg.AdhocPath+"/" {
-			serveAdhoc(w, r)
+	mux.HandleFunc(cfg.ExplorePath, serveExplore)
+	mux.HandleFunc(cfg.ExplorePath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == cfg.ExplorePath+"/" {
+			serveExplore(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	mux.HandleFunc(cfg.EnginePath, serveEngine)
+	mux.HandleFunc(cfg.EnginePath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == cfg.EnginePath+"/" {
+			serveEngine(w, r)
 			return
 		}
 		http.NotFound(w, r)
@@ -178,15 +213,25 @@ func normalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.Title) == "" {
 		cfg.Title = "NanoTDB Dashboard"
 	}
-	if strings.TrimSpace(cfg.AdhocPath) == "" {
-		cfg.AdhocPath = "/adhoc"
+	if strings.TrimSpace(cfg.ExplorePath) == "" {
+		cfg.ExplorePath = "/explore"
 	}
-	if !strings.HasPrefix(cfg.AdhocPath, "/") {
-		cfg.AdhocPath = "/" + cfg.AdhocPath
+	if !strings.HasPrefix(cfg.ExplorePath, "/") {
+		cfg.ExplorePath = "/" + cfg.ExplorePath
 	}
-	cfg.AdhocPath = path.Clean(cfg.AdhocPath)
-	if cfg.AdhocPath == "." || cfg.AdhocPath == "/" || cfg.AdhocPath == cfg.BasePath {
-		cfg.AdhocPath = "/adhoc"
+	cfg.ExplorePath = path.Clean(cfg.ExplorePath)
+	if cfg.ExplorePath == "." || cfg.ExplorePath == "/" || cfg.ExplorePath == cfg.BasePath {
+		cfg.ExplorePath = "/explore"
+	}
+	if strings.TrimSpace(cfg.EnginePath) == "" {
+		cfg.EnginePath = "/engine"
+	}
+	if !strings.HasPrefix(cfg.EnginePath, "/") {
+		cfg.EnginePath = "/" + cfg.EnginePath
+	}
+	cfg.EnginePath = path.Clean(cfg.EnginePath)
+	if cfg.EnginePath == "." || cfg.EnginePath == "/" || cfg.EnginePath == cfg.BasePath || cfg.EnginePath == cfg.ExplorePath {
+		cfg.EnginePath = "/engine"
 	}
 	if strings.TrimSpace(cfg.DashboardFile) == "" {
 		cfg.DashboardFile = "dashboard.json"
@@ -201,9 +246,11 @@ func normalizeConfig(cfg Config) Config {
 
 type assetSource struct {
 	dashboardTemplatePath string
-	adhocTemplatePath     string
+	exploreTemplatePath   string
+	engineTemplatePath    string
 	dashboardAssets       http.Handler
-	adhocAssets           http.Handler
+	exploreAssets         http.Handler
+	engineAssets          http.Handler
 	commonAssets          http.Handler
 }
 
@@ -212,9 +259,11 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 	if webRoot != "" {
 		return assetSource{
 			dashboardTemplatePath: filepath.Join(webRoot, "dashboard.html"),
-			adhocTemplatePath:     filepath.Join(webRoot, "index.html"),
+			exploreTemplatePath:   filepath.Join(webRoot, "index.html"),
+			engineTemplatePath:    filepath.Join(webRoot, "engine.html"),
 			dashboardAssets:       http.FileServer(http.Dir(filepath.Join(webRoot, "dashboard_assets"))),
-			adhocAssets:           http.FileServer(http.Dir(filepath.Join(webRoot, "assets"))),
+			exploreAssets:         http.FileServer(http.Dir(filepath.Join(webRoot, "assets"))),
+			engineAssets:          http.FileServer(http.Dir(filepath.Join(webRoot, "engine_assets"))),
 			commonAssets:          http.FileServer(http.Dir(filepath.Join(webRoot, "common_assets"))),
 		}
 	}
@@ -223,9 +272,13 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 	if err != nil {
 		panic("internal/web: dashboard assets unavailable")
 	}
-	adhocAssets, err := fs.Sub(staticFS, "static/assets")
+	exploreAssets, err := fs.Sub(staticFS, "static/assets")
 	if err != nil {
-		panic("internal/web: adhoc assets unavailable")
+		panic("internal/web: explore assets unavailable")
+	}
+	engineAssets, err := fs.Sub(staticFS, "static/engine_assets")
+	if err != nil {
+		panic("internal/web: engine assets unavailable")
 	}
 	commonAssets, err := fs.Sub(staticFS, "static/common_assets")
 	if err != nil {
@@ -233,23 +286,13 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 	}
 	return assetSource{
 		dashboardTemplatePath: "static/dashboard.html",
-		adhocTemplatePath:     "static/index.html",
+		exploreTemplatePath:   "static/index.html",
+		engineTemplatePath:    "static/engine.html",
 		dashboardAssets:       http.FileServer(http.FS(dashboardAssets)),
-		adhocAssets:           http.FileServer(http.FS(adhocAssets)),
+		exploreAssets:         http.FileServer(http.FS(exploreAssets)),
+		engineAssets:          http.FileServer(http.FS(engineAssets)),
 		commonAssets:          http.FileServer(http.FS(commonAssets)),
 	}
-}
-
-func (s assetSource) dashboardAssetsHandler() http.Handler { return s.dashboardAssets }
-func (s assetSource) adhocAssetsHandler() http.Handler     { return s.adhocAssets }
-func (s assetSource) commonAssetsHandler() http.Handler    { return s.commonAssets }
-
-func (s assetSource) executeDashboardTemplate(w http.ResponseWriter, data indexTemplateData) error {
-	return s.executeTemplate(w, s.dashboardTemplatePath, "dashboard-index", data)
-}
-
-func (s assetSource) executeAdhocTemplate(w http.ResponseWriter, data indexTemplateData) error {
-	return s.executeTemplate(w, s.adhocTemplatePath, "adhoc-index", data)
 }
 
 func (s assetSource) executeTemplate(w http.ResponseWriter, pathName, tmplName string, data indexTemplateData) error {

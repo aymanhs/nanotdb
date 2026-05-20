@@ -22,9 +22,9 @@ body {
 }
 
 .page {
-  width: min(100%, 1480px);
+  width: min(100%, 1920px);
   margin: 0 auto;
-  padding: 18px;
+  padding: 20px;
   display: grid;
   gap: 14px;
 }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{{ .Title }} - AdHoc</title>
+  <title>{{ .Title }} - Explore</title>
   <link rel="stylesheet" href="/assets/common.css" />
   <link rel="stylesheet" href="{{ .AssetBase }}/styles.css" />
 </head>
@@ -13,7 +13,8 @@
       <nav class="top-nav" aria-label="Navigation">
         <a href="/">Home</a>
         <a href="{{ .DashboardPath }}">Dashboard</a>
-        <a href="{{ .AdhocPath }}">AdHoc</a>
+        <a href="{{ .ExplorePath }}">Explore</a>
+        <a href="{{ .EnginePath }}">Engine</a>
       </nav>
       <h1>{{ .Title }}</h1>
       <p class="sub">Lightweight live view for NanoTDB metrics</p>
