@@ -82,6 +82,8 @@ func runInspect(args []string) error {
 		return runInspectDB(subArgs)
 	case "dat":
 		return runInspectDat(subArgs)
+	case "metric":
+		return runInspectMetric(subArgs)
 	case "wal":
 		return runInspectWAL(subArgs)
 	default:

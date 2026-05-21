@@ -71,6 +71,7 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  nanocli inspect db --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli inspect dat --root <root-dir> --db <database> [--verbose] [--json]")
+	fmt.Fprintln(w, "  nanocli inspect metric --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli inspect wal --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli import --root <root-dir> --in <line-protocol-file> [--json]")
 	fmt.Fprintln(w, "  nanocli rollup --root <root-dir> [--db <source-database>] [--json]")

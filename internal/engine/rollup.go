@@ -188,6 +188,8 @@ func (e *Engine) processRollupJobGroup(sourceDB *Database, sourceRT *dbRuntime, 
 				continue
 			}
 			if err := e.buildRollupJobPeriod(rollupDB, sourceDB, state.job, nextPeriodStart, periodEnd); err != nil {
+				e.logDebug("rollup period failed", "source_database", sourceDB.Name, "destination_database", group.destinationDB, "job_id", state.job.ID, "period_start", nextPeriodStart, "period_end", periodEnd, "error", err)
+				state.nextStart = 0
 				continue
 			}
 			state.nextStart = periodEnd

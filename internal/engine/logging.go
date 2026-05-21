@@ -68,20 +68,23 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 	}
 	syncData, syncCatalog := durabilitySyncPolicy(cfg.Durability.Profile)
 	e := &Engine{
-		RootDataDir:    rootDataDir,
-		WALMaxSegSize:  cfg.WAL.MaxSegmentSize,
-		WALFsyncPolicy: cfg.WAL.FsyncPolicy,
-		Durability:     cfg.Durability.Profile,
-		Logging:        cfg.Logging,
-		logger:         logger,
-		SyncDataFile:   syncData,
-		SyncCatalog:    syncCatalog,
-		StatsEnabled:   cfg.Stats.Enabled,
-		StatsInterval:  statsInterval,
-		dbDefaults:     dbDefaults,
-		dbs:            make(map[string]*Database),
-		runtimes:       make(map[string]*dbRuntime),
-		stats:          newEngineStatStore(),
+		RootDataDir:           rootDataDir,
+		WALMaxSegSize:         cfg.WAL.MaxSegmentSize,
+		WALFsyncPolicy:        cfg.WAL.FsyncPolicy,
+		Durability:            cfg.Durability.Profile,
+		MetricFilesEnabled:    cfg.Metrics.Enabled,
+		MetricFileCompression: cfg.Metrics.Compression,
+		MetricRawIngestAction: cfg.Metrics.RawIngestAction,
+		Logging:               cfg.Logging,
+		logger:                logger,
+		SyncDataFile:          syncData,
+		SyncCatalog:           syncCatalog,
+		StatsEnabled:          cfg.Stats.Enabled,
+		StatsInterval:         statsInterval,
+		dbDefaults:            dbDefaults,
+		dbs:                   make(map[string]*Database),
+		runtimes:              make(map[string]*dbRuntime),
+		stats:                 newEngineStatStore(),
 	}
 	e.rollupAuto.Store(true)
 	for _, dbName := range cfg.Defaults.Databases {
@@ -93,7 +96,7 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 			return nil, fmt.Errorf("create default database %q: %w", dbName, err)
 		}
 	}
-	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile)
+	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile, "metric_files_enabled", cfg.Metrics.Enabled, "metric_file_compression", cfg.Metrics.Compression, "metric_raw_ingest_action", cfg.Metrics.RawIngestAction)
 	return e, nil
 }
 

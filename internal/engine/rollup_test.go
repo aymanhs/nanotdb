@@ -567,6 +567,74 @@ func TestTriggerRollups_CreatedRollupDBUsesHourlyDefaults(t *testing.T) {
 	}
 }
 
+func TestTriggerRollupsForSourceReturnsAfterRollupJobError(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-3 * time.Hour).Truncate(time.Hour)
+	if err := e.AddLine("prod/temp.office 10 " + itoa64(base.Add(10*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine first sample failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 20 " + itoa64(base.Add(40*time.Minute).UnixNano())); err != nil {
+		t.Fatalf("AddLine second sample failed: %v", err)
+	}
+	if err := e.AddLine("prod/temp.office 1 " + itoa64(base.Add(1*time.Hour).UnixNano())); err != nil {
+		t.Fatalf("AddLine close sample failed: %v", err)
+	}
+
+	if err := e.AddLine("prod_rollup_1h/temp.office.sum 99.5 " + itoa64(base.Add(2*time.Hour).UnixNano())); err != nil {
+		t.Fatalf("AddLine conflicting destination metric failed: %v", err)
+	}
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	rt.info.Rollups = DBManifestRollups{
+		Enabled:        true,
+		CheckpointFile: defaultRollupCheckpointFile,
+		DefaultGrace:   "0s",
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp-1h",
+			SourceMetric:            "temp.office",
+			Interval:                "1h",
+			Aggregates:              []string{"sum"},
+			DestinationDB:           "prod_rollup_1h",
+			DestinationMetricPrefix: "temp.office",
+		}},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.TriggerRollupsForSource("prod")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("TriggerRollupsForSource hung after rollup job error")
+	}
+
+	checkpointPath := filepath.Join(root, "prod", defaultRollupCheckpointFile)
+	if _, err := os.Stat(checkpointPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no checkpoint file after failed rollup, got err=%v", err)
+	}
+
+	if sample, found, err := e.QueryLast("prod_rollup_1h", "temp.office.sum"); err != nil {
+		t.Fatalf("QueryLast destination failed: %v", err)
+	} else if !found {
+		t.Fatalf("expected conflicting destination metric to remain present")
+	} else if sample.TS != Timestamp(base.Add(2*time.Hour).UnixNano()) {
+		t.Fatalf("destination metric timestamp mismatch: got=%d want=%d", sample.TS, base.Add(2*time.Hour).UnixNano())
+	}
+}
+
 func TestDefaultRollupDestinationDBInfoForDailyRollups(t *testing.T) {
 	info := defaultRollupDestinationDBInfo(defaultDBInfo(), 24*time.Hour)
 	if info.WALEnabled {

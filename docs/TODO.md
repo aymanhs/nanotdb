@@ -9,6 +9,7 @@ These items are intentionally deferred from the current design lock.
 - Add explicit on-disk format versioning for `.dat` frames/files so future layout changes can be detected and migrated safely.
 - Define whether `.dat` files should end with a trailer record containing file-level metadata such as partition, min/max time, metric summaries, frame index, and compatibility/version markers.
 - Prefer a dual-file strategy over in-place `.dat` evolution: keep `data-<partition>.dat` as the current interleaved ingest file, and introduce a separate optimized day-file name for versioned/trailer-backed read-optimized storage.
+- Settled lifecycle rule for dual-file storage: `metric-<partition>.dat` exists only for fully sealed partitions, and a successful rewrite removes `data-<partition>.dat` so query readers never arbitrate between both formats for the same partition.
 
 ## Deferred API/Behavior Decisions
 
@@ -21,7 +22,6 @@ These items are intentionally deferred from the current design lock.
 
 - Q5: fsync guarantees on clean shutdown versus buffered-loss model.
 - Q6: Should raw `.dat` layout stay multi-metric interleaved, or should a future compaction/rewrite mode support per-metric day pages with trailer-based lookup/index metadata?
-- Q7: What naming, lifecycle, and precedence rules should apply when both ingest (`data-<partition>.dat`) and optimized day files exist for the same partition?
 
 ## Planned Documentation
 

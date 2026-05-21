@@ -77,6 +77,7 @@ Start here:
 - [Getting Started](GETTING_STARTED.md) for installation, examples, and a longer guided tour.
 - [Run As A Service](docs/RUN_AS_A_SERVICE.md) for a brief systemd setup path.
 - [Glossary](docs/GLOSSARY.md) for the canonical meaning of database, metric, sample, WAL, and related terms.
+- [Contributing](CONTRIBUTING.md) for the branch model and release workflow.
 
 ### 60-Second Hello World
 

@@ -124,6 +124,9 @@ func TestOpenEngineCreatesConfigFiles(t *testing.T) {
 	if !strings.Contains(text, "[stats]") {
 		t.Fatalf("expected engine.toml to contain [stats] section")
 	}
+	if !strings.Contains(text, "[metrics]") {
+		t.Fatalf("expected engine.toml to contain [metrics] section")
+	}
 	if !strings.Contains(text, "[[logging.logger]]") {
 		t.Fatalf("expected engine.toml to contain [[logging.logger]] section")
 	}
@@ -137,7 +140,7 @@ func TestOpenEngineCreatesConfigFiles(t *testing.T) {
 
 func TestOpenEngineReadsEngineConfig(t *testing.T) {
 	root := t.TempDir()
-	cfg := []byte("[wal]\nmax_segment_size = 777777\nfsync_policy = \"always\"\n\n[stats]\nenabled = false\ninterval = \"5s\"\n\n[defaults]\ndatabases = [\"prod\"]\n")
+	cfg := []byte("[wal]\nmax_segment_size = 777777\nfsync_policy = \"always\"\n\n[stats]\nenabled = false\ninterval = \"5s\"\n\n[metrics]\nenabled = true\ncompression = \"zstd_fastest\"\nraw_ingest_action = \"rename\"\n\n[defaults]\ndatabases = [\"prod\"]\n")
 	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
 		t.Fatalf("write engine.toml failed: %v", err)
 	}
@@ -160,6 +163,15 @@ func TestOpenEngineReadsEngineConfig(t *testing.T) {
 	if e.StatsInterval != 5*time.Second {
 		t.Fatalf("stats interval mismatch: got=%s want=5s", e.StatsInterval)
 	}
+	if !e.MetricFilesEnabled {
+		t.Fatalf("metric files enabled mismatch: got=%t want=%t", e.MetricFilesEnabled, true)
+	}
+	if e.MetricFileCompression != CompressionCodecZstdFastestName {
+		t.Fatalf("metric file compression mismatch: got=%q want=%q", e.MetricFileCompression, CompressionCodecZstdFastestName)
+	}
+	if e.MetricRawIngestAction != MetricRawIngestActionRename {
+		t.Fatalf("metric raw ingest action mismatch: got=%q want=%q", e.MetricRawIngestAction, MetricRawIngestActionRename)
+	}
 	if len(e.Logging.Loggers) != 1 {
 		t.Fatalf("logger count mismatch: got=%d want=1", len(e.Logging.Loggers))
 	}
@@ -168,6 +180,38 @@ func TestOpenEngineReadsEngineConfig(t *testing.T) {
 	}
 	if _, _, err := e.getOrCreateDB("prod"); err != nil {
 		t.Fatalf("expected default database to be available: %v", err)
+	}
+}
+
+func TestOpenEngineRejectsInvalidMetricCompression(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[metrics]\ncompression = \"bad_codec\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	_, err := OpenEngine(root, 1024*1024)
+	if err == nil {
+		t.Fatal("expected invalid compression config to fail")
+	}
+	if !strings.Contains(err.Error(), "metrics.compression") {
+		t.Fatalf("expected metrics.compression error, got: %v", err)
+	}
+}
+
+func TestOpenEngineRejectsInvalidMetricRawIngestAction(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[metrics]\nraw_ingest_action = \"archive\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	_, err := OpenEngine(root, 1024*1024)
+	if err == nil {
+		t.Fatal("expected invalid raw ingest action to fail")
+	}
+	if !strings.Contains(err.Error(), "metrics.raw_ingest_action") {
+		t.Fatalf("expected metrics.raw_ingest_action error, got: %v", err)
 	}
 }
 
@@ -1090,6 +1134,17 @@ func TestEngineReplaysWALOnStartup(t *testing.T) {
 	}
 	if rs.Float32 != 1 {
 		t.Fatalf("expected internal replay_success_count=1, got=%f", rs.Float32)
+	}
+
+	runtimeHeap, found, err := e.QueryLast("internal", "nanotdb/runtime/heap_alloc_bytes")
+	if err != nil {
+		t.Fatalf("QueryLast internal runtime heap_alloc_bytes failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected internal runtime heap_alloc_bytes after stats flush")
+	}
+	if runtimeHeap.Float32 <= 0 {
+		t.Fatalf("expected internal runtime heap_alloc_bytes > 0, got=%f", runtimeHeap.Float32)
 	}
 }
 

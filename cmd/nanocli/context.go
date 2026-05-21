@@ -9,14 +9,15 @@ import (
 )
 
 type dbContext struct {
-	RootDir       string
-	Database      string
-	EngineConfig  string
-	DatabaseDir   string
-	CatalogPath   string
-	ManifestPath  string
-	DataFilePaths []string
-	WALFilePaths  []string
+	RootDir         string
+	Database        string
+	EngineConfig    string
+	DatabaseDir     string
+	CatalogPath     string
+	ManifestPath    string
+	DataFilePaths   []string
+	MetricFilePaths []string
+	WALFilePaths    []string
 }
 
 func resolveRootDir(rootDir string) (string, string, error) {
@@ -59,22 +60,28 @@ func resolveDBContext(rootDir string, database string) (dbContext, error) {
 	if err != nil {
 		return dbContext{}, err
 	}
+	metricFiles, err := filepath.Glob(filepath.Join(dbDir, "metric-*.dat"))
+	if err != nil {
+		return dbContext{}, err
+	}
 	walFiles, err := filepath.Glob(filepath.Join(dbDir, "*.wal"))
 	if err != nil {
 		return dbContext{}, err
 	}
 	sort.Strings(dataFiles)
+	sort.Strings(metricFiles)
 	sort.Strings(walFiles)
 
 	return dbContext{
-		RootDir:       rootAbs,
-		Database:      database,
-		EngineConfig:  engineCfg,
-		DatabaseDir:   dbDir,
-		CatalogPath:   filepath.Join(dbDir, "catalog.json"),
-		ManifestPath:  filepath.Join(dbDir, "manifest.toml"),
-		DataFilePaths: dataFiles,
-		WALFilePaths:  walFiles,
+		RootDir:         rootAbs,
+		Database:        database,
+		EngineConfig:    engineCfg,
+		DatabaseDir:     dbDir,
+		CatalogPath:     filepath.Join(dbDir, "catalog.json"),
+		ManifestPath:    filepath.Join(dbDir, "manifest.toml"),
+		DataFilePaths:   dataFiles,
+		MetricFilePaths: metricFiles,
+		WALFilePaths:    walFiles,
 	}, nil
 }
 
