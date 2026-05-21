@@ -823,6 +823,15 @@ destination_db = "prod_rollup_1h"
 	if err := eng.AddLine("prod/temp.office 1 " + strconv.FormatInt(base.Add(1*time.Hour).UnixNano(), 10)); err != nil {
 		t.Fatalf("AddLine close sample failed: %v", err)
 	}
+	if err := eng.Close(); err != nil {
+		t.Fatalf("Close before backfill failed: %v", err)
+	}
+
+	eng, err = engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("Re-open engine failed: %v", err)
+	}
+	defer eng.Close()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollup/backfill", bytes.NewBufferString(`{"source_db":"prod"}`))
 	rec := httptest.NewRecorder()

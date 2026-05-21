@@ -153,6 +153,25 @@ func (p *Page) SetWalSegmentID(segmentID uint16) {
 	}
 }
 
+func clonePage(p *Page) *Page {
+	if p == nil {
+		return nil
+	}
+	clone := &Page{
+		Start:        p.Start,
+		End:          p.End,
+		Metrics:      append([]MetricID(nil), p.Metrics...),
+		Times:        append([]Timestamp(nil), p.Times...),
+		Values:       bytes.NewBuffer(append([]byte(nil), p.Values.Bytes()...)),
+		MaxRecords:   p.MaxRecords,
+		MaxBytes:     p.MaxBytes,
+		MaxAge:       p.MaxAge,
+		WALSegmentID: p.WALSegmentID,
+		createdAt:    p.createdAt,
+	}
+	return clone
+}
+
 func (p *Page) EncodeInto(bb *bytes.Buffer) error {
 	n := len(p.Times)
 	h := PageHeader{

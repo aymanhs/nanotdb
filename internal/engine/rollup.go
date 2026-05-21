@@ -149,7 +149,7 @@ func (e *Engine) processRollupJobGroup(sourceDB *Database, sourceRT *dbRuntime, 
 		if _, ok := sourceDB.catalog.GetMetricEntry(job.SourceMetric); !ok {
 			continue
 		}
-		safeTS, ok := latestMetricTimestamp(sourceDB, sourceRT, job.SourceMetric)
+		safeTS, ok := latestClosedMetricTimestamp(sourceDB, sourceRT, job.SourceMetric)
 		if !ok {
 			continue
 		}
@@ -336,9 +336,9 @@ func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, 
 		for _, sourceDBName := range plan.sources {
 			e.TriggerRollupsForSource(sourceDBName)
 		}
-	}
-	if err := e.flushDatabases(plan.destinations); err != nil {
-		return report, err
+		if err := e.flushDatabases(plan.destinations); err != nil {
+			return report, err
+		}
 	}
 	report.ReplayPasses = passes
 	e.logInfo("rollup backfill finished", "sources", report.SourceDatabases, "destinations", report.DestinationDatabases, "replay_passes", report.ReplayPasses)
@@ -532,7 +532,7 @@ func (e *Engine) triggerRollups(sourceDBName string) {
 func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, job DBManifestRollupJob, periodStart, periodEnd Timestamp) error {
 	points := make([]float32, 0, 256)
 
-	err := e.QueryRange(sourceDB.Name, job.SourceMetric, periodStart, periodEnd-1, 1, func(s Sample) error {
+	err := e.queryRange(sourceDB.Name, job.SourceMetric, periodStart, periodEnd-1, 1, func(s Sample) error {
 		var val float32
 		if s.ValueType == Int32Sample {
 			val = float32(s.Int32)
@@ -541,7 +541,7 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		}
 		points = append(points, val)
 		return nil
-	})
+	}, true)
 	if err != nil || len(points) == 0 {
 		return err
 	}
@@ -588,16 +588,19 @@ func resolveRollupGrace(info DBInfo, job DBManifestRollupJob) (time.Duration, er
 	return time.ParseDuration(info.Grace)
 }
 
-func latestMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric string) (Timestamp, bool) {
+func latestClosedMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric string) (Timestamp, bool) {
 	entry, ok := sourceDB.catalog.GetMetricEntry(metric)
 	if !ok {
 		return 0, false
 	}
 	if entry.LastValid {
+		if isOpenRollupPartition(sourceDB, sourceRT, entry.LastTS) {
+			return 0, false
+		}
 		return entry.LastTS, true
 	}
 
-	fromTS, toTS, ok := databaseTimeBounds(sourceDB, sourceRT)
+	fromTS, toTS, ok := databaseClosedTimeBounds(sourceDB, sourceRT)
 	if !ok {
 		return 0, false
 	}
@@ -607,6 +610,9 @@ func latestMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric strin
 	lastPath := ""
 	for d := dayStartUTC(fromTS); !d.After(dayStartUTC(toTS)); d = d.Add(24 * time.Hour) {
 		part := partitionKey(sourceRT, Timestamp(d.UnixNano()))
+		if _, open := sourceRT.openDays[part]; open {
+			continue
+		}
 		path := filepath.Join(sourceDB.RootDataDir, "data-"+part+".dat")
 		if path != lastPath {
 			lastPath = path
@@ -619,17 +625,6 @@ func latestMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric strin
 				return 0, false
 			}
 		}
-
-		if p := sourceRT.openDays[part]; p != nil {
-			if err := collectMetricFromPage(sourceDB.Name, metric, entry, p, fromTS, toTS, 1, &count, func(s Sample) error {
-				if s.TS > lastTS {
-					lastTS = s.TS
-				}
-				return nil
-			}); err != nil {
-				return 0, false
-			}
-		}
 	}
 
 	if lastTS == 0 {
@@ -639,34 +634,26 @@ func latestMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric strin
 }
 
 func initialRollupStart(sourceDB *Database, sourceRT *dbRuntime, interval time.Duration) Timestamp {
-	earliest, _, ok := databaseTimeBounds(sourceDB, sourceRT)
+	earliest, _, ok := databaseClosedTimeBounds(sourceDB, sourceRT)
 	if !ok {
 		return 0
 	}
 	return floorTimestamp(earliest, interval)
 }
 
-func databaseTimeBounds(sourceDB *Database, sourceRT *dbRuntime) (Timestamp, Timestamp, bool) {
+func databaseClosedTimeBounds(sourceDB *Database, sourceRT *dbRuntime) (Timestamp, Timestamp, bool) {
 	earliest := Timestamp(0)
 	latest := Timestamp(0)
-
-	for _, page := range sourceRT.openDays {
-		if page == nil {
-			continue
-		}
-		if earliest == 0 || page.Start < earliest {
-			earliest = page.Start
-		}
-		if latest == 0 || page.End > latest {
-			latest = page.End
-		}
-	}
 
 	entries, err := os.ReadDir(sourceDB.RootDataDir)
 	if err == nil {
 		for _, ent := range entries {
 			name := ent.Name()
 			if ent.IsDir() || !strings.HasPrefix(name, "data-") || !strings.HasSuffix(name, ".dat") {
+				continue
+			}
+			part := strings.TrimSuffix(strings.TrimPrefix(name, "data-"), ".dat")
+			if _, open := sourceRT.openDays[part]; open {
 				continue
 			}
 			stats, err := WalkDataFileHeaders(filepath.Join(sourceDB.RootDataDir, name), nil)
@@ -686,6 +673,14 @@ func databaseTimeBounds(sourceDB *Database, sourceRT *dbRuntime) (Timestamp, Tim
 		return 0, 0, false
 	}
 	return earliest, latest, true
+}
+
+func isOpenRollupPartition(sourceDB *Database, sourceRT *dbRuntime, ts Timestamp) bool {
+	if sourceDB == nil || sourceRT == nil || ts == 0 {
+		return false
+	}
+	_, open := sourceRT.openDays[partitionKey(sourceRT, ts)]
+	return open
 }
 
 func floorTimestamp(ts Timestamp, interval time.Duration) Timestamp {

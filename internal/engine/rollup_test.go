@@ -10,6 +10,26 @@ import (
 	"time"
 )
 
+func sealAllOpenDaysForTest(t *testing.T, e *Engine, database string) {
+	t.Helper()
+
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+
+	db, rt, err := e.getOrCreateDB(database)
+	if err != nil {
+		t.Fatalf("getOrCreateDB %s failed: %v", database, err)
+	}
+	for day, p := range rt.openDays {
+		if p != nil {
+			if err := e.writePageToDailyFile(db, database, day, p); err != nil {
+				t.Fatalf("writePageToDailyFile(%s,%s) failed: %v", database, day, err)
+			}
+		}
+		delete(rt.openDays, day)
+	}
+}
+
 func TestBuildRollupJobPeriodComputesConfiguredAggregations(t *testing.T) {
 	e, err := OpenEngine(t.TempDir(), 1024*1024)
 	if err != nil {
@@ -121,6 +141,7 @@ func TestTriggerRollupsOnlyProcessesRequestedSourceDatabase(t *testing.T) {
 			DestinationMetricPrefix: "sensors.temp",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 
@@ -176,6 +197,7 @@ func TestTriggerRollupsForSourceAppendsCheckpoint(t *testing.T) {
 			DestinationMetricPrefix: "sensors.temp",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 
@@ -253,6 +275,7 @@ func TestTriggerRollupsDoesNotComputePartialInterval(t *testing.T) {
 			DestinationMetricPrefix: "sensors.temp",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 
@@ -325,6 +348,7 @@ func TestTriggerRollups_MultiJobSameDestinationDoesNotDropSecondJob(t *testing.T
 			},
 		},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 
@@ -435,6 +459,7 @@ func TestTriggerRollups_MultiJobSameDestinationCoalescesFrames(t *testing.T) {
 			},
 		},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 	if err := e.Close(); err != nil {
@@ -499,6 +524,7 @@ func TestTriggerRollups_AutoJobWildcardWithExclusions(t *testing.T) {
 			DestinationDB: "prod_rollup_1h",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 
@@ -545,6 +571,7 @@ func TestTriggerRollups_CreatedRollupDBUsesHourlyDefaults(t *testing.T) {
 			DestinationMetricPrefix: "temp.office",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 
@@ -608,6 +635,7 @@ func TestTriggerRollupsForSourceReturnsAfterRollupJobError(t *testing.T) {
 			DestinationMetricPrefix: "temp.office",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	done := make(chan struct{})
 	go func() {
@@ -635,7 +663,7 @@ func TestTriggerRollupsForSourceReturnsAfterRollupJobError(t *testing.T) {
 	}
 }
 
-func TestAutoRollupOnFullPageDoesNotDeadlock(t *testing.T) {
+func TestAutoRollupWaitsForClosedSourceFile(t *testing.T) {
 	root := t.TempDir()
 	e, err := OpenEngine(root, 1024*1024)
 	if err != nil {
@@ -682,13 +710,18 @@ func TestAutoRollupOnFullPageDoesNotDeadlock(t *testing.T) {
 			t.Fatalf("AddLine sequence failed: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatalf("AddLine hung while auto rollup was triggered from the write path")
+		t.Fatalf("AddLine hung while writing a full page")
 	}
 
-	assertRollupValue(t, e, "prod_rollup_1h", "temp.office.sum", Timestamp(base.UnixNano()), 30)
-	if p := rt.openDays[partitionKey(rt, Timestamp(base.Add(1*time.Hour).UnixNano()))]; p != nil {
-		t.Fatalf("expected the full source page to be closed after auto rollup")
+	if _, found, err := e.QueryLast("prod_rollup_1h", "temp.office.sum"); err != nil {
+		t.Fatalf("QueryLast failed: %v", err)
+	} else if found {
+		t.Fatalf("did not expect rollup output before the source partition was sealed")
 	}
+
+	sealAllOpenDaysForTest(t, e, "prod")
+	e.TriggerRollupsForSource("prod")
+	assertRollupValue(t, e, "prod_rollup_1h", "temp.office.sum", Timestamp(base.UnixNano()), 30)
 }
 
 func TestDefaultRollupDestinationDBInfoForDailyRollups(t *testing.T) {
@@ -741,6 +774,7 @@ func TestBackfillRollups_RebuildsDestinationState(t *testing.T) {
 			DestinationMetricPrefix: "temp.office",
 		}},
 	}
+	sealAllOpenDaysForTest(t, e, "prod")
 
 	e.TriggerRollupsForSource("prod")
 

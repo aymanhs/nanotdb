@@ -502,7 +502,7 @@ func (e *Engine) Close() error {
 					e.mu.Unlock()
 					return err
 				}
-				rt.openDays[day] = nil
+				delete(rt.openDays, day)
 			}
 		}
 		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
@@ -552,6 +552,9 @@ func (e *Engine) flushDatabases(databaseNames []string) error {
 	}
 	sort.Strings(names)
 
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, name := range names {
@@ -567,7 +570,7 @@ func (e *Engine) flushDatabases(databaseNames []string) error {
 			if err := e.writePageToDailyFile(db, name, day, p); err != nil {
 				return fmt.Errorf("flush database %q day %s: %w", name, day, err)
 			}
-			rt.openDays[day] = nil
+			delete(rt.openDays, day)
 		}
 		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
 			e.logDebug("wal reset", "database", name, "buffer_bytes", db.wal.Stats().BufferBytes)
@@ -885,7 +888,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 	}
 
 	day := partitionKey(rt, ts)
-	if err := e.ensureDayOpen(db, rt, dbName, day, ts); err != nil {
+	if err := e.ensureDayOpen(db, rt, dbName, day, ts, triggerRollups); err != nil {
 		return err
 	}
 
@@ -944,7 +947,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 				if werr := e.writePageToDailyFile(db, dbName, day, existing); werr != nil {
 					return werr
 				}
-				rt.openDays[day] = nil
+				delete(rt.openDays, day)
 			}
 			if rerr := e.addToOpenDay(db, rt, day, ts, metricID, raw[:], walSegment); rerr != nil {
 				return rerr
@@ -970,10 +973,7 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
-		rt.openDays[day] = nil
-		if triggerRollups && e.rollupAuto.Load() {
-			e.triggerRollups(dbName)
-		}
+		delete(rt.openDays, day)
 		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
 			e.logDebug("wal reset", "database", dbName, "buffer_bytes", db.wal.Stats().BufferBytes)
 		}
@@ -998,10 +998,7 @@ func (e *Engine) flushEligibleOpenDays(db *Database, rt *dbRuntime, dbName, curr
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
-		rt.openDays[day] = nil
-		if triggerRollups && e.rollupAuto.Load() {
-			e.triggerRollups(dbName)
-		}
+		delete(rt.openDays, day)
 	}
 	return nil
 }
@@ -1104,15 +1101,9 @@ func (e *Engine) ExportToWriter(database string, out io.Writer) error {
 		}
 	}
 
-	openDays := make([]string, 0, len(rt.openDays))
-	for day, p := range rt.openDays {
-		if p != nil {
-			openDays = append(openDays, day)
-		}
-	}
-	sort.Strings(openDays)
-	for _, day := range openDays {
-		if err := exportLinesFromPage(database, db, rt.openDays[day], w, &wroteAny); err != nil {
+	openPages := e.snapshotOpenPages(rt, false)
+	for _, openPage := range openPages {
+		if err := exportLinesFromPage(database, db, openPage.page, w, &wroteAny); err != nil {
 			return err
 		}
 	}
@@ -1217,27 +1208,21 @@ func (e *Engine) InspectDBRuntime(database string) (DBRuntimeInspect, bool) {
 		MetricCount: len(db.catalog.ListMetrics()),
 		Manifest:    rt.info,
 		Stats:       stats,
-		OpenPages:   make([]OpenPageStats, 0, len(rt.openDays)),
+		OpenPages:   make([]OpenPageStats, 0),
 	}
 
-	e.mu.RLock()
-	days := make([]string, 0, len(rt.openDays))
-	for day := range rt.openDays {
-		days = append(days, day)
-	}
-	sort.Strings(days)
-	for _, day := range days {
-		p := rt.openDays[day]
-		if p == nil {
-			inspect.OpenPages = append(inspect.OpenPages, OpenPageStats{Day: day, Persisted: true})
+	for _, openPage := range e.snapshotOpenPages(rt, true) {
+		if openPage.page == nil {
+			inspect.OpenPages = append(inspect.OpenPages, OpenPageStats{Day: openPage.day, Persisted: true})
 			continue
 		}
+		p := openPage.page
 		metricSet := make(map[MetricID]struct{}, len(p.Metrics))
 		for _, mid := range p.Metrics {
 			metricSet[mid] = struct{}{}
 		}
 		inspect.OpenPages = append(inspect.OpenPages, OpenPageStats{
-			Day:          day,
+			Day:          openPage.day,
 			Records:      len(p.Times),
 			MetricSlots:  len(p.Metrics),
 			UniqueMetric: len(metricSet),
@@ -1253,12 +1238,14 @@ func (e *Engine) InspectDBRuntime(database string) (DBRuntimeInspect, bool) {
 			Persisted:    false,
 		})
 	}
-	e.mu.RUnlock()
 
 	return inspect, true
 }
 
 func (e *Engine) InspectDBWAL(database string) ([]WALRecord, bool, error) {
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+
 	e.mu.RLock()
 	db := e.dbs[database]
 	e.mu.RUnlock()
@@ -1297,6 +1284,10 @@ type SampleCallback func(Sample) error
 // Stride controls downsampling: stride=1 returns every sample, stride=N returns every Nth.
 // Each matching sample is passed to the callback; callback errors terminate early.
 func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	return e.queryRange(database, metric, fromTS, toTS, stride, fn, false)
+}
+
+func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
 	if toTS < fromTS {
 		return fmt.Errorf("invalid range: toTS < fromTS")
 	}
@@ -1362,7 +1353,7 @@ func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, str
 			}
 		}
 
-		if p := rt.openDays[part]; p != nil {
+		if p := e.snapshotOpenPage(rt, part, writeLockHeld); p != nil {
 			if err := collectMetricFromPage(database, metric, entry, p, fromTS, toTS, stride, &count, fn); err != nil {
 				return err
 			}
@@ -1370,6 +1361,45 @@ func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, str
 	}
 
 	return nil
+}
+
+type openDaySnapshot struct {
+	day  string
+	page *Page
+}
+
+func (e *Engine) snapshotOpenPage(rt *dbRuntime, day string, writeLockHeld bool) *Page {
+	if rt == nil {
+		return nil
+	}
+	if !writeLockHeld {
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
+	}
+	return clonePage(rt.openDays[day])
+}
+
+func (e *Engine) snapshotOpenPages(rt *dbRuntime, includePersisted bool) []openDaySnapshot {
+	if rt == nil {
+		return nil
+	}
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+
+	out := make([]openDaySnapshot, 0, len(rt.openDays))
+	for day, p := range rt.openDays {
+		if p == nil {
+			if includePersisted {
+				out = append(out, openDaySnapshot{day: day})
+			}
+			continue
+		}
+		out = append(out, openDaySnapshot{day: day, page: clonePage(p)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].day < out[j].day
+	})
+	return out
 }
 
 func collectMetricFromFile(database, metric string, entry MetricEntry, path string, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
@@ -1786,7 +1816,7 @@ func (e *Engine) replayWALIntoRuntime(db *Database, rt *dbRuntime, dbName string
 		}
 
 		day := partitionKey(rt, rec.Timestamp)
-		if err := e.ensureDayOpen(db, rt, dbName, day, rec.Timestamp); err != nil {
+		if err := e.ensureDayOpen(db, rt, dbName, day, rec.Timestamp, false); err != nil {
 			return err
 		}
 
@@ -1827,7 +1857,7 @@ func shouldWriteWAL(rt *dbRuntime, ts Timestamp, now time.Time) bool {
 	return ts >= cutoff
 }
 
-func (e *Engine) ensureDayOpen(db *Database, rt *dbRuntime, dbName, day string, ts Timestamp) error {
+func (e *Engine) ensureDayOpen(db *Database, rt *dbRuntime, dbName, day string, ts Timestamp, triggerRollups bool) error {
 	if _, sealed := rt.sealedDays[day]; sealed {
 		return fmt.Errorf("day %s already sealed for database %s", day, db.Name)
 	}
@@ -1842,7 +1872,7 @@ func (e *Engine) ensureDayOpen(db *Database, rt *dbRuntime, dbName, day string, 
 		if err != nil {
 			return err
 		}
-		if err := sealDay(e, db, rt, dbName, oldest, ts); err != nil {
+		if err := sealDay(e, db, rt, dbName, oldest, ts, triggerRollups); err != nil {
 			return err
 		}
 	}
@@ -1862,13 +1892,16 @@ func oldestOpenDay(open map[string]*Page) (string, error) {
 	return days[0], nil
 }
 
-func sealDay(e *Engine, db *Database, rt *dbRuntime, dbName, day string, nowTS Timestamp) error {
+func sealDay(e *Engine, db *Database, rt *dbRuntime, dbName, day string, nowTS Timestamp, triggerRollups bool) error {
 	if p := rt.openDays[day]; p != nil {
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
 	}
 	delete(rt.openDays, day)
+	if triggerRollups && e != nil && e.rollupAuto.Load() {
+		e.triggerRollups(dbName)
+	}
 	if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
 		e.logDebug("wal reset", "database", dbName, "buffer_bytes", db.wal.Stats().BufferBytes)
 	}

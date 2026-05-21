@@ -54,25 +54,32 @@ func runImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer eng.Close()
 	eng.SetAutoRollupTrigger(false)
 
 	total, imported, skipped, dbsSeen, err := importLineProtocol(eng, in, *dbOverride)
 	if err != nil {
+		_ = eng.Close()
 		return err
 	}
-	eng.SetAutoRollupTrigger(true)
+	if err := eng.Close(); err != nil {
+		return err
+	}
 
-	// Phase 1: trigger rollups for imported source DBs.
-	eng.TriggerRollupsForSources(dbsSeen)
-	// Phase 2: cascade through all DBs in sorted order for a few passes so
-	// chained rollups (e.g. 1h -> 1d -> 1w) settle deterministically.
-	for pass := 0; pass < 4; pass++ {
-		allDBs := eng.GetAllDatabaseNames()
-		for _, dbName := range allDBs {
-			eng.TriggerRollupsForSource(dbName)
+	if len(dbsSeen) > 0 {
+		rollupEng, err := engine.OpenEngine(rootAbs, 0)
+		if err != nil {
+			return err
+		}
+		rollupEng.SetAutoRollupTrigger(true)
+		if _, err := rollupEng.BackfillRollups(dbsSeen); err != nil {
+			_ = rollupEng.Close()
+			return err
+		}
+		if err := rollupEng.Close(); err != nil {
+			return err
 		}
 	}
+
 	report := importReport{
 		RootDir:       rootAbs,
 		InputFile:     *inputPath,

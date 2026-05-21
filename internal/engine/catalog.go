@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Catalog is the in-memory registry of metric names, IDs, and value types for one database.
 // It is persisted as catalog.json next to the database data files.
 type Catalog struct {
+	mu       sync.RWMutex
 	file     *os.File
 	metrics  map[string]MetricEntry
 	idToName map[int16]string // reverse index for O(1) GetMetricByID
@@ -51,6 +53,9 @@ type catalogDisk struct {
 // Returns an error if the metric already exists with a different value type, or if the
 // per-database metric limit (65535) has been reached.
 func GetMetricID[T SampleType](c *Catalog, name string) (MetricID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	var zero T
 	var want byte
 	switch any(zero).(type) {
@@ -78,6 +83,9 @@ func GetMetricID[T SampleType](c *Catalog, name string) (MetricID, error) {
 }
 
 func (c *Catalog) WriteCatalog() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if !c.dirty {
 		return nil
 	}
@@ -133,11 +141,16 @@ func (c *Catalog) WriteCatalog() error {
 }
 
 func (c *Catalog) IsDirty() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.dirty
 }
 
 // GetMetricType returns the value type (Int32Sample or Float32Sample) for a given metric.
 func (c *Catalog) GetMetricType(mid MetricID) (byte, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	for _, entry := range c.metrics {
 		if entry.MetricID == mid {
 			return entry.ValueType, nil
@@ -153,12 +166,18 @@ func (c *Catalog) GetValueWidth(mid MetricID) int {
 }
 
 func (c *Catalog) GetMetricEntry(name string) (MetricEntry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	m, ok := c.metrics[name]
 	return m, ok
 }
 
 // ListMetrics returns a stable, name-sorted snapshot of metrics in this catalog.
 func (c *Catalog) ListMetrics() []MetricInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	out := make([]MetricInfo, 0, len(c.metrics))
 	for name, entry := range c.metrics {
 		out = append(out, MetricInfo{
@@ -174,6 +193,9 @@ func (c *Catalog) ListMetrics() []MetricInfo {
 }
 
 func (c *Catalog) EnsureMetricEntry(name string, mid MetricID, valueType byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("metric name cannot be empty")
 	}
@@ -197,6 +219,9 @@ func (c *Catalog) EnsureMetricEntry(name string, mid MetricID, valueType byte) e
 }
 
 func (c *Catalog) GetMetricByID(mid MetricID) (string, MetricEntry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	name, ok := c.idToName[int16(mid)]
 	if !ok {
 		return "", MetricEntry{}, false
@@ -206,6 +231,9 @@ func (c *Catalog) GetMetricByID(mid MetricID) (string, MetricEntry, bool) {
 }
 
 func (c *Catalog) UpdateLastByMetricID(mid MetricID, ts Timestamp, raw []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if len(raw) != 4 {
 		return fmt.Errorf("invalid sample width: got=%d want=4", len(raw))
 	}

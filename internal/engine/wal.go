@@ -82,6 +82,7 @@ type WAL struct {
 	bufferSize  int64
 	baselineTS  Timestamp // baseline timestamp for delta encoding
 	hasBaseline bool      // whether baseline has been written
+	statsMu     sync.RWMutex
 	stats       WALStats
 }
 
@@ -231,10 +232,13 @@ func appendSampleRecord[T SampleType](w *WAL, metricID MetricID, metricName stri
 	}
 	totalBytes := int64(nLen) + int64(n)
 	w.bufferSize += totalBytes
-	w.stats.AppendCount++
-	w.stats.AppendBytes += totalBytes
-	w.stats.BufferBytes = w.bufferSize
-	w.stats.LastAppendAt = time.Now()
+	now := time.Now()
+	w.withStatsLock(func(stats *WALStats) {
+		stats.AppendCount++
+		stats.AppendBytes += totalBytes
+		stats.BufferBytes = w.bufferSize
+		stats.LastAppendAt = now
+	})
 
 	if w.ShouldFsyncAfterAppend() {
 		if err := w.Fsync(); err != nil {
@@ -297,15 +301,18 @@ func (w *WAL) Fsync() error {
 		return err
 	}
 	dur := time.Since(start)
-	w.stats.FsyncCount++
-	w.stats.FsyncDurationTotal += dur
-	if w.stats.MinFsyncDuration == 0 || dur < w.stats.MinFsyncDuration {
-		w.stats.MinFsyncDuration = dur
-	}
-	if dur > w.stats.MaxFsyncDuration {
-		w.stats.MaxFsyncDuration = dur
-	}
-	w.stats.LastFsyncAt = time.Now()
+	now := time.Now()
+	w.withStatsLock(func(stats *WALStats) {
+		stats.FsyncCount++
+		stats.FsyncDurationTotal += dur
+		if stats.MinFsyncDuration == 0 || dur < stats.MinFsyncDuration {
+			stats.MinFsyncDuration = dur
+		}
+		if dur > stats.MaxFsyncDuration {
+			stats.MaxFsyncDuration = dur
+		}
+		stats.LastFsyncAt = now
+	})
 	return nil
 }
 
@@ -421,16 +428,18 @@ func (w *WAL) Reset() error {
 	w.bufferSize = 0
 	w.baselineTS = 0
 	w.hasBaseline = false
-	w.stats.BufferBytes = 0
 	w.recordFlush(flushed)
 	resetDur := time.Since(resetStart)
-	w.stats.ResetDurationTotal += resetDur
-	if w.stats.MinResetDuration == 0 || resetDur < w.stats.MinResetDuration {
-		w.stats.MinResetDuration = resetDur
-	}
-	if resetDur > w.stats.MaxResetDuration {
-		w.stats.MaxResetDuration = resetDur
-	}
+	w.withStatsLock(func(stats *WALStats) {
+		stats.BufferBytes = 0
+		stats.ResetDurationTotal += resetDur
+		if stats.MinResetDuration == 0 || resetDur < stats.MinResetDuration {
+			stats.MinResetDuration = resetDur
+		}
+		if resetDur > stats.MaxResetDuration {
+			stats.MaxResetDuration = resetDur
+		}
+	})
 	return nil
 }
 
@@ -438,6 +447,9 @@ func (w *WAL) Stats() WALStats {
 	if w == nil {
 		return WALStats{}
 	}
+	w.statsMu.RLock()
+	defer w.statsMu.RUnlock()
+
 	out := w.stats
 	out.RecentFlushes = append([]WALFlushEvent(nil), w.stats.RecentFlushes...)
 	return out
@@ -445,30 +457,41 @@ func (w *WAL) Stats() WALStats {
 
 func (w *WAL) recordFlush(bytes int64) {
 	now := time.Now()
-	w.stats.FlushCount++
-	w.stats.FlushedBytes += bytes
-	if w.stats.MinFlushBytes == 0 || bytes < w.stats.MinFlushBytes {
-		w.stats.MinFlushBytes = bytes
-	}
-	if bytes > w.stats.MaxFlushBytes {
-		w.stats.MaxFlushBytes = bytes
-	}
-	if !w.stats.LastFlushAt.IsZero() {
-		iv := now.Sub(w.stats.LastFlushAt)
-		w.stats.FlushIntervalCount++
-		w.stats.FlushIntervalTotal += iv
-		if w.stats.MinFlushInterval == 0 || iv < w.stats.MinFlushInterval {
-			w.stats.MinFlushInterval = iv
+	w.withStatsLock(func(stats *WALStats) {
+		stats.FlushCount++
+		stats.FlushedBytes += bytes
+		if stats.MinFlushBytes == 0 || bytes < stats.MinFlushBytes {
+			stats.MinFlushBytes = bytes
 		}
-		if iv > w.stats.MaxFlushInterval {
-			w.stats.MaxFlushInterval = iv
+		if bytes > stats.MaxFlushBytes {
+			stats.MaxFlushBytes = bytes
 		}
+		if !stats.LastFlushAt.IsZero() {
+			iv := now.Sub(stats.LastFlushAt)
+			stats.FlushIntervalCount++
+			stats.FlushIntervalTotal += iv
+			if stats.MinFlushInterval == 0 || iv < stats.MinFlushInterval {
+				stats.MinFlushInterval = iv
+			}
+			if iv > stats.MaxFlushInterval {
+				stats.MaxFlushInterval = iv
+			}
+		}
+		stats.LastFlushAt = now
+		stats.RecentFlushes = append(stats.RecentFlushes, WALFlushEvent{At: now, Bytes: bytes})
+		if len(stats.RecentFlushes) > walFlushHistoryLimit {
+			stats.RecentFlushes = append([]WALFlushEvent(nil), stats.RecentFlushes[len(stats.RecentFlushes)-walFlushHistoryLimit:]...)
+		}
+	})
+}
+
+func (w *WAL) withStatsLock(fn func(*WALStats)) {
+	if w == nil || fn == nil {
+		return
 	}
-	w.stats.LastFlushAt = now
-	w.stats.RecentFlushes = append(w.stats.RecentFlushes, WALFlushEvent{At: now, Bytes: bytes})
-	if len(w.stats.RecentFlushes) > walFlushHistoryLimit {
-		w.stats.RecentFlushes = append([]WALFlushEvent(nil), w.stats.RecentFlushes[len(w.stats.RecentFlushes)-walFlushHistoryLimit:]...)
-	}
+	w.statsMu.Lock()
+	defer w.statsMu.Unlock()
+	fn(&w.stats)
 }
 
 func OpenAndRecoverWAL(name string, fsyncPolicy string) (*WAL, error) {
@@ -482,8 +505,10 @@ func OpenAndRecoverWAL(name string, fsyncPolicy string) (*WAL, error) {
 		_ = w.Close()
 		return nil, err
 	}
-	w.stats.AppendCount = count
-	w.stats.AppendBytes = bytes
+	w.withStatsLock(func(stats *WALStats) {
+		stats.AppendCount = count
+		stats.AppendBytes = bytes
+	})
 	return w, nil
 }
 
