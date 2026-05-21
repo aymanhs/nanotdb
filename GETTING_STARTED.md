@@ -513,6 +513,24 @@ Inspect only data files or WAL files:
 
 Verbose terminal output is rendered as aligned tables. DAT output shows per-file and per-page size statistics; WAL output shows per-file size/decode/tail diagnostics. Human-readable output uses `start` plus `duration`; `--json` keeps raw timestamps.
 
+Inspect query-optimized metric files:
+
+```bash
+./nanocli inspect metric --root ~/nanotdb-data --db home_sensors --verbose
+```
+
+Build metric files for all discovered partitions with the configured codec and verify the result:
+
+```bash
+./nanocli metric build --root ~/nanotdb-data --db home_sensors --verify
+```
+
+Override the codec for one build without editing `engine.toml`:
+
+```bash
+./nanocli metric build --root ~/nanotdb-data --db home_sensors --codec zstd_default --verify
+```
+
 ### Export data to a file
 
 ```bash
@@ -534,6 +552,34 @@ Bulk-import data from a line-protocol file.
 ```bash
 ./nanocli query --root ~/nanotdb-data --db home_sensors --metric "living_room.*" --format table
 ```
+
+For diagnostics or benchmarking, force raw or metric-backed query routing regardless of config:
+
+```bash
+./nanocli query --root ~/nanotdb-data --db home_sensors --metric "living_room.*" --metric-files off --format json > /dev/null
+./nanocli query --root ~/nanotdb-data --db home_sensors --metric "living_room.*" --metric-files on --format json > /dev/null
+```
+
+### Standalone metric-file benchmarks
+
+You do not need Go installed to benchmark metric files on your own data. Use a released `nanocli` binary plus the shell script in [scripts/benchmark_metric_files.sh](/home/ayman/code/nanotdb/scripts/benchmark_metric_files.sh):
+
+```bash
+./scripts/benchmark_metric_files.sh \
+    --nanocli ./nanocli \
+    --root ~/nanotdb-data \
+    --db home_sensors \
+    --metric 'living_room.*' \
+    --repeats 7
+```
+
+The script copies your data into temporary work directories, builds `metric-*.dat` files with each codec, verifies them, and prints a table with:
+- raw bytes vs metric bytes
+- build time per codec
+- raw query average vs metric-file query average
+- relative speedup so you can choose the best tradeoff for your own dataset
+
+See [docs/METRIC_FILES.md](/home/ayman/code/nanotdb/docs/METRIC_FILES.md) for the detailed workflow and config guidance.
 
 ---
 

@@ -18,6 +18,7 @@ rollups inside the engine instead of pushing you into extra services.
 - Plain files on disk: WAL, catalog, manifests, and partitioned `.dat` files are easy to inspect, back up, and reason about.
 - Small-system fit: designed for Raspberry Pi, edge nodes, and other resource-constrained hosts.
 - Offline workflow: `nanocli` can inspect data, export line protocol, inspect WAL files, and rebuild rollups without a running server.
+- Optional metric files: build query-optimized `metric-*.dat` files when raw ingest order is no longer the best shape for reads.
 - Engine-owned rollups: hourly or daily summaries live in the database workflow instead of a separate pipeline.
 - Operationally simple: no external dependencies at runtime, no separate index service, and retention maps cleanly to file deletion.
 
@@ -76,6 +77,7 @@ Start here:
 - [Hello World](docs/HELLO_WORLD.md) for the fastest copy/paste path.
 - [Getting Started](GETTING_STARTED.md) for installation, examples, and a longer guided tour.
 - [Dashboard](docs/DASHBOARD.md) for the built-in UI, dashboard.json, and editable web assets.
+- [Metric Files](docs/METRIC_FILES.md) for query-optimized metric storage, config, inspection, and standalone benchmarking.
 - [Run As A Service](docs/RUN_AS_A_SERVICE.md) for a brief systemd setup path.
 - [Glossary](docs/GLOSSARY.md) for the canonical meaning of database, metric, sample, WAL, and related terms.
 - [Contributing](CONTRIBUTING.md) for the branch model and release workflow.

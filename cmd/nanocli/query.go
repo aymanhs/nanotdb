@@ -45,6 +45,7 @@ func runQuery(args []string) error {
 	metricRegex := fs.String("metric", ".*", "regex applied to metric names")
 	startText := fs.String("start", "", "optional range start time (RFC3339Nano, unix seconds, or unix nanos)")
 	endText := fs.String("end", "", "optional range end time (RFC3339Nano, unix seconds, or unix nanos)")
+	metricFiles := fs.String("metric-files", "config", "metric file routing mode: config, on, or off")
 	format := fs.String("format", "table", "output format: table or json")
 	jsonOut := fs.Bool("json", false, "alias for --format json")
 	if err := fs.Parse(args); err != nil {
@@ -103,6 +104,15 @@ func runQuery(args []string) error {
 		return err
 	}
 	defer eng.Close()
+	switch strings.ToLower(strings.TrimSpace(*metricFiles)) {
+	case "", "config":
+	case "on":
+		eng.MetricFilesEnabled = true
+	case "off":
+		eng.MetricFilesEnabled = false
+	default:
+		return fmt.Errorf("invalid --metric-files %q (expected config, on, or off)", *metricFiles)
+	}
 
 	metrics, err := loadMetricNamesFromCatalog(ctx.CatalogPath)
 	if err != nil {
