@@ -42,6 +42,8 @@ func main() {
 		runErr = runInspect(args)
 	case "import":
 		runErr = runImport(args)
+	case "csv2nlp":
+		runErr = runCSV2NLP(args)
 	case "rollup":
 		runErr = runRollup(args)
 	case "export":
@@ -79,7 +81,8 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  nanocli inspect dat --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli inspect metric --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli inspect wal --root <root-dir> --db <database> [--verbose] [--json]")
-	fmt.Fprintln(w, "  nanocli import --root <root-dir> --in <line-protocol-file> [--json]")
+	fmt.Fprintln(w, "  nanocli import --root <root-dir> --in <line-protocol-file> [--db <database>] [--json]")
+	fmt.Fprintln(w, "  nanocli csv2nlp --in-dir <csv-dir> --out <line-protocol-file> --db <database> [--meta <json>] [--json]")
 	fmt.Fprintln(w, "  nanocli rollup --root <root-dir> [--db <source-database>] [--json]")
 	fmt.Fprintln(w, "  nanocli export --root <root-dir> --db <database> [--out <line-protocol-file>] [--json]")
 	fmt.Fprintln(w, "  nanocli compact --root <root-dir> --db <database> --part <partition> [--json]")

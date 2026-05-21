@@ -231,7 +231,10 @@ func (p *Page) DecodeFrom(r *bytes.Reader) error {
 	if _, err := io.ReadFull(r, crcBytes[:]); err != nil {
 		return err
 	}
-	expectedCRC := binary.LittleEndian.Uint32(crcBytes[:])
+	return p.DecodeCompressedFrame(h, compressed, binary.LittleEndian.Uint32(crcBytes[:]))
+}
+
+func (p *Page) DecodeCompressedFrame(h PageHeader, compressed []byte, expectedCRC uint32) error {
 	if actualCRC := crc32.ChecksumIEEE(compressed); actualCRC != expectedCRC {
 		return fmt.Errorf("checksum mismatch: expected=%08x actual=%08x", expectedCRC, actualCRC)
 	}
@@ -256,7 +259,6 @@ func (p *Page) DecodeFrom(r *bytes.Reader) error {
 		p.Times = make([]Timestamp, n)
 	}
 
-	// Initialize Values buffer if not already done
 	if p.Values == nil {
 		p.Values = bytes.NewBuffer(make([]byte, 0, PageMaxBytes))
 	} else {

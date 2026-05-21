@@ -86,13 +86,12 @@ func loadMetricFixturePayloads(tb testing.TB) [][]byte {
 	if _, err := os.Stat(metricPath); err != nil {
 		tb.Skipf("metric fixture missing: %v", err)
 	}
-	pages, err := ReadMetricFileV1(metricPath)
-	if err != nil {
-		tb.Fatalf("ReadMetricFileV1: %v", err)
-	}
-	payloads := make([][]byte, 0, len(pages))
-	for _, page := range pages {
+	payloads := make([][]byte, 0, 64)
+	if err := WalkMetricFileV1(metricPath, func(page MetricFilePage) error {
 		payloads = append(payloads, encodeMetricPayloadRaw(tb, page))
+		return nil
+	}); err != nil {
+		tb.Fatalf("WalkMetricFileV1: %v", err)
 	}
 	return payloads
 }

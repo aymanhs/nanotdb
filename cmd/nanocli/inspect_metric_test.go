@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -117,5 +118,84 @@ func TestBuildInspectMetricReport_ShowsCoalescedFrames(t *testing.T) {
 		if frame.PointCount != 3 {
 			t.Fatalf("expected merged frame point count 3, got %d", frame.PointCount)
 		}
+	}
+}
+
+func TestBuildInspectMetricReport_NonVerboseUsesPageInfosOnly(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	base := engine.Timestamp(time.Date(2023, 11, 14, 0, 0, 0, 0, time.UTC).UnixNano())
+	for i := 0; i < 4; i++ {
+		if err := e.AddSample("prod", "cpu.temp", base+engine.Timestamp(i*10), float32(40+i)); err != nil {
+			t.Fatalf("AddSample cpu.temp failed: %v", err)
+		}
+		if err := e.AddSample("prod", "cpu.idle", base+engine.Timestamp(i*10+1), int32(80+i)); err != nil {
+			t.Fatalf("AddSample cpu.idle failed: %v", err)
+		}
+	}
+	partition := time.Unix(0, int64(base)).UTC().Format("2006-01-02")
+	metricPath, err := e.BuildMetricFileV1("prod", partition)
+	if err != nil {
+		t.Fatalf("BuildMetricFileV1 failed: %v", err)
+	}
+
+	infos, err := engine.ReadMetricFilePageInfosV1(metricPath)
+	if err != nil {
+		t.Fatalf("ReadMetricFilePageInfosV1 failed: %v", err)
+	}
+	if len(infos) == 0 {
+		t.Fatal("expected non-empty page infos")
+	}
+
+	f, err := os.OpenFile(metricPath, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile metricPath failed: %v", err)
+	}
+	corruptAt := int64(infos[0].PageOffset)
+	if _, err := f.WriteAt([]byte{0}, corruptAt); err != nil {
+		_ = f.Close()
+		t.Fatalf("WriteAt corrupt frame header failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close corrupt file failed: %v", err)
+	}
+
+	ctx, err := resolveDBContext(root, "prod")
+	if err != nil {
+		t.Fatalf("resolveDBContext failed: %v", err)
+	}
+
+	report, err := buildInspectMetricReport(ctx, false)
+	if err != nil {
+		t.Fatalf("buildInspectMetricReport non-verbose failed: %v", err)
+	}
+	if report.HasErrors {
+		t.Fatalf("expected non-verbose report without scan errors, got=%+v", report.Files)
+	}
+	if report.TotalFrames == 0 || report.TotalPoints == 0 {
+		t.Fatalf("expected non-verbose report totals, got frames=%d points=%d", report.TotalFrames, report.TotalPoints)
+	}
+
+	verboseReport, err := buildInspectMetricReport(ctx, true)
+	if err != nil {
+		t.Fatalf("buildInspectMetricReport verbose failed: %v", err)
+	}
+	if !verboseReport.HasErrors {
+		t.Fatal("expected verbose report to surface payload corruption")
+	}
+	if len(verboseReport.Files) != 1 || verboseReport.Files[0].ScanError == "" {
+		t.Fatalf("expected verbose scan error, got=%+v", verboseReport.Files)
+	}
+	if verboseReport.Files[0].ScanError != fmt.Sprintf("invalid frame magic at offset %d", infos[0].PageOffset) {
+		t.Fatalf("unexpected verbose scan error: %q", verboseReport.Files[0].ScanError)
 	}
 }

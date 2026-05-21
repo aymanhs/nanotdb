@@ -303,11 +303,23 @@
   const payload = await fetchJSON(apiURL(filesURL));
     const result = payload.data && payload.data.result;
     const dataFiles = result.data || [];
+    const metricFiles = result.metric || [];
     const datRows = dataFiles.map((item) => ({
       path: item.path,
       bytes: item.bytes,
       frames: item.frames,
       records: item.records,
+      start: item.min_utc || '-',
+      end: item.max_utc || '-',
+      error: item.scan_error || '',
+    }));
+    const metricRows = metricFiles.map((item) => ({
+      path: '<span class="codeish">' + item.path + '</span>',
+      bytes: number(item.bytes),
+      frames: number(item.frames),
+      metrics: number(item.distinct_metrics),
+      points: number(item.points),
+      payload: number(item.avg_payload_bytes),
       start: item.min_utc || '-',
       end: item.max_utc || '-',
       error: item.scan_error || '',
@@ -367,6 +379,17 @@
     filesPane.innerHTML = '<div class="section-head"><h2>Files</h2><p>On-disk .dat/.wal inspection, plus decoded WAL records.</p></div>' +
       '<div class="stack">' +
       '<div class="subpanel"><div class="section-head"><h3>Data Files</h3><p>Select a .dat file to inspect only its pages.</p></div>' + renderSelectableFilesTable(datRows, selectedPath) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Metric Files</h3><p>Trailer-only scan of query-optimized metric partitions.</p></div>' + renderTable([
+        { key: 'path', label: 'Path' },
+        { key: 'bytes', label: 'Bytes' },
+        { key: 'frames', label: 'Frames' },
+        { key: 'metrics', label: 'Metrics' },
+        { key: 'points', label: 'Points' },
+        { key: 'payload', label: 'Avg Payload' },
+        { key: 'start', label: 'Start' },
+        { key: 'end', label: 'End' },
+        { key: 'error', label: 'Error' },
+      ], metricRows) + '</div>' +
       '<div class="subpanel"><div class="section-head"><h3>Pages</h3><p>' + (selectedFile ? '<span class="codeish">' + escapeHTML(selectedFile.path) + '</span>' : 'No file selected.') + '</p></div><div class="subpanel-controls"><div class="action-note">' + recompactHelp + '</div><button type="button" class="action-button" id="recompactSelectedFile"' + (recompactDisabled ? ' disabled' : '') + '>Recompact Selected File</button></div>' + (fileActionStatus ? '<div class="action-status">' + escapeHTML(fileActionStatus) + '</div>' : '') + pagesTable + '</div>' +
       '<div class="subpanel"><div class="section-head"><h3>WAL Files</h3><p>Scan status and tail diagnostics.</p></div>' + renderTable([
         { key: 'path', label: 'Path' },

@@ -14,11 +14,12 @@ import (
 )
 
 type serverDBContext struct {
-	RootDir       string
-	Database      string
-	DatabaseDir   string
-	DataFilePaths []string
-	WALFilePaths  []string
+	RootDir         string
+	Database        string
+	DatabaseDir     string
+	DataFilePaths   []string
+	MetricFilePaths []string
+	WALFilePaths    []string
 }
 
 type engineDatabaseSummary struct {
@@ -79,6 +80,21 @@ type engineDataFile struct {
 	ScanError    string           `json:"scan_error,omitempty"`
 }
 
+type engineMetricFile struct {
+	Path            string `json:"path"`
+	Part            string `json:"part,omitempty"`
+	Bytes           int64  `json:"bytes"`
+	Frames          int    `json:"frames"`
+	DistinctMetrics int    `json:"distinct_metrics"`
+	Points          int64  `json:"points"`
+	AvgPayloadBytes int64  `json:"avg_payload_bytes,omitempty"`
+	MinTimestamp    int64  `json:"min_timestamp_ns,omitempty"`
+	MaxTimestamp    int64  `json:"max_timestamp_ns,omitempty"`
+	MinUTC          string `json:"min_utc,omitempty"`
+	MaxUTC          string `json:"max_utc,omitempty"`
+	ScanError       string `json:"scan_error,omitempty"`
+}
+
 type engineWALFile struct {
 	Path         string `json:"path"`
 	Bytes        int64  `json:"bytes"`
@@ -109,10 +125,11 @@ type engineWALRecord struct {
 }
 
 type engineFilesReport struct {
-	Database string            `json:"database"`
-	Data     []engineDataFile  `json:"data"`
-	WAL      []engineWALFile   `json:"wal"`
-	Records  []engineWALRecord `json:"records"`
+	Database string             `json:"database"`
+	Data     []engineDataFile   `json:"data"`
+	Metric   []engineMetricFile `json:"metric"`
+	WAL      []engineWALFile    `json:"wal"`
+	Records  []engineWALRecord  `json:"records"`
 }
 
 type engineRuntimeReport struct {
@@ -437,7 +454,7 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 		selectedDataFile = ctx.DataFilePaths[0]
 	}
 
-	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
+	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), Metric: make([]engineMetricFile, 0, len(ctx.MetricFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
 	for _, path := range ctx.DataFilePaths {
 		stats, err := engine.ScanDataFileStats(path)
 		part := dataFilePart(path)
@@ -495,6 +512,43 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 		report.Data = append(report.Data, item)
 	}
 
+	for _, path := range ctx.MetricFilePaths {
+		st, err := os.Stat(path)
+		part := metricFilePart(path)
+		if err != nil {
+			report.Metric = append(report.Metric, engineMetricFile{Path: path, Part: part, ScanError: err.Error()})
+			continue
+		}
+		item := engineMetricFile{Path: path, Part: part, Bytes: st.Size()}
+		infos, err := engine.ReadMetricFilePageInfosV1(path)
+		if err != nil {
+			item.ScanError = err.Error()
+			report.Metric = append(report.Metric, item)
+			continue
+		}
+		seenMetrics := make(map[engine.MetricID]struct{}, len(infos))
+		var totalPayload int64
+		for _, info := range infos {
+			item.Frames++
+			seenMetrics[info.MetricID] = struct{}{}
+			item.Points += int64(info.PointCount)
+			totalPayload += int64(info.PayloadLen)
+			if item.MinTimestamp == 0 || int64(info.MetricMinTS) < item.MinTimestamp {
+				item.MinTimestamp = int64(info.MetricMinTS)
+			}
+			if item.MaxTimestamp == 0 || int64(info.MetricMaxTS) > item.MaxTimestamp {
+				item.MaxTimestamp = int64(info.MetricMaxTS)
+			}
+		}
+		item.DistinctMetrics = len(seenMetrics)
+		if item.Frames > 0 {
+			item.AvgPayloadBytes = totalPayload / int64(item.Frames)
+			item.MinUTC = engine.FormatTimestamp(engine.Timestamp(item.MinTimestamp))
+			item.MaxUTC = engine.FormatTimestamp(engine.Timestamp(item.MaxTimestamp))
+		}
+		report.Metric = append(report.Metric, item)
+	}
+
 	for _, path := range ctx.WALFilePaths {
 		stats, records, err := engine.ScanWALFile(path)
 		if err != nil {
@@ -548,6 +602,18 @@ func dataFilePart(path string) string {
 		return ""
 	}
 	part := strings.TrimSuffix(strings.TrimPrefix(base, "data-"), ".dat")
+	if part == base {
+		return ""
+	}
+	return part
+}
+
+func metricFilePart(path string) string {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "metric-") || !strings.HasSuffix(base, ".dat") {
+		return ""
+	}
+	part := strings.TrimSuffix(strings.TrimPrefix(base, "metric-"), ".dat")
 	if part == base {
 		return ""
 	}
@@ -620,11 +686,16 @@ func resolveServerDBContext(rootDir string, database string) (serverDBContext, e
 	if err != nil {
 		return serverDBContext{}, err
 	}
+	metricFiles, err := filepath.Glob(filepath.Join(dbDir, "metric-*.dat"))
+	if err != nil {
+		return serverDBContext{}, err
+	}
 	walFiles, err := filepath.Glob(filepath.Join(dbDir, "*.wal"))
 	if err != nil {
 		return serverDBContext{}, err
 	}
 	sort.Strings(dataFiles)
+	sort.Strings(metricFiles)
 	sort.Strings(walFiles)
-	return serverDBContext{RootDir: rootDir, Database: database, DatabaseDir: dbDir, DataFilePaths: dataFiles, WALFilePaths: walFiles}, nil
+	return serverDBContext{RootDir: rootDir, Database: database, DatabaseDir: dbDir, DataFilePaths: dataFiles, MetricFilePaths: metricFiles, WALFilePaths: walFiles}, nil
 }

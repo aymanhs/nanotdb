@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -642,6 +643,13 @@ func TestHandleEngineFiles(t *testing.T) {
 						AvgDiskBytesPerPoint float64 `json:"avg_disk_bytes_per_point"`
 					} `json:"pages"`
 				} `json:"data"`
+				Metric []struct {
+					Path            string `json:"path"`
+					Frames          int    `json:"frames"`
+					DistinctMetrics int    `json:"distinct_metrics"`
+					Points          int64  `json:"points"`
+					AvgPayloadBytes int64  `json:"avg_payload_bytes"`
+				} `json:"metric"`
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -653,6 +661,9 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 	if len(filesResp.Data.Result.Data) < 2 || filesResp.Data.Result.Data[0].Frames == 0 {
 		t.Fatalf("expected scanned .dat frames in files payload: %+v", filesResp.Data.Result.Data)
+	}
+	if len(filesResp.Data.Result.Metric) != 0 {
+		t.Fatalf("expected no metric summaries before metric files exist: %+v", filesResp.Data.Result.Metric)
 	}
 	selectedFound := false
 	for _, item := range filesResp.Data.Result.Data {
@@ -678,6 +689,29 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 	if !selectedFound {
 		t.Fatalf("selected file missing from files payload: selected=%q data=%+v", selectedFile, filesResp.Data.Result.Data)
+	}
+
+	part := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(selectedFile), "data-"), ".dat")
+	if _, err := eng.BuildMetricFileV1("prod", part); err != nil {
+		t.Fatalf("BuildMetricFileV1 failed: %v", err)
+	}
+	filesReq = httptest.NewRequest(http.MethodGet, "/api/engine/files?db=prod&data_file="+url.QueryEscape(selectedFile), nil)
+	filesRec = httptest.NewRecorder()
+	handleEngineFiles(eng)(filesRec, filesReq)
+	if filesRec.Code != http.StatusOK {
+		t.Fatalf("files with metric status mismatch: got=%d want=200 body=%s", filesRec.Code, filesRec.Body.String())
+	}
+	if err := json.NewDecoder(filesRec.Body).Decode(&filesResp); err != nil {
+		t.Fatalf("decode files with metric failed: %v", err)
+	}
+	if len(filesResp.Data.Result.Metric) == 0 {
+		t.Fatalf("expected metric summaries after metric file build: %+v", filesResp.Data.Result)
+	}
+	if filesResp.Data.Result.Metric[0].Frames == 0 || filesResp.Data.Result.Metric[0].DistinctMetrics == 0 || filesResp.Data.Result.Metric[0].Points == 0 {
+		t.Fatalf("expected populated metric summary: %+v", filesResp.Data.Result.Metric[0])
+	}
+	if filesResp.Data.Result.Metric[0].AvgPayloadBytes <= 0 {
+		t.Fatalf("expected positive metric avg payload bytes: %+v", filesResp.Data.Result.Metric[0])
 	}
 }
 

@@ -172,33 +172,25 @@ func buildInspectMetricReport(ctx dbContext, verbose bool) (inspectMetricReport,
 		}
 		fileReport.Bytes = st.Size()
 
-		pages, err := engine.ReadMetricFileV1(path)
-		if err != nil {
-			fileReport.ScanError = err.Error()
-			report.HasErrors = true
-			report.Files = append(report.Files, fileReport)
-			continue
-		}
-
-		fileReport.Frames = len(pages)
-		seenMetrics := make(map[engine.MetricID]struct{}, len(pages))
+		seenMetrics := make(map[engine.MetricID]struct{})
 		var totalPayload int64
 		if verbose {
-			fileReport.FramesDetail = make([]inspectMetricFrameReport, 0, len(pages))
+			fileReport.FramesDetail = make([]inspectMetricFrameReport, 0, 32)
 		}
-		for idx, page := range pages {
-			seenMetrics[page.MetricID] = struct{}{}
-			fileReport.Points += int64(page.PointCount)
-			totalPayload += int64(page.PayloadLen)
-			if fileReport.MinTimestamp == 0 || int64(page.MetricMinTS) < fileReport.MinTimestamp {
-				fileReport.MinTimestamp = int64(page.MetricMinTS)
-			}
-			if fileReport.MaxTimestamp == 0 || int64(page.MetricMaxTS) > fileReport.MaxTimestamp {
-				fileReport.MaxTimestamp = int64(page.MetricMaxTS)
-			}
-			if verbose {
+		if verbose {
+			err = engine.WalkMetricFileV1(path, func(page engine.MetricFilePage) error {
+				seenMetrics[page.MetricID] = struct{}{}
+				fileReport.Frames++
+				fileReport.Points += int64(page.PointCount)
+				totalPayload += int64(page.PayloadLen)
+				if fileReport.MinTimestamp == 0 || int64(page.MetricMinTS) < fileReport.MinTimestamp {
+					fileReport.MinTimestamp = int64(page.MetricMinTS)
+				}
+				if fileReport.MaxTimestamp == 0 || int64(page.MetricMaxTS) > fileReport.MaxTimestamp {
+					fileReport.MaxTimestamp = int64(page.MetricMaxTS)
+				}
 				fileReport.FramesDetail = append(fileReport.FramesDetail, inspectMetricFrameReport{
-					Index:           idx,
+					Index:           len(fileReport.FramesDetail),
 					MetricID:        uint16(page.MetricID),
 					ValueType:       page.ValueType,
 					PointCount:      page.PointCount,
@@ -209,7 +201,28 @@ func buildInspectMetricReport(ctx dbContext, verbose bool) (inspectMetricReport,
 					StartUTC:        engine.FormatTimestamp(page.MetricMinTS),
 					EndUTC:          engine.FormatTimestamp(page.MetricMaxTS),
 				})
-			}
+				return nil
+			})
+		} else {
+			err = engine.WalkMetricFilePageInfosV1(path, func(page engine.MetricFilePageInfoV1) error {
+				seenMetrics[page.MetricID] = struct{}{}
+				fileReport.Frames++
+				fileReport.Points += int64(page.PointCount)
+				totalPayload += int64(page.PayloadLen)
+				if fileReport.MinTimestamp == 0 || int64(page.MetricMinTS) < fileReport.MinTimestamp {
+					fileReport.MinTimestamp = int64(page.MetricMinTS)
+				}
+				if fileReport.MaxTimestamp == 0 || int64(page.MetricMaxTS) > fileReport.MaxTimestamp {
+					fileReport.MaxTimestamp = int64(page.MetricMaxTS)
+				}
+				return nil
+			})
+		}
+		if err != nil {
+			fileReport.ScanError = err.Error()
+			report.HasErrors = true
+			report.Files = append(report.Files, fileReport)
+			continue
 		}
 		fileReport.DistinctMetrics = len(seenMetrics)
 		if fileReport.Frames > 0 {

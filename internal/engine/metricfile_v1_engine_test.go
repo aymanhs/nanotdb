@@ -218,6 +218,120 @@ func TestBuildMetricFileV1WithConfiguredCodecs(t *testing.T) {
 	}
 }
 
+func TestReadMetricFilePageInfosV1MatchesDecodedPages(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	base := Timestamp(time.Date(2023, 11, 14, 0, 0, 0, 0, time.UTC).UnixNano())
+	if err := e.AddSample("prod", "cpu.temp", base+1, float32(41.25)); err != nil {
+		t.Fatalf("AddSample cpu.temp failed: %v", err)
+	}
+	if err := e.AddSample("prod", "cpu.idle", base+2, int32(80)); err != nil {
+		t.Fatalf("AddSample cpu.idle failed: %v", err)
+	}
+	if err := e.AddSample("prod", "cpu.temp", base+3, float32(41.5)); err != nil {
+		t.Fatalf("AddSample cpu.temp failed: %v", err)
+	}
+	if err := e.flushDatabases([]string{"prod"}); err != nil {
+		t.Fatalf("flushDatabases failed: %v", err)
+	}
+
+	partition := dayKey(base)
+	metricPath, err := e.BuildMetricFileV1("prod", partition)
+	if err != nil {
+		t.Fatalf("BuildMetricFileV1 failed: %v", err)
+	}
+
+	pages, err := ReadMetricFileV1(metricPath)
+	if err != nil {
+		t.Fatalf("ReadMetricFileV1 failed: %v", err)
+	}
+	infos, err := ReadMetricFilePageInfosV1(metricPath)
+	if err != nil {
+		t.Fatalf("ReadMetricFilePageInfosV1 failed: %v", err)
+	}
+	if len(infos) != len(pages) {
+		t.Fatalf("page info count mismatch: got=%d want=%d", len(infos), len(pages))
+	}
+	for i := range pages {
+		if infos[i].Index != i {
+			t.Fatalf("index mismatch at %d: got=%d want=%d", i, infos[i].Index, i)
+		}
+		if infos[i].MetricID != pages[i].MetricID || infos[i].ValueType != pages[i].ValueType {
+			t.Fatalf("page identity mismatch at %d", i)
+		}
+		if infos[i].PageOffset != pages[i].PageOffset || infos[i].PointCount != pages[i].PointCount {
+			t.Fatalf("page shape mismatch at %d", i)
+		}
+		if infos[i].PayloadLen != pages[i].PayloadLen || infos[i].UncompressedLen != pages[i].UncompressedLen {
+			t.Fatalf("page length mismatch at %d", i)
+		}
+		if infos[i].MetricMinTS != pages[i].MetricMinTS || infos[i].MetricMaxTS != pages[i].MetricMaxTS {
+			t.Fatalf("page timestamp bounds mismatch at %d", i)
+		}
+	}
+}
+
+func TestCoalesceMetricPageInputsPreallocatesExactMetricCapacity(t *testing.T) {
+	pages := []MetricFilePageInput{
+		{
+			MetricID:  7,
+			ValueType: Float32Sample,
+			Times:     []Timestamp{10, 11},
+			Float32:   []float32{1.5, 1.6},
+		},
+		{
+			MetricID:  9,
+			ValueType: Int32Sample,
+			Times:     []Timestamp{12},
+			Int32:     []int32{7},
+		},
+		{
+			MetricID:  7,
+			ValueType: Float32Sample,
+			Times:     []Timestamp{12, 13, 14},
+			Float32:   []float32{1.7, 1.8, 1.9},
+		},
+		{
+			MetricID:  9,
+			ValueType: Int32Sample,
+			Times:     []Timestamp{15, 16},
+			Int32:     []int32{8, 9},
+		},
+	}
+
+	merged, err := coalesceMetricPageInputs(pages)
+	if err != nil {
+		t.Fatalf("coalesceMetricPageInputs failed: %v", err)
+	}
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 merged metrics, got=%d", len(merged))
+	}
+
+	if got, want := len(merged[0].Times), 5; got != want {
+		t.Fatalf("metric 7 merged time len mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := cap(merged[0].Times), 5; got != want {
+		t.Fatalf("metric 7 merged time cap mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := cap(merged[0].Float32), 5; got != want {
+		t.Fatalf("metric 7 merged float cap mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := len(merged[1].Times), 3; got != want {
+		t.Fatalf("metric 9 merged time len mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := cap(merged[1].Times), 3; got != want {
+		t.Fatalf("metric 9 merged time cap mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := cap(merged[1].Int32), 3; got != want {
+		t.Fatalf("metric 9 merged int cap mismatch: got=%d want=%d", got, want)
+	}
+}
+
 func TestBuildMetricFileV1AppliesRawIngestAction(t *testing.T) {
 	actions := []struct {
 		name           string

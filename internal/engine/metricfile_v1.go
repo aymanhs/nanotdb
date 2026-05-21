@@ -85,6 +85,23 @@ type metricFileSamplePoint struct {
 	Raw       uint32
 }
 
+type MetricFilePageInfoV1 struct {
+	Index           int
+	MetricID        MetricID
+	ValueType       byte
+	PageOffset      uint64
+	MetricMinTS     Timestamp
+	MetricMaxTS     Timestamp
+	PointCount      uint32
+	UncompressedLen uint32
+	PayloadLen      uint32
+}
+
+type metricFrameEncodeWorkspace struct {
+	payloadRaw bytes.Buffer
+	frame      bytes.Buffer
+}
+
 func WriteMetricFileV1(path string, partitionKind uint8, codec BlockCompressionCodec, pages []MetricFilePageInput) error {
 	if partitionKind < MetricPartitionDay || partitionKind > MetricPartitionForever {
 		return fmt.Errorf("invalid partition kind: %d", partitionKind)
@@ -114,6 +131,7 @@ func WriteMetricFileV1(path string, partitionKind uint8, codec BlockCompressionC
 	})
 
 	infos := make([]metricFileV1PageInfo, 0, len(indexed))
+	workspace := metricFrameEncodeWorkspace{}
 	var fileMin, fileMax Timestamp
 	firstTS := true
 
@@ -145,7 +163,7 @@ func WriteMetricFileV1(path string, partitionKind uint8, codec BlockCompressionC
 	curOffset := uint64(metricFileV1HeaderLen)
 	for _, item := range indexed {
 		in := item.in
-		frame, info, err := encodeMetricFrame(codec, in, curOffset)
+		frame, info, err := encodeMetricFrame(&workspace, codec, in, curOffset)
 		if err != nil {
 			return err
 		}
@@ -245,16 +263,12 @@ func (e *Engine) BuildMetricFileV1(database, partition string) (string, error) {
 	}
 	metricPath := filepath.Join(db.RootDataDir, "metric-"+partition+".dat")
 
-	pages, err := buildMetricPagesFromDataFile(db, dataPath)
+	pages, err := buildCoalescedMetricPagesFromDataFile(db, dataPath)
 	if err != nil {
 		return "", err
 	}
 	if len(pages) == 0 {
 		return "", fmt.Errorf("no persisted pages in %s", dataPath)
-	}
-	pages, err = coalesceMetricPageInputs(pages)
-	if err != nil {
-		return "", err
 	}
 	codec, err := BlockCompressionCodecByName(e.MetricFileCompression)
 	if err != nil {
@@ -296,73 +310,101 @@ func (e *Engine) CompareDataAndMetricPartitionV1(database, partition string) err
 	if err != nil {
 		return err
 	}
-	metricPages, err := ReadMetricFileV1(metricPath)
-	if err != nil {
-		return err
-	}
-	metricSamples, err := collectMetricPartitionSamples(metricPages)
-	if err != nil {
-		return err
-	}
-
-	if len(dataSamples) != len(metricSamples) {
-		return fmt.Errorf("metric set mismatch: data=%d metric=%d", len(dataSamples), len(metricSamples))
-	}
-
-	for mid, lhs := range dataSamples {
-		rhs, ok := metricSamples[mid]
-		if !ok {
-			return fmt.Errorf("metric %d missing from metric partition", mid)
-		}
-		if len(lhs) != len(rhs) {
-			name := metricNameByID(db.catalog, mid)
-			return fmt.Errorf("sample count mismatch for metric %s(%d): data=%d metric=%d", name, mid, len(lhs), len(rhs))
-		}
-		for i := range lhs {
-			if lhs[i].TS != rhs[i].TS || lhs[i].ValueType != rhs[i].ValueType || lhs[i].Raw != rhs[i].Raw {
-				name := metricNameByID(db.catalog, mid)
-				return fmt.Errorf("sample mismatch for metric %s(%d) at index %d", name, mid, i)
-			}
-		}
-	}
-
-	for mid := range metricSamples {
-		if _, ok := dataSamples[mid]; !ok {
-			return fmt.Errorf("metric %d present in metric partition but missing in data partition", mid)
-		}
-	}
-	return nil
+	return compareMetricPartitionSamplesFromFile(db.catalog, metricPath, dataSamples)
 }
 
 func ReadMetricFileV1(path string) ([]MetricFilePage, error) {
-	f, err := os.Open(path)
+	out := make([]MetricFilePage, 0)
+	err := WalkMetricFileV1(path, func(page MetricFilePage) error {
+		out = append(out, page)
+		return nil
+	})
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+func ReadMetricFilePageInfosV1(path string) ([]MetricFilePageInfoV1, error) {
+	out := make([]MetricFilePageInfoV1, 0)
+	err := WalkMetricFilePageInfosV1(path, func(info MetricFilePageInfoV1) error {
+		out = append(out, info)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func WalkMetricFilePageInfosV1(path string, fn func(MetricFilePageInfoV1) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if st.Size() < metricFileV1HeaderLen+metricFileV1FooterLen {
-		return nil, fmt.Errorf("file too small")
+		return fmt.Errorf("file too small")
 	}
 
 	infos, err := readMetricFilePageInfosV1(f, st.Size())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	out := make([]MetricFilePage, 0, len(infos))
+	for i, pi := range infos {
+		if err := fn(MetricFilePageInfoV1{
+			Index:           i,
+			MetricID:        pi.MetricID,
+			ValueType:       pi.ValueType,
+			PageOffset:      pi.PageOffset,
+			MetricMinTS:     pi.MetricMinTS,
+			MetricMaxTS:     pi.MetricMaxTS,
+			PointCount:      pi.PointCount,
+			UncompressedLen: pi.UncompressedLen,
+			PayloadLen:      pi.PayloadLen,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func WalkMetricFileV1(path string, fn func(MetricFilePage) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() < metricFileV1HeaderLen+metricFileV1FooterLen {
+		return fmt.Errorf("file too small")
+	}
+
+	infos, err := readMetricFilePageInfosV1(f, st.Size())
+	if err != nil {
+		return err
+	}
+
 	for _, pi := range infos {
 		page, err := readOneMetricPageV1(f, st.Size(), pi)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, page)
+		if err := fn(page); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
 }
 
 func collectMetricFromMetricFile(database, metric string, entry MetricEntry, path string, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
@@ -634,9 +676,12 @@ func readOneMetricPageV1(f *os.File, fileSize int64, pi metricFileV1PageInfo) (M
 	return out, nil
 }
 
-func encodeMetricFrame(codec BlockCompressionCodec, in MetricFilePageInput, pageOffset uint64) ([]byte, metricFileV1PageInfo, error) {
+func encodeMetricFrame(workspace *metricFrameEncodeWorkspace, codec BlockCompressionCodec, in MetricFilePageInput, pageOffset uint64) ([]byte, metricFileV1PageInfo, error) {
 	if in.MetricID == 0 {
 		return nil, metricFileV1PageInfo{}, fmt.Errorf("metric id cannot be 0")
+	}
+	if workspace == nil {
+		workspace = &metricFrameEncodeWorkspace{}
 	}
 	if codec == nil {
 		codec = DefaultMetricFileCompressionCodec()
@@ -651,7 +696,9 @@ func encodeMetricFrame(codec BlockCompressionCodec, in MetricFilePageInput, page
 		}
 	}
 
-	payloadRaw := bytes.NewBuffer(make([]byte, 0, n*12))
+	payloadRaw := &workspace.payloadRaw
+	payloadRaw.Reset()
+	payloadRaw.Grow(n * 12)
 	for _, ts := range in.Times {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], uint64(ts))
@@ -706,7 +753,9 @@ func encodeMetricFrame(codec BlockCompressionCodec, in MetricFilePageInput, page
 	binary.LittleEndian.PutUint32(frameHdr[40:44], 0)
 	binary.LittleEndian.PutUint32(frameHdr[44:48], crc32.ChecksumIEEE(frameHdr[:44]))
 
-	frame := bytes.NewBuffer(make([]byte, 0, len(frameHdr)+len(compressed)+4))
+	frame := &workspace.frame
+	frame.Reset()
+	frame.Grow(len(frameHdr) + len(compressed) + 4)
 	if _, err := frame.Write(frameHdr); err != nil {
 		return nil, metricFileV1PageInfo{}, err
 	}
@@ -817,65 +866,208 @@ func partitionModeToMetricPartitionKind(mode string) (uint8, error) {
 	}
 }
 
-func buildMetricPagesFromDataFile(db *Database, dataPath string) ([]MetricFilePageInput, error) {
-	f, err := os.Open(dataPath)
+type metricBuildPlan struct {
+	valueType byte
+	points    int
+}
+
+type metricBuildCursor struct {
+	index int
+	next  int
+}
+
+func buildCoalescedMetricPagesFromDataFile(db *Database, dataPath string) ([]MetricFilePageInput, error) {
+	totals, order, err := scanMetricBuildPlansFromDataFile(db.catalog, dataPath)
 	if err != nil {
 		return nil, err
+	}
+	if len(order) == 0 {
+		return nil, nil
+	}
+
+	cursors := make(map[MetricID]metricBuildCursor, len(order))
+	out := make([]MetricFilePageInput, 0, len(order))
+	for _, mid := range order {
+		plan := totals[mid]
+		page := MetricFilePageInput{
+			MetricID:  mid,
+			ValueType: plan.valueType,
+			Times:     make([]Timestamp, plan.points),
+		}
+		switch plan.valueType {
+		case Int32Sample:
+			page.Int32 = make([]int32, plan.points)
+		case Float32Sample:
+			page.Float32 = make([]float32, plan.points)
+		default:
+			return nil, fmt.Errorf("unsupported value type: %d", plan.valueType)
+		}
+		cursors[mid] = metricBuildCursor{index: len(out)}
+		out = append(out, page)
+	}
+
+	err = walkDataPages(dataPath, func(p *Page) error {
+		return appendPageSamplesToMetricPages(db.catalog, p, out, cursors)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, cursor := range cursors {
+		page := out[cursor.index]
+		if cursor.next != len(page.Times) {
+			return nil, fmt.Errorf("metric %d fill mismatch: wrote=%d want=%d", page.MetricID, cursor.next, len(page.Times))
+		}
+	}
+
+	return out, nil
+}
+
+func scanMetricBuildPlansFromDataFile(c *Catalog, dataPath string) (map[MetricID]metricBuildPlan, []MetricID, error) {
+	totals := make(map[MetricID]metricBuildPlan)
+	order := make([]MetricID, 0)
+	err := walkDataPages(dataPath, func(p *Page) error {
+		if len(p.Metrics) != len(p.Times) {
+			return fmt.Errorf("page corruption: metrics/times length mismatch")
+		}
+		for _, mid := range p.Metrics {
+			_, entry, ok := c.GetMetricByID(mid)
+			if !ok {
+				return fmt.Errorf("unknown metric id in page: %d", mid)
+			}
+			plan, ok := totals[mid]
+			if !ok {
+				totals[mid] = metricBuildPlan{valueType: entry.ValueType, points: 1}
+				order = append(order, mid)
+				continue
+			}
+			if plan.valueType != entry.ValueType {
+				return fmt.Errorf("value type mismatch while planning metric %d", mid)
+			}
+			plan.points++
+			totals[mid] = plan
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return totals, order, nil
+}
+
+func appendPageSamplesToMetricPages(c *Catalog, p *Page, out []MetricFilePageInput, cursors map[MetricID]metricBuildCursor) error {
+	if len(p.Metrics) != len(p.Times) {
+		return fmt.Errorf("page corruption: metrics/times length mismatch")
+	}
+	values := p.Values.Bytes()
+	if len(values) < len(p.Metrics)*4 {
+		return fmt.Errorf("page corruption: values blob too short")
+	}
+
+	for i, mid := range p.Metrics {
+		_, entry, ok := c.GetMetricByID(mid)
+		if !ok {
+			return fmt.Errorf("unknown metric id in page: %d", mid)
+		}
+		cursor, ok := cursors[mid]
+		if !ok {
+			return fmt.Errorf("metric %d missing from build plan", mid)
+		}
+		page := &out[cursor.index]
+		if page.ValueType != entry.ValueType {
+			return fmt.Errorf("value type mismatch while filling metric %d", mid)
+		}
+		if cursor.next >= len(page.Times) {
+			return fmt.Errorf("metric %d fill overflow", mid)
+		}
+
+		ts := p.Times[i]
+		if cursor.next > 0 && page.Times[cursor.next-1] > ts {
+			return fmt.Errorf("non-monotonic merge order for metric %d", mid)
+		}
+		page.Times[cursor.next] = ts
+
+		raw := binary.LittleEndian.Uint32(values[i*4 : i*4+4])
+		switch entry.ValueType {
+		case Int32Sample:
+			page.Int32[cursor.next] = int32(raw)
+		case Float32Sample:
+			page.Float32[cursor.next] = math.Float32frombits(raw)
+		default:
+			return fmt.Errorf("unsupported value type: %d", entry.ValueType)
+		}
+
+		cursor.next++
+		cursors[mid] = cursor
+	}
+	return nil
+}
+
+func walkDataPages(dataPath string, fn func(*Page) error) error {
+	f, err := os.Open(dataPath)
+	if err != nil {
+		return err
 	}
 	defer f.Close()
 
 	r := bufio.NewReaderSize(f, 64*1024)
-	out := make([]MetricFilePageInput, 0)
-
+	var p Page
 	for {
 		var header [HeaderSize]byte
 		if _, err := io.ReadFull(r, header[:]); err != nil {
 			if err == io.EOF {
-				return out, nil
+				return nil
 			}
 			if err == io.ErrUnexpectedEOF {
-				return nil, fmt.Errorf("truncated frame header")
+				return fmt.Errorf("truncated frame header")
 			}
-			return nil, err
+			return err
 		}
 
 		compressedLen, err := binary.ReadUvarint(r)
 		if err != nil {
 			if err == io.EOF {
-				return nil, fmt.Errorf("truncated frame length")
+				return fmt.Errorf("truncated frame length")
 			}
-			return nil, err
+			return err
 		}
 
 		compressed := make([]byte, compressedLen)
 		if _, err := io.ReadFull(r, compressed); err != nil {
-			return nil, fmt.Errorf("truncated compressed payload")
+			return fmt.Errorf("truncated compressed payload")
 		}
 		var crcBytes [4]byte
 		if _, err := io.ReadFull(r, crcBytes[:]); err != nil {
-			return nil, fmt.Errorf("truncated frame checksum")
+			return fmt.Errorf("truncated frame checksum")
 		}
 
-		var frame bytes.Buffer
-		frame.Grow(HeaderSize + binary.MaxVarintLen64 + int(compressedLen) + 4)
-		_, _ = frame.Write(header[:])
-		var varintBuf [binary.MaxVarintLen64]byte
-		n := binary.PutUvarint(varintBuf[:], compressedLen)
-		_, _ = frame.Write(varintBuf[:n])
-		_, _ = frame.Write(compressed)
-		_, _ = frame.Write(crcBytes[:])
-
-		var p Page
-		if err := p.DecodeFrom(bytes.NewReader(frame.Bytes())); err != nil {
-			return nil, fmt.Errorf("decode page: %w", err)
+		var h PageHeader
+		if err := h.Decode(bytes.NewReader(header[:])); err != nil {
+			return fmt.Errorf("decode page header: %w", err)
 		}
+		if err := p.DecodeCompressedFrame(h, compressed, binary.LittleEndian.Uint32(crcBytes[:])); err != nil {
+			return fmt.Errorf("decode page: %w", err)
+		}
+		if err := fn(&p); err != nil {
+			return err
+		}
+	}
+}
 
-		pageInputs, err := splitPageByMetric(db.catalog, &p)
+func buildMetricPagesFromDataFile(db *Database, dataPath string) ([]MetricFilePageInput, error) {
+	out := make([]MetricFilePageInput, 0)
+	err := walkDataPages(dataPath, func(p *Page) error {
+		pageInputs, err := splitPageByMetric(db.catalog, p)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		out = append(out, pageInputs...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	return out, nil
 }
 
 func splitPageByMetric(c *Catalog, p *Page) ([]MetricFilePageInput, error) {
@@ -923,8 +1115,13 @@ func coalesceMetricPageInputs(pages []MetricFilePageInput) ([]MetricFilePageInpu
 		return nil, nil
 	}
 
-	byMetric := make(map[MetricID]int, len(pages))
-	out := make([]MetricFilePageInput, 0, len(pages))
+	type metricTotals struct {
+		valueType byte
+		points    int
+	}
+
+	totals := make(map[MetricID]metricTotals, len(pages))
+	order := make([]MetricID, 0, len(pages))
 	for _, page := range pages {
 		if page.MetricID == 0 {
 			return nil, fmt.Errorf("metric id cannot be 0")
@@ -933,25 +1130,44 @@ func coalesceMetricPageInputs(pages []MetricFilePageInput) ([]MetricFilePageInpu
 			return nil, fmt.Errorf("empty times for metric %d", page.MetricID)
 		}
 
-		idx, ok := byMetric[page.MetricID]
+		total, ok := totals[page.MetricID]
 		if !ok {
-			copyPage := MetricFilePageInput{
-				MetricID:  page.MetricID,
-				ValueType: page.ValueType,
-				Times:     append([]Timestamp(nil), page.Times...),
-				Int32:     append([]int32(nil), page.Int32...),
-				Float32:   append([]float32(nil), page.Float32...),
-			}
-			byMetric[page.MetricID] = len(out)
-			out = append(out, copyPage)
+			totals[page.MetricID] = metricTotals{valueType: page.ValueType, points: len(page.Times)}
+			order = append(order, page.MetricID)
 			continue
 		}
-
-		merged := &out[idx]
-		if merged.ValueType != page.ValueType {
+		if total.valueType != page.ValueType {
 			return nil, fmt.Errorf("value type mismatch while merging metric %d", page.MetricID)
 		}
-		if merged.Times[len(merged.Times)-1] > page.Times[0] {
+		total.points += len(page.Times)
+		totals[page.MetricID] = total
+	}
+
+	byMetric := make(map[MetricID]int, len(order))
+	out := make([]MetricFilePageInput, 0, len(order))
+	for _, mid := range order {
+		total := totals[mid]
+		merged := MetricFilePageInput{
+			MetricID:  mid,
+			ValueType: total.valueType,
+			Times:     make([]Timestamp, 0, total.points),
+		}
+		switch total.valueType {
+		case Int32Sample:
+			merged.Int32 = make([]int32, 0, total.points)
+		case Float32Sample:
+			merged.Float32 = make([]float32, 0, total.points)
+		default:
+			return nil, fmt.Errorf("unsupported value type: %d", total.valueType)
+		}
+		byMetric[mid] = len(out)
+		out = append(out, merged)
+	}
+
+	for _, page := range pages {
+		idx := byMetric[page.MetricID]
+		merged := &out[idx]
+		if len(merged.Times) > 0 && merged.Times[len(merged.Times)-1] > page.Times[0] {
 			return nil, fmt.Errorf("non-monotonic merge order for metric %d", page.MetricID)
 		}
 
@@ -976,19 +1192,93 @@ func coalesceMetricPageInputs(pages []MetricFilePageInput) ([]MetricFilePageInpu
 }
 
 func collectDataPartitionSamples(db *Database, dataPath string) (map[MetricID][]metricFileSamplePoint, error) {
-	pages, err := buildMetricPagesFromDataFile(db, dataPath)
+	out := make(map[MetricID][]metricFileSamplePoint)
+	err := walkDataPages(dataPath, func(p *Page) error {
+		if len(p.Metrics) != len(p.Times) {
+			return fmt.Errorf("page corruption: metrics/times length mismatch")
+		}
+		values := p.Values.Bytes()
+		if len(values) < len(p.Metrics)*4 {
+			return fmt.Errorf("page corruption: values blob too short")
+		}
+		for i, mid := range p.Metrics {
+			_, entry, ok := db.catalog.GetMetricByID(mid)
+			if !ok {
+				return fmt.Errorf("unknown metric id in page: %d", mid)
+			}
+			out[mid] = append(out[mid], metricFileSamplePoint{
+				TS:        p.Times[i],
+				ValueType: entry.ValueType,
+				Raw:       binary.LittleEndian.Uint32(values[i*4 : i*4+4]),
+			})
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[MetricID][]metricFileSamplePoint)
-	for _, p := range pages {
-		pts, err := samplePointsFromInput(p)
-		if err != nil {
-			return nil, err
-		}
-		out[p.MetricID] = append(out[p.MetricID], pts...)
-	}
 	return out, nil
+}
+
+func compareMetricPartitionSamplesFromFile(c *Catalog, path string, expected map[MetricID][]metricFileSamplePoint) error {
+	positions := make(map[MetricID]int, len(expected))
+	err := WalkMetricFileV1(path, func(page MetricFilePage) error {
+		pts, ok := expected[page.MetricID]
+		if !ok {
+			return fmt.Errorf("metric %d present in metric partition but missing in data partition", page.MetricID)
+		}
+		if len(page.Times) != int(page.PointCount) {
+			return fmt.Errorf("metric page corruption: point count mismatch")
+		}
+
+		start := positions[page.MetricID]
+		end := start + len(page.Times)
+		if end > len(pts) {
+			name := metricNameByID(c, page.MetricID)
+			return fmt.Errorf("sample count mismatch for metric %s(%d): data=%d metric=%d", name, page.MetricID, len(pts), end)
+		}
+
+		switch page.ValueType {
+		case Int32Sample:
+			if len(page.Int32) != len(page.Times) {
+				return fmt.Errorf("metric page corruption: int32 vector mismatch")
+			}
+			for i, ts := range page.Times {
+				expectedPt := pts[start+i]
+				if expectedPt.TS != ts || expectedPt.ValueType != page.ValueType || expectedPt.Raw != uint32(page.Int32[i]) {
+					name := metricNameByID(c, page.MetricID)
+					return fmt.Errorf("sample mismatch for metric %s(%d) at index %d", name, page.MetricID, start+i)
+				}
+			}
+		case Float32Sample:
+			if len(page.Float32) != len(page.Times) {
+				return fmt.Errorf("metric page corruption: float32 vector mismatch")
+			}
+			for i, ts := range page.Times {
+				expectedPt := pts[start+i]
+				if expectedPt.TS != ts || expectedPt.ValueType != page.ValueType || expectedPt.Raw != math.Float32bits(page.Float32[i]) {
+					name := metricNameByID(c, page.MetricID)
+					return fmt.Errorf("sample mismatch for metric %s(%d) at index %d", name, page.MetricID, start+i)
+				}
+			}
+		default:
+			return fmt.Errorf("unsupported value type: %d", page.ValueType)
+		}
+
+		positions[page.MetricID] = end
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	for mid, pts := range expected {
+		if positions[mid] != len(pts) {
+			name := metricNameByID(c, mid)
+			return fmt.Errorf("sample count mismatch for metric %s(%d): data=%d metric=%d", name, mid, len(pts), positions[mid])
+		}
+	}
+	return nil
 }
 
 func collectMetricPartitionSamples(pages []MetricFilePage) (map[MetricID][]metricFileSamplePoint, error) {
@@ -999,6 +1289,22 @@ func collectMetricPartitionSamples(pages []MetricFilePage) (map[MetricID][]metri
 			return nil, err
 		}
 		out[p.MetricID] = append(out[p.MetricID], pts...)
+	}
+	return out, nil
+}
+
+func collectMetricPartitionSamplesFromFile(path string) (map[MetricID][]metricFileSamplePoint, error) {
+	out := make(map[MetricID][]metricFileSamplePoint)
+	err := WalkMetricFileV1(path, func(page MetricFilePage) error {
+		pts, err := samplePointsFromPage(page)
+		if err != nil {
+			return err
+		}
+		out[page.MetricID] = append(out[page.MetricID], pts...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }

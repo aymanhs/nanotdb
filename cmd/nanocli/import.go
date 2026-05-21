@@ -29,9 +29,10 @@ func runImport(args []string) error {
 
 	rootDir := fs.String("root", "", "root data directory that contains engine.toml")
 	inputPath := fs.String("in", "", "line protocol input file")
+	dbOverride := fs.String("db", "", "override database name for all imported lines")
 	jsonOut := fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli import --root <root-dir> --in <line-protocol-file> [--json]")
+		return fmt.Errorf("usage: nanocli import --root <root-dir> --in <line-protocol-file> [--db <database>] [--json]")
 	}
 	if *inputPath == "" {
 		return fmt.Errorf("--in is required")
@@ -56,7 +57,7 @@ func runImport(args []string) error {
 	defer eng.Close()
 	eng.SetAutoRollupTrigger(false)
 
-	total, imported, skipped, dbsSeen, err := importLineProtocol(eng, in)
+	total, imported, skipped, dbsSeen, err := importLineProtocol(eng, in, *dbOverride)
 	if err != nil {
 		return err
 	}
@@ -91,10 +92,11 @@ func runImport(args []string) error {
 	})
 }
 
-func importLineProtocol(eng *engine.Engine, r io.Reader) (total int, imported int, skipped int, databases []string, err error) {
+func importLineProtocol(eng *engine.Engine, r io.Reader, dbOverride string) (total int, imported int, skipped int, databases []string, err error) {
 	s := bufio.NewScanner(r)
 	lineNo := 0
 	dbSet := make(map[string]struct{})
+	dbOverride = strings.TrimSpace(dbOverride)
 	for s.Scan() {
 		lineNo++
 		total++
@@ -102,6 +104,13 @@ func importLineProtocol(eng *engine.Engine, r io.Reader) (total int, imported in
 		if line == "" || strings.HasPrefix(line, "#") {
 			skipped++
 			continue
+		}
+		if dbOverride != "" {
+			var err error
+			line, err = overrideLineDatabase(line, dbOverride)
+			if err != nil {
+				return total, imported, skipped, nil, fmt.Errorf("line %d: %w", lineNo, err)
+			}
 		}
 		dbName, err := extractDatabaseName(line)
 		if err != nil {
@@ -122,6 +131,20 @@ func importLineProtocol(eng *engine.Engine, r io.Reader) (total int, imported in
 	}
 	sort.Strings(databases)
 	return total, imported, skipped, databases, nil
+}
+
+func overrideLineDatabase(line, dbName string) (string, error) {
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid line protocol")
+	}
+	key := parts[0]
+	idx := strings.Index(key, "/")
+	if idx <= 0 || idx == len(key)-1 {
+		return "", fmt.Errorf("expected metric key in form db/metric")
+	}
+	parts[0] = dbName + key[idx:]
+	return strings.Join(parts, " "), nil
 }
 
 func extractDatabaseName(line string) (string, error) {

@@ -116,6 +116,48 @@ destination_metric_prefix = "temp.out_dry"
 	}
 }
 
+func TestRunImportWithDatabaseOverride(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	input := filepath.Join(root, "input.lp")
+	base := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	lp := "" +
+		"source/temp.out_dry 37750i " + itoa64(base.UnixNano()) + "\n" +
+		"source/system.load1 0.5 " + itoa64(base.Add(time.Second).UnixNano()) + "\n"
+	if err := os.WriteFile(input, []byte(lp), 0644); err != nil {
+		t.Fatalf("WriteFile input.lp failed: %v", err)
+	}
+
+	if err := runImport([]string{"--root", root, "--in", input, "--db", "vmprod"}); err != nil {
+		t.Fatalf("runImport failed: %v", err)
+	}
+
+	e, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine verify failed: %v", err)
+	}
+	defer e.Close()
+
+	from := engine.Timestamp(base.UnixNano())
+	to := engine.Timestamp(base.Add(2 * time.Second).UnixNano())
+	assertMetricHasIntValue(t, e, "vmprod", "temp.out_dry", from, to, 37750)
+	assertMetricHasValue(t, e, "vmprod", "system.load1", from, to, 0.5)
+
+	var sourceSamples int
+	if err := e.QueryRange("source", "temp.out_dry", from, to, 1, func(s engine.Sample) error {
+		sourceSamples++
+		return nil
+	}); err != nil {
+		t.Fatalf("QueryRange source failed: %v", err)
+	}
+	if sourceSamples != 0 {
+		t.Fatalf("expected no samples in source db, got %d", sourceSamples)
+	}
+}
+
 func assertMetricHasValue(t *testing.T, e *engine.Engine, dbName, metric string, from, to engine.Timestamp, want float32) {
 	t.Helper()
 
@@ -136,6 +178,28 @@ func assertMetricHasValue(t *testing.T, e *engine.Engine, dbName, metric string,
 		}
 	}
 	t.Fatalf("expected %s/%s to contain value %f, got=%v", dbName, metric, want, rows)
+}
+
+func assertMetricHasIntValue(t *testing.T, e *engine.Engine, dbName, metric string, from, to engine.Timestamp, want int32) {
+	t.Helper()
+
+	rows := make([]engine.Sample, 0, 8)
+	err := e.QueryRange(dbName, metric, from, to, 1, func(s engine.Sample) error {
+		rows = append(rows, s)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("QueryRange %s/%s failed: %v", dbName, metric, err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("expected samples for %s/%s", dbName, metric)
+	}
+	for _, row := range rows {
+		if row.Int32 == want {
+			return
+		}
+	}
+	t.Fatalf("expected %s/%s to contain int value %d, got=%v", dbName, metric, want, rows)
 }
 
 func itoa64(v int64) string {
