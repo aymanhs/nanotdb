@@ -635,6 +635,62 @@ func TestTriggerRollupsForSourceReturnsAfterRollupJobError(t *testing.T) {
 	}
 }
 
+func TestAutoRollupOnFullPageDoesNotDeadlock(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	_, rt, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	rt.info.PageMaxRecords = 3
+	rt.info.Rollups = DBManifestRollups{
+		Enabled:        true,
+		CheckpointFile: defaultRollupCheckpointFile,
+		DefaultGrace:   "0s",
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp-1h",
+			SourceMetric:            "temp.office",
+			Interval:                "1h",
+			Aggregates:              []string{"sum"},
+			DestinationDB:           "prod_rollup_1h",
+			DestinationMetricPrefix: "temp.office",
+		}},
+	}
+
+	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
+	done := make(chan error, 1)
+	go func() {
+		if err := e.AddLine("prod/temp.office 10 " + itoa64(base.Add(10*time.Minute).UnixNano())); err != nil {
+			done <- err
+			return
+		}
+		if err := e.AddLine("prod/temp.office 20 " + itoa64(base.Add(40*time.Minute).UnixNano())); err != nil {
+			done <- err
+			return
+		}
+		done <- e.AddLine("prod/temp.office 1 " + itoa64(base.Add(1*time.Hour).UnixNano()))
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AddLine sequence failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("AddLine hung while auto rollup was triggered from the write path")
+	}
+
+	assertRollupValue(t, e, "prod_rollup_1h", "temp.office.sum", Timestamp(base.UnixNano()), 30)
+	if p := rt.openDays[partitionKey(rt, Timestamp(base.Add(1*time.Hour).UnixNano()))]; p != nil {
+		t.Fatalf("expected the full source page to be closed after auto rollup")
+	}
+}
+
 func TestDefaultRollupDestinationDBInfoForDailyRollups(t *testing.T) {
 	info := defaultRollupDestinationDBInfo(defaultDBInfo(), 24*time.Hour)
 	if info.WALEnabled {

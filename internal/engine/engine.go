@@ -970,10 +970,10 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
+		rt.openDays[day] = nil
 		if triggerRollups && e.rollupAuto.Load() {
 			e.triggerRollups(dbName)
 		}
-		rt.openDays[day] = nil
 		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
 			e.logDebug("wal reset", "database", dbName, "buffer_bytes", db.wal.Stats().BufferBytes)
 		}
@@ -998,10 +998,10 @@ func (e *Engine) flushEligibleOpenDays(db *Database, rt *dbRuntime, dbName, curr
 		if err := e.writePageToDailyFile(db, dbName, day, p); err != nil {
 			return err
 		}
+		rt.openDays[day] = nil
 		if triggerRollups && e.rollupAuto.Load() {
 			e.triggerRollups(dbName)
 		}
-		rt.openDays[day] = nil
 	}
 	return nil
 }

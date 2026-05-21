@@ -35,9 +35,17 @@ type rollupBackfillPlan struct {
 // TriggerRollupsForSource computes rollups for one source database using jobs
 // configured in the source database manifest.
 func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
+	e.triggerRollupsForSource(sourceDBName, false)
+}
+
+func (e *Engine) triggerRollupsForSource(sourceDBName string, writeLockHeld bool) {
 	sourceDBName = strings.TrimSpace(sourceDBName)
 	if sourceDBName == "" {
 		return
+	}
+	if !writeLockHeld {
+		e.writeMu.Lock()
+		defer e.writeMu.Unlock()
 	}
 	sourceDB, sourceRT, err := e.getOrCreateDB(sourceDBName)
 	if err != nil {
@@ -518,7 +526,7 @@ func (e *Engine) resetRollupDestination(database string) ([]string, []string, []
 
 // triggerRollups is called after a file is closed/flushed.
 func (e *Engine) triggerRollups(sourceDBName string) {
-	e.TriggerRollupsForSource(sourceDBName)
+	e.triggerRollupsForSource(sourceDBName, true)
 }
 
 func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, job DBManifestRollupJob, periodStart, periodEnd Timestamp) error {
@@ -567,8 +575,6 @@ func rollupDestinationMetricName(job DBManifestRollupJob, aggregate string) stri
 }
 
 func (e *Engine) insertRollupSample(dbName, metricName string, ts Timestamp, val float32) error {
-	e.writeMu.Lock()
-	defer e.writeMu.Unlock()
 	return e.addParsedSample(dbName, metricName, ts, Float32Sample, 0, val, false, false, true)
 }
 
