@@ -238,6 +238,13 @@ var pageWriteBufferPool = sync.Pool{
 	},
 }
 
+var pageCompressedBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, 64*1024)
+		return &buf
+	},
+}
+
 func defaultDBInfo() DBInfo {
 	return DBInfo{
 		Grace:          "5m",
@@ -1092,11 +1099,7 @@ func (e *Engine) ExportToWriter(database string, out io.Writer) error {
 	sort.Strings(dayFiles)
 
 	for _, path := range dayFiles {
-		blob, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if err := exportLinesFromBlob(database, db, blob, w, &wroteAny); err != nil {
+		if err := exportLinesFromFile(database, db, path, w, &wroteAny); err != nil {
 			return fmt.Errorf("export from %s: %w", path, err)
 		}
 	}
@@ -1410,65 +1413,24 @@ func collectMetricFromFile(database, metric string, entry MetricEntry, path stri
 	defer f.Close()
 
 	r := bufio.NewReaderSize(f, 64*1024)
+	compressedBuf := pageCompressedBufferPool.Get().(*[]byte)
+	defer pageCompressedBufferPool.Put(compressedBuf)
+
+	var p Page
 	for {
-		var header [HeaderSize]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
+		header, compressed, crc, err := readCompressedPageFrame(r, compressedBuf)
+		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
-			if err == io.ErrUnexpectedEOF {
-				return fmt.Errorf("truncated frame header")
-			}
 			return err
 		}
 
-		start := Timestamp(binary.LittleEndian.Uint64(header[0:8]))
-		end := Timestamp(binary.LittleEndian.Uint64(header[8:16]))
-
-		compressedLen, err := binary.ReadUvarint(r)
-		if err != nil {
-			if err == io.EOF {
-				return fmt.Errorf("truncated frame length")
-			}
-			return err
-		}
-
-		if end < fromTS || start > toTS {
-			if _, err := io.CopyN(io.Discard, r, int64(compressedLen)+4); err != nil {
-				return fmt.Errorf("truncated frame payload")
-			}
+		if header.EndTime < fromTS || header.StartTime > toTS {
 			continue
 		}
 
-		compressed := make([]byte, compressedLen)
-		if _, err := io.ReadFull(r, compressed); err != nil {
-			return fmt.Errorf("truncated compressed payload")
-		}
-
-		var crcBytes [4]byte
-		if _, err := io.ReadFull(r, crcBytes[:]); err != nil {
-			return fmt.Errorf("truncated frame checksum")
-		}
-
-		var frame bytes.Buffer
-		frame.Grow(HeaderSize + binary.MaxVarintLen64 + int(compressedLen) + 4)
-		if _, err := frame.Write(header[:]); err != nil {
-			return err
-		}
-		var varintBuf [binary.MaxVarintLen64]byte
-		n := binary.PutUvarint(varintBuf[:], compressedLen)
-		if _, err := frame.Write(varintBuf[:n]); err != nil {
-			return err
-		}
-		if _, err := frame.Write(compressed); err != nil {
-			return err
-		}
-		if _, err := frame.Write(crcBytes[:]); err != nil {
-			return err
-		}
-
-		var p Page
-		if err := p.DecodeFrom(bytes.NewReader(frame.Bytes())); err != nil {
+		if err := p.DecodeCompressedFrame(header, compressed, crc); err != nil {
 			return fmt.Errorf("decode page: %w", err)
 		}
 		if err := collectMetricFromPage(database, metric, entry, &p, fromTS, toTS, stride, count, fn); err != nil {
@@ -1477,25 +1439,75 @@ func collectMetricFromFile(database, metric string, entry MetricEntry, path stri
 	}
 }
 
-func exportLinesFromBlob(database string, db *Database, blob []byte, w *bufio.Writer, wroteAny *bool) error {
-	for pos := 0; pos < len(blob); {
-		reader := bytes.NewReader(blob[pos:])
-		startLen := reader.Len()
-		var p Page
-		if err := p.DecodeFrom(reader); err != nil {
-			return fmt.Errorf("decode page at offset %d: %w", pos, err)
-		}
-		consumed := startLen - reader.Len()
-		if consumed <= 0 {
-			return fmt.Errorf("invalid page decoding at offset %d", pos)
-		}
-		pos += consumed
+func exportLinesFromFile(database string, db *Database, path string, w *bufio.Writer, wroteAny *bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
+	r := bufio.NewReaderSize(f, 64*1024)
+	compressedBuf := pageCompressedBufferPool.Get().(*[]byte)
+	defer pageCompressedBufferPool.Put(compressedBuf)
+
+	var p Page
+	for {
+		header, compressed, crc, err := readCompressedPageFrame(r, compressedBuf)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if err := p.DecodeCompressedFrame(header, compressed, crc); err != nil {
+			return fmt.Errorf("decode page: %w", err)
+		}
 		if err := exportLinesFromPage(database, db, &p, w, wroteAny); err != nil {
 			return err
 		}
 	}
-	return nil
+}
+
+func readCompressedPageFrame(r *bufio.Reader, compressedBuf *[]byte) (PageHeader, []byte, uint32, error) {
+	var headerBuf [HeaderSize]byte
+	if _, err := io.ReadFull(r, headerBuf[:]); err != nil {
+		if err == io.EOF {
+			return PageHeader{}, nil, 0, io.EOF
+		}
+		if err == io.ErrUnexpectedEOF {
+			return PageHeader{}, nil, 0, fmt.Errorf("truncated frame header")
+		}
+		return PageHeader{}, nil, 0, err
+	}
+
+	header := PageHeader{
+		StartTime:  Timestamp(binary.LittleEndian.Uint64(headerBuf[0:8])),
+		EndTime:    Timestamp(binary.LittleEndian.Uint64(headerBuf[8:16])),
+		NumRecords: binary.LittleEndian.Uint16(headerBuf[16:18]),
+	}
+
+	compressedLen, err := binary.ReadUvarint(r)
+	if err != nil {
+		if err == io.EOF {
+			return PageHeader{}, nil, 0, fmt.Errorf("truncated frame length")
+		}
+		return PageHeader{}, nil, 0, err
+	}
+
+	if cap(*compressedBuf) < int(compressedLen) {
+		*compressedBuf = make([]byte, int(compressedLen))
+	}
+	compressed := (*compressedBuf)[:int(compressedLen)]
+	if _, err := io.ReadFull(r, compressed); err != nil {
+		return PageHeader{}, nil, 0, fmt.Errorf("truncated compressed payload")
+	}
+
+	var crcBytes [4]byte
+	if _, err := io.ReadFull(r, crcBytes[:]); err != nil {
+		return PageHeader{}, nil, 0, fmt.Errorf("truncated frame checksum")
+	}
+
+	return header, compressed, binary.LittleEndian.Uint32(crcBytes[:]), nil
 }
 
 func exportLinesFromPage(database string, db *Database, p *Page, w *bufio.Writer, wroteAny *bool) error {

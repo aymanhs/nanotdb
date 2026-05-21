@@ -27,6 +27,13 @@ var pageEncodeBufferPool = sync.Pool{
 	},
 }
 
+var pageDecodeBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, PageMaxBytes)
+		return &buf
+	},
+}
+
 type PageHeader struct {
 	StartTime  Timestamp
 	EndTime    Timestamp
@@ -258,9 +265,20 @@ func (p *Page) DecodeCompressedFrame(h PageHeader, compressed []byte, expectedCR
 		return fmt.Errorf("checksum mismatch: expected=%08x actual=%08x", expectedCRC, actualCRC)
 	}
 
-	payload, err := s2.Decode(nil, compressed)
+	decodedBuf := pageDecodeBufferPool.Get().(*[]byte)
+	defer pageDecodeBufferPool.Put(decodedBuf)
+
+	expectedPayloadLen := int(h.NumRecords) * (2 + 8 + 4)
+	if cap(*decodedBuf) < expectedPayloadLen {
+		*decodedBuf = make([]byte, 0, expectedPayloadLen)
+	}
+
+	payload, err := s2.Decode((*decodedBuf)[:0], compressed)
 	if err != nil {
 		return err
+	}
+	if len(payload) != expectedPayloadLen {
+		return fmt.Errorf("decoded payload length mismatch: got=%d want=%d", len(payload), expectedPayloadLen)
 	}
 
 	n := int(h.NumRecords)
