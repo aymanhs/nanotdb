@@ -78,6 +78,7 @@ Start here:
 - [Dashboard](docs/DASHBOARD.md) for the built-in UI, dashboard.json, and editable web assets.
 - [Run As A Service](docs/RUN_AS_A_SERVICE.md) for a brief systemd setup path.
 - [Glossary](docs/GLOSSARY.md) for the canonical meaning of database, metric, sample, WAL, and related terms.
+- [Contributing](CONTRIBUTING.md) for the branch model and release workflow.
 
 ### 60-Second Hello World
 

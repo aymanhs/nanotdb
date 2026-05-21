@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,6 +120,7 @@ type EngineConfig struct {
 	Engine           EngineConfigEngine           `toml:"engine"`
 	WAL              EngineConfigWAL              `toml:"wal"`
 	Durability       EngineConfigDurability       `toml:"durability"`
+	Metrics          EngineConfigMetrics          `toml:"metrics"`
 	Logging          EngineConfigLogging          `toml:"logging"`
 	Stats            EngineConfigStats            `toml:"stats"`
 	Defaults         EngineConfigDefaults         `toml:"defaults"`
@@ -136,6 +138,12 @@ type EngineConfigWAL struct {
 
 type EngineConfigDurability struct {
 	Profile string `toml:"profile"`
+}
+
+type EngineConfigMetrics struct {
+	Enabled         bool   `toml:"enabled"`
+	Compression     string `toml:"compression"`
+	RawIngestAction string `toml:"raw_ingest_action"`
 }
 
 type EngineConfigLogging struct {
@@ -188,17 +196,20 @@ var defaultEngineConfigTOML string
 // Engine is the top-level coordinator for all databases in a root data directory.
 // It is safe for concurrent use. Open with OpenEngine; always call Close when done.
 type Engine struct {
-	RootDataDir    string
-	WALMaxSegSize  int64
-	WALFsyncPolicy string
-	Durability     string
-	Logging        EngineConfigLogging
-	logger         *slog.Logger
-	SyncDataFile   bool
-	SyncCatalog    bool
-	StatsEnabled   bool
-	StatsInterval  time.Duration
-	dbDefaults     DBInfo
+	RootDataDir           string
+	WALMaxSegSize         int64
+	WALFsyncPolicy        string
+	Durability            string
+	MetricFilesEnabled    bool
+	MetricFileCompression string
+	MetricRawIngestAction string
+	Logging               EngineConfigLogging
+	logger                *slog.Logger
+	SyncDataFile          bool
+	SyncCatalog           bool
+	StatsEnabled          bool
+	StatsInterval         time.Duration
+	dbDefaults            DBInfo
 
 	mu             sync.RWMutex
 	writeMu        sync.Mutex
@@ -260,6 +271,11 @@ func defaultEngineConfig(walMaxSegSize int64) EngineConfig {
 		Engine:     EngineConfigEngine{Listen: ":8428"},
 		WAL:        EngineConfigWAL{MaxSegmentSize: walMaxSegSize, FsyncPolicy: WALFsyncPolicySegment},
 		Durability: EngineConfigDurability{Profile: DurabilityProfileStrict},
+		Metrics: EngineConfigMetrics{
+			Enabled:         false,
+			Compression:     CompressionCodecZstdFastestName,
+			RawIngestAction: MetricRawIngestActionKeep,
+		},
 		Logging: EngineConfigLogging{Loggers: []EngineConfigLogger{{
 			Output: "console",
 			Level:  LogLevelInfo,
@@ -354,6 +370,20 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	case DurabilityProfileStrict, DurabilityProfileBalanced, DurabilityProfileThroughput:
 	default:
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid durability.profile: %q", cfg.Durability.Profile)
+	}
+	if strings.TrimSpace(cfg.Metrics.Compression) == "" {
+		cfg.Metrics.Compression = def.Metrics.Compression
+	}
+	cfg.Metrics.Compression = strings.ToLower(strings.TrimSpace(cfg.Metrics.Compression))
+	if _, err := BlockCompressionCodecByName(cfg.Metrics.Compression); err != nil {
+		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.compression: %w", err)
+	}
+	if strings.TrimSpace(cfg.Metrics.RawIngestAction) == "" {
+		cfg.Metrics.RawIngestAction = def.Metrics.RawIngestAction
+	}
+	cfg.Metrics.RawIngestAction = strings.ToLower(strings.TrimSpace(cfg.Metrics.RawIngestAction))
+	if !isValidMetricRawIngestAction(cfg.Metrics.RawIngestAction) {
+		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.raw_ingest_action: %q", cfg.Metrics.RawIngestAction)
 	}
 	loggingCfg, err := normalizeLoggingConfig(cfg.Logging, def.Logging)
 	if err != nil {
@@ -1288,17 +1318,48 @@ func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, str
 	lastPath := ""
 	for d := dayStartUTC(fromTS); !d.After(dayStartUTC(toTS)); d = d.Add(24 * time.Hour) {
 		part := partitionKey(rt, Timestamp(d.UnixNano()))
-		path := filepath.Join(db.RootDataDir, "data-"+part+".dat")
+		path := metricRawPartitionPath(db.RootDataDir, part)
 		if path == lastPath {
 			continue
 		}
 		lastPath = path
-		if err := collectMetricFromFile(database, metric, entry, path, fromTS, toTS, stride, &count, fn); err == nil {
-			// persisted frames processed
-		} else if os.IsNotExist(err) {
-			// no persisted file for this partition
+		if e.MetricFilesEnabled {
+			metricPath := filepath.Join(db.RootDataDir, "metric-"+part+".dat")
+			if err := collectMetricFromMetricFile(database, metric, entry, metricPath, fromTS, toTS, stride, &count, fn); err == nil {
+				// metric frames processed, skip raw file to avoid double counting
+			} else if os.IsNotExist(err) {
+				rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
+				if rawErr == nil {
+					if err := collectMetricFromFile(database, metric, entry, rawPath, fromTS, toTS, stride, &count, fn); err == nil {
+						// persisted raw frames processed
+					} else if os.IsNotExist(err) {
+						// no persisted file for this partition
+					} else {
+						return fmt.Errorf("read %s: %w", rawPath, err)
+					}
+				} else if os.IsNotExist(rawErr) {
+					// no persisted file for this partition
+				} else {
+					return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
+				}
+			} else {
+				return fmt.Errorf("read %s: %w", metricPath, err)
+			}
 		} else {
-			return fmt.Errorf("read %s: %w", path, err)
+			rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
+			if rawErr == nil {
+				if err := collectMetricFromFile(database, metric, entry, rawPath, fromTS, toTS, stride, &count, fn); err == nil {
+					// persisted raw frames processed
+				} else if os.IsNotExist(err) {
+					// no persisted file for this partition
+				} else {
+					return fmt.Errorf("read %s: %w", rawPath, err)
+				}
+			} else if os.IsNotExist(rawErr) {
+				// no persisted file for this partition
+			} else {
+				return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
+			}
 		}
 
 		if p := rt.openDays[part]; p != nil {
@@ -1645,6 +1706,7 @@ func (e *Engine) maybeFlushStats(dbName string) {
 	}
 	e.statsLastFlush = now
 	e.statsLastMu.Unlock()
+	e.captureRuntimeStats()
 	e.flushStatsToInternal(Timestamp(now.UnixNano()))
 }
 
@@ -1654,6 +1716,7 @@ func (e *Engine) flushStatsToInternal(ts Timestamp) {
 	if !e.StatsEnabled {
 		return
 	}
+	e.captureRuntimeStats()
 	snap := e.stats.snapshot()
 	if len(snap) == 0 {
 		return
@@ -1662,6 +1725,25 @@ func (e *Engine) flushStatsToInternal(ts Timestamp) {
 	for k, v := range snap {
 		metric := internalStatsMetricPrefix + "/" + k
 		_ = e.addParsedSample(internalStatsDatabase, metric, ts, Float32Sample, 0, float32(v), false, false, false)
+	}
+}
+
+func (e *Engine) captureRuntimeStats() {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	e.stats.set("runtime/goroutines", float64(runtime.NumGoroutine()))
+	e.stats.set("runtime/heap_alloc_bytes", float64(mem.HeapAlloc))
+	e.stats.set("runtime/heap_inuse_bytes", float64(mem.HeapInuse))
+	e.stats.set("runtime/heap_idle_bytes", float64(mem.HeapIdle))
+	e.stats.set("runtime/heap_objects", float64(mem.HeapObjects))
+	e.stats.set("runtime/stack_inuse_bytes", float64(mem.StackInuse))
+	e.stats.set("runtime/sys_bytes", float64(mem.Sys))
+	e.stats.set("runtime/next_gc_bytes", float64(mem.NextGC))
+	e.stats.set("runtime/num_gc", float64(mem.NumGC))
+	e.stats.set("runtime/last_gc_unix_ns", float64(mem.LastGC))
+	if mem.NumGC > 0 {
+		idx := (mem.NumGC - 1) % uint32(len(mem.PauseNs))
+		e.stats.set("runtime/last_gc_pause_ns", float64(mem.PauseNs[idx]))
 	}
 }
 
