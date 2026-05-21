@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,5 +80,41 @@ func TestScanWALFileTruncatedTail(t *testing.T) {
 	}
 	if stats.TailBytes != 2 {
 		t.Fatalf("tail bytes mismatch: got=%d want=2", stats.TailBytes)
+	}
+}
+
+func TestScanWALFileSkipsPrefixWithoutBaseline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.wal")
+	prefix := []byte{1, 0, 0, 0, 0, 0, 7, 0, 0, 0}
+	var lenBuf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(lenBuf[:], uint64(len(prefix)))
+	if err := os.WriteFile(path, append(append([]byte{}, lenBuf[:n]...), prefix...), 0644); err != nil {
+		t.Fatalf("write bad prefix failed: %v", err)
+	}
+
+	w, err := NewWAL(path, 0, WALFsyncPolicySegment)
+	if err != nil {
+		t.Fatalf("NewWAL failed: %v", err)
+	}
+	if _, err := AppendSampleWithMetricName(w, 11, "test.metric", Timestamp(1001), int32(7)); err != nil {
+		w.Close()
+		t.Fatalf("AppendSampleWithMetricName failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	stats, recs, err := ScanWALFile(path)
+	if err != nil {
+		t.Fatalf("ScanWALFile failed: %v", err)
+	}
+	if stats.HasTail {
+		t.Fatalf("expected bad prefix without baseline to be skipped, not treated as tail")
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected one valid record after skipping bad prefix, got=%d", len(recs))
+	}
+	if recs[0].Timestamp != 1001 {
+		t.Fatalf("timestamp mismatch: got=%d want=1001", recs[0].Timestamp)
 	}
 }

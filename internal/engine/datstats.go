@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/klauspost/compress/s2"
 )
 
 // DataFrameHeader describes one page frame parsed from a .dat file without decompression.
 type DataFrameHeader struct {
-	Index         int
-	Offset        int64
-	StartTime     Timestamp
-	EndTime       Timestamp
-	NumRecords    uint16
-	CompressedLen uint64
-	FrameBytes    int64
+	Index           int
+	Offset          int64
+	StartTime       Timestamp
+	EndTime         Timestamp
+	NumRecords      uint16
+	CompressedLen   uint64
+	UncompressedLen uint64
+	FrameBytes      int64
 }
 
 // DataFileStats summarizes one .dat file.
@@ -80,21 +83,30 @@ func WalkDataFileHeaders(path string, fn DataFrameCallback) (DataFileStats, erro
 		if compressedLen > uint64((1<<63)-1)-4 {
 			return stats, fmt.Errorf("compressed payload too large at offset %d", frameOffset)
 		}
-		toSkip := int64(compressedLen) + 4 // payload + crc32
-		if _, err := io.CopyN(io.Discard, r, toSkip); err != nil {
+		compressed := make([]byte, compressedLen)
+		if _, err := io.ReadFull(r, compressed); err != nil {
 			return stats, fmt.Errorf("truncated frame payload at offset %d", frameOffset)
 		}
-		offset += toSkip
+		var crc [4]byte
+		if _, err := io.ReadFull(r, crc[:]); err != nil {
+			return stats, fmt.Errorf("truncated frame checksum at offset %d", frameOffset)
+		}
+		payload, err := s2.Decode(nil, compressed)
+		if err != nil {
+			return stats, fmt.Errorf("decode frame payload at offset %d: %w", frameOffset, err)
+		}
+		offset += int64(compressedLen) + 4
 
-		frameBytes := int64(HeaderSize) + int64(varintLen) + toSkip
+		frameBytes := int64(HeaderSize) + int64(varintLen) + int64(compressedLen) + 4
 		frame := DataFrameHeader{
-			Index:         stats.Frames,
-			Offset:        frameOffset,
-			StartTime:     start,
-			EndTime:       end,
-			NumRecords:    numRecords,
-			CompressedLen: compressedLen,
-			FrameBytes:    frameBytes,
+			Index:           stats.Frames,
+			Offset:          frameOffset,
+			StartTime:       start,
+			EndTime:         end,
+			NumRecords:      numRecords,
+			CompressedLen:   compressedLen,
+			UncompressedLen: uint64(len(payload)),
+			FrameBytes:      frameBytes,
 		}
 		if fn != nil {
 			if err := fn(frame); err != nil {
@@ -102,6 +114,64 @@ func WalkDataFileHeaders(path string, fn DataFrameCallback) (DataFileStats, erro
 			}
 		}
 
+		stats.Frames++
+		stats.TotalRecords += int64(numRecords)
+		stats.TotalCompressed += int64(compressedLen)
+		stats.TotalFrameBytes += frameBytes
+		if stats.Frames == 1 || start < stats.MinStart {
+			stats.MinStart = start
+		}
+		if stats.Frames == 1 || end > stats.MaxEnd {
+			stats.MaxEnd = end
+		}
+	}
+
+	return stats, nil
+}
+
+// ScanDataFileStats reads only frame headers and compressed lengths for a .dat file.
+// It does not decompress payloads or populate per-frame page details.
+func ScanDataFileStats(path string) (DataFileStats, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return DataFileStats{}, err
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return DataFileStats{}, err
+	}
+	defer f.Close()
+
+	stats := DataFileStats{Path: path, FileBytes: st.Size()}
+	r := bufio.NewReaderSize(f, 64*1024)
+
+	for {
+		var hdr [HeaderSize]byte
+		nRead, err := io.ReadFull(r, hdr[:])
+		if err == io.EOF && nRead == 0 {
+			break
+		}
+		if err == io.ErrUnexpectedEOF {
+			return stats, fmt.Errorf("truncated frame header")
+		}
+		if err != nil {
+			return stats, err
+		}
+
+		start := Timestamp(binary.LittleEndian.Uint64(hdr[0:8]))
+		end := Timestamp(binary.LittleEndian.Uint64(hdr[8:16]))
+		numRecords := binary.LittleEndian.Uint16(hdr[16:18])
+
+		compressedLen, varintLen, err := readUvarintCount(r)
+		if err != nil {
+			return stats, err
+		}
+		if _, err := io.CopyN(io.Discard, r, int64(compressedLen)+4); err != nil {
+			return stats, fmt.Errorf("truncated frame payload: %w", err)
+		}
+
+		frameBytes := int64(HeaderSize) + int64(varintLen) + int64(compressedLen) + 4
 		stats.Frames++
 		stats.TotalRecords += int64(numRecords)
 		stats.TotalCompressed += int64(compressedLen)

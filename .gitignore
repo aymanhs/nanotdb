@@ -9,3 +9,4 @@ test-data/
 /nanocli
 /nanotdb
 /deploy.sh
+/scripts/deploy.sh

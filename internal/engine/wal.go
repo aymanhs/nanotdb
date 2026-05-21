@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -20,6 +21,8 @@ type WALRecord struct {
 	ValueType  byte        // Int32Sample or Float32Sample
 	Value      interface{} // int32 or float32
 }
+
+var ErrWALMissingBaseline = errors.New("wal compact record missing initial baseline")
 
 const (
 	// Compact WAL format flags (1 byte: CompactTL)
@@ -323,6 +326,7 @@ func (w *WAL) RecordsWithCatalog(cat *Catalog) ([]WALRecord, error) {
 
 	out := make([]WALRecord, 0, 64)
 	var baselineTS Timestamp
+	hasBaseline := false
 	for pos := 0; pos < len(blob); {
 		payloadLen, n := binary.Uvarint(blob[pos:])
 		if n <= 0 {
@@ -336,8 +340,11 @@ func (w *WAL) RecordsWithCatalog(cat *Catalog) ([]WALRecord, error) {
 		payload := blob[pos : pos+int(payloadLen)]
 		pos += int(payloadLen)
 
-		rec, err := decodeWALPayloadCompactWithBaseline(payload, baselineTS)
+		rec, err := decodeWALPayloadCompactWithBaseline(payload, baselineTS, hasBaseline)
 		if err != nil {
+			if errors.Is(err, ErrWALMissingBaseline) && !hasBaseline {
+				continue
+			}
 			break
 		}
 
@@ -346,6 +353,7 @@ func (w *WAL) RecordsWithCatalog(cat *Catalog) ([]WALRecord, error) {
 		// CompactTL is at byte 5
 		if len(payload) > 5 && (payload[5]&walCompactNewBaseline) != 0 && len(payload) >= 14 {
 			baselineTS = Timestamp(binary.LittleEndian.Uint64(payload[6:14]))
+			hasBaseline = true
 		}
 
 		// If catalog provided and ValueType is sentinel (0), look it up
@@ -411,6 +419,8 @@ func (w *WAL) Reset() error {
 		return err
 	}
 	w.bufferSize = 0
+	w.baselineTS = 0
+	w.hasBaseline = false
 	w.stats.BufferBytes = 0
 	w.recordFlush(flushed)
 	resetDur := time.Since(resetStart)
@@ -491,6 +501,7 @@ func scanWALAppendStats(path string) (int64, int64, error) {
 	var count int64
 	var consumed int64
 	var baselineTS Timestamp
+	hasBaseline := false
 	for pos := 0; pos < len(blob); {
 		payloadLen, n := binary.Uvarint(blob[pos:])
 		if n <= 0 {
@@ -503,11 +514,17 @@ func scanWALAppendStats(path string) (int64, int64, error) {
 		payloadStart := pos + n
 		payloadEnd := payloadStart + int(payloadLen)
 		payload := blob[payloadStart:payloadEnd]
-		if _, err := decodeWALPayloadCompactWithBaseline(payload, baselineTS); err != nil {
+		if _, err := decodeWALPayloadCompactWithBaseline(payload, baselineTS, hasBaseline); err != nil {
+			if errors.Is(err, ErrWALMissingBaseline) && !hasBaseline {
+				pos = payloadEnd
+				consumed = int64(pos)
+				continue
+			}
 			break
 		}
 		if len(payload) > 5 && (payload[5]&walCompactNewBaseline) != 0 && len(payload) >= 14 {
 			baselineTS = Timestamp(binary.LittleEndian.Uint64(payload[6:14]))
+			hasBaseline = true
 		}
 
 		count++
@@ -518,7 +535,7 @@ func scanWALAppendStats(path string) (int64, int64, error) {
 	return count, consumed, nil
 }
 
-func decodeWALPayloadCompactWithBaseline(payload []byte, baselineTS Timestamp) (WALRecord, error) {
+func decodeWALPayloadCompactWithBaseline(payload []byte, baselineTS Timestamp, hasBaseline bool) (WALRecord, error) {
 	if len(payload) < 2+3+1+4 {
 		return WALRecord{}, fmt.Errorf("wal compact payload too short")
 	}
@@ -545,6 +562,9 @@ func decodeWALPayloadCompactWithBaseline(payload []byte, baselineTS Timestamp) (
 		ts = Timestamp(binary.LittleEndian.Uint64(payload[pos : pos+8]))
 		pos += 8
 	} else {
+		if !hasBaseline {
+			return WALRecord{}, ErrWALMissingBaseline
+		}
 		// Reconstruct from baseline + delta
 		ts = baselineTS + tsDelta
 	}

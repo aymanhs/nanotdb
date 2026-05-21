@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} - Engine</title>
+  <link rel="stylesheet" href="/assets/common.css" />
+  <link rel="stylesheet" href="{{ .AssetBase }}/engine.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <nav class="top-nav" aria-label="Navigation">
+        <a href="/">Home</a>
+        <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .ExplorePath }}">Explore</a>
+        <a href="{{ .EnginePath }}">Engine</a>
+      </nav>
+      <h1>Engine Inspector</h1>
+      <p class="sub">Live operational view for databases, metrics, data files, WAL, and in-memory runtime pages.</p>
+    </header>
+
+    <section class="controls panel">
+      <label>
+        Database
+        <select id="dbSelect"></select>
+      </label>
+      <button type="button" id="refreshBtn">Refresh Now</button>
+      <span id="status" aria-live="polite"></span>
+    </section>
+
+    <section class="panel tabs-panel">
+      <div class="tabs" role="tablist" aria-label="Engine views">
+        <button type="button" class="tab active" data-tab="overview">Overview</button>
+        <button type="button" class="tab" data-tab="database">Database</button>
+        <button type="button" class="tab" data-tab="files">Files</button>
+        <button type="button" class="tab" data-tab="runtime">Runtime</button>
+      </div>
+    </section>
+
+    <section id="overviewPane" class="panel pane"></section>
+    <section id="databasePane" class="panel pane" hidden></section>
+    <section id="filesPane" class="panel pane" hidden></section>
+    <section id="runtimePane" class="panel pane" hidden></section>
+  </main>
+
+  <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>
+  <script src="{{ .AssetBase }}/engine_app.js"></script>
+</body>
+</html>

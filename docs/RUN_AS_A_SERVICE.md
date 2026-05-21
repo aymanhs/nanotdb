@@ -17,6 +17,8 @@ Example layout:
 /home/pi/nanotdb/
   nanotdb
   engine.toml
+  dashboard.json
+  ui/
   drip
   drip.toml
 ```
@@ -26,6 +28,14 @@ Initialize the config once if needed:
 ```bash
 mkdir -p /home/pi/nanotdb
 /home/pi/nanotdb/nanotdb --init --config /home/pi/nanotdb/engine.toml
+```
+
+That writes both `engine.toml` and a starter `dashboard.json`. If you want to
+edit the browser UI without rebuilding the Go binary, export the embedded web
+bundle once and point `[web].web_root` at it:
+
+```bash
+/home/pi/nanotdb/nanotdb --export-web-assets /home/pi/nanotdb/ui
 ```
 
 ## 2. Install the NanoTDB service
@@ -117,6 +127,15 @@ curl "http://localhost:8428/api/v1/databases"
 ```
 
 If you get a healthy HTTP response, the service wiring is working.
+
+If the `[web]` section is enabled, these browser pages are available too:
+
+```bash
+curl -I "http://localhost:8428/"
+curl -I "http://localhost:8428/dashboard"
+curl -I "http://localhost:8428/explore"
+curl -I "http://localhost:8428/engine"
+```
 
 ## 5. Raspberry Pi tuning notes
 

@@ -1465,6 +1465,108 @@ func TestEngineImportExportIdentical(t *testing.T) {
 	}
 }
 
+func TestGetMetricRollupDownstream_MultiHopAndTruncation(t *testing.T) {
+	e, err := OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	if _, _, err := e.getOrCreateDB("prod"); err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+	if _, _, err := e.getOrCreateDB("prod_rollup_1h"); err != nil {
+		t.Fatalf("getOrCreateDB prod_rollup_1h failed: %v", err)
+	}
+	if _, _, err := e.getOrCreateDB("prod_rollup_1d"); err != nil {
+		t.Fatalf("getOrCreateDB prod_rollup_1d failed: %v", err)
+	}
+
+	_, prodRT, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod runtime failed: %v", err)
+	}
+	prodRT.info.Rollups = DBManifestRollups{
+		Enabled: true,
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp_1h",
+			SourceMetric:            "temp.out_dry",
+			Interval:                "1h",
+			Aggregates:              []string{"sum"},
+			DestinationDB:           "prod_rollup_1h",
+			DestinationMetricPrefix: "temp.out_dry",
+		}},
+	}
+
+	_, rollup1hRT, err := e.getOrCreateDB("prod_rollup_1h")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod_rollup_1h runtime failed: %v", err)
+	}
+	rollup1hRT.info.Rollups = DBManifestRollups{
+		Enabled: true,
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp_1d_from_1h",
+			SourceMetric:            "temp.out_dry.sum",
+			Interval:                "24h",
+			Aggregates:              []string{"avg"},
+			DestinationDB:           "prod_rollup_1d",
+			DestinationMetricPrefix: "temp.out_dry",
+		}},
+	}
+
+	_, rollup1dRT, err := e.getOrCreateDB("prod_rollup_1d")
+	if err != nil {
+		t.Fatalf("getOrCreateDB prod_rollup_1d runtime failed: %v", err)
+	}
+	rollup1dRT.info.Rollups = DBManifestRollups{
+		Enabled: true,
+		Jobs: []DBManifestRollupJob{{
+			ID:                      "temp_1w_from_1d",
+			SourceMetric:            "temp.out_dry.avg",
+			Interval:                "168h",
+			Aggregates:              []string{"max"},
+			DestinationDB:           "prod_rollup_1w",
+			DestinationMetricPrefix: "temp.out_dry",
+		}},
+	}
+
+	steps, truncated, err := e.GetMetricRollupDownstream("prod", "temp.out_dry", 2)
+	if err != nil {
+		t.Fatalf("GetMetricRollupDownstream failed: %v", err)
+	}
+	if !truncated {
+		t.Fatalf("expected truncated=true when lineage exceeds max_hops")
+	}
+	if len(steps) != 2 {
+		t.Fatalf("steps length mismatch: got=%d want=2", len(steps))
+	}
+	if steps[0].Hop != 1 || steps[0].Database != "prod_rollup_1h" || steps[0].Metric != "temp.out_dry.sum" || steps[0].Aggregate != "sum" {
+		t.Fatalf("unexpected hop1 step: %+v", steps[0])
+	}
+	if steps[1].Hop != 2 || steps[1].Database != "prod_rollup_1d" || steps[1].Metric != "temp.out_dry.avg" || steps[1].Aggregate != "avg" {
+		t.Fatalf("unexpected hop2 step: %+v", steps[1])
+	}
+}
+
+func TestGetMetricRollupDownstream_ValidatesInputs(t *testing.T) {
+	e, err := OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	if _, _, err := e.getOrCreateDB("prod"); err != nil {
+		t.Fatalf("getOrCreateDB prod failed: %v", err)
+	}
+
+	if _, _, err := e.GetMetricRollupDownstream("prod", "temp.out_dry", 0); err == nil {
+		t.Fatalf("expected max_hops validation error")
+	}
+	if _, _, err := e.GetMetricRollupDownstream("", "temp.out_dry", 1); err == nil {
+		t.Fatalf("expected empty database validation error")
+	}
+}
+
 func itoa(v int) string {
 	return strconv.Itoa(v)
 }

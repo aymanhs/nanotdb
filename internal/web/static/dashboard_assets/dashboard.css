@@ -1,0 +1,367 @@
+.page-header h1 {
+  margin: 0 0 10px;
+  font-size: 1.5rem;
+}
+
+.group-nav {
+  display: none;
+}
+
+.group-tab {
+  display: none;
+}
+
+.group-pane {
+  border-bottom: 1px solid var(--border);
+}
+
+.group-pane:last-child {
+  border-bottom: none;
+}
+
+.accordion-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 1rem;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.accordion-header::after {
+  content: ">";
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--muted);
+  transform: rotate(90deg);
+  display: inline-block;
+  transition: transform 0.2s;
+}
+
+.accordion-header.active::after {
+  transform: rotate(270deg);
+}
+
+.accordion-header.active {
+  color: var(--accent);
+}
+
+.group-tab {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-family: inherit;
+  white-space: nowrap;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.group-tab:hover {
+  color: var(--text);
+}
+
+.group-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.widgets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.widgets[hidden] {
+  display: none;
+}
+
+.widget-number {
+  grid-column: span 1;
+  min-width: 0;
+}
+
+.widget-number.widget-number--full {
+  grid-column: 1 / -1;
+}
+
+.widget-numbers {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.widget-chart {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.widget-number,
+.widget-numbers,
+.widget-chart,
+.widget-error {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.widget-number,
+.widget-numbers,
+.widget-error {
+  padding: 18px;
+}
+
+.widget-chart {
+  padding: 12px;
+}
+
+.widget-error {
+  grid-column: 1 / -1;
+  border-color: color-mix(in srgb, #ef4444 70%, var(--border));
+}
+
+.widget-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.widget-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.widget-control-btn {
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 80%, var(--bg));
+  color: var(--text);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.widget-control-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.widget-control-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.widget-label,
+.chart-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.widget-value {
+  margin: 8px 0 4px;
+  font-size: clamp(2.2rem, 8vw, 4.2rem);
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+}
+
+.numbers-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 12px;
+  margin: 10px 0 6px;
+  align-items: end;
+}
+
+.numbers-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.numbers-row-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.numbers-row-value {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: clamp(1.35rem, 5.2vw, 3.1rem);
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.numbers-row.value-warning .numbers-row-value {
+  color: #f59e0b;
+}
+
+.numbers-row.value-critical .numbers-row-value {
+  color: #ef4444;
+}
+
+.widget-number.value-warning {
+  border-color: color-mix(in srgb, #f59e0b 65%, var(--border));
+}
+
+.widget-number.value-warning .widget-value {
+  color: #f59e0b;
+}
+
+.widget-number.value-critical {
+  border-color: color-mix(in srgb, #ef4444 70%, var(--border));
+}
+
+.widget-number.value-critical .widget-value {
+  color: #ef4444;
+}
+
+.chart-plot {
+  width: 100%;
+  height: 300px;
+  border: 1px solid #2d3c52;
+  border-radius: 8px;
+  background: #1a2230;
+}
+
+.widget-chart .uplot {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text);
+}
+
+.widget-chart .u-axis,
+.widget-chart .u-legend,
+.widget-chart .u-label,
+.widget-chart .u-value {
+  color: var(--text);
+}
+
+.widget-chart .u-legend {
+  font-size: 0.8rem;
+  margin-top: 10px;
+}
+
+.widget-chart .u-legend.u-inline {
+  position: static;
+  inset: auto;
+  width: auto;
+}
+
+.widget-chart .u-series th,
+.widget-chart .u-series td {
+  padding-top: 4px;
+}
+
+.widget-chart .widget-foot {
+  margin-top: 24px;
+}
+
+.widget-foot {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+@media (min-width: 700px) {
+  .group-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 2px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: none;
+  }
+
+  .group-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .group-tab {
+    display: block;
+  }
+
+  .accordion-header {
+    display: none;
+  }
+
+  .group-pane {
+    border-bottom: none;
+  }
+
+  .page {
+    padding: 28px;
+  }
+
+  .widgets {
+    gap: 16px;
+  }
+
+  .widget-chart {
+    padding: 14px;
+  }
+
+  .numbers-list {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(140px, 1fr);
+    grid-template-columns: none;
+  }
+
+  .widget-number.widget-number--full {
+    grid-column: span 1;
+  }
+
+  .widget-numbers {
+    grid-column: span 1;
+  }
+}
+
+@media (min-width: 1024px) {
+  .widgets {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .widget-number {
+    grid-column: span 4;
+  }
+
+  .widget-numbers {
+    grid-column: span 4;
+  }
+
+  .widget-chart {
+    grid-column: span 6;
+    min-width: 0;
+  }
+}
+
+@media (min-width: 1920px) {
+  .widget-chart {
+    grid-column: span 4;
+  }
+}

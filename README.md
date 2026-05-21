@@ -75,6 +75,7 @@ Start here:
 
 - [Hello World](docs/HELLO_WORLD.md) for the fastest copy/paste path.
 - [Getting Started](GETTING_STARTED.md) for installation, examples, and a longer guided tour.
+- [Dashboard](docs/DASHBOARD.md) for the built-in UI, dashboard.json, and editable web assets.
 - [Run As A Service](docs/RUN_AS_A_SERVICE.md) for a brief systemd setup path.
 - [Glossary](docs/GLOSSARY.md) for the canonical meaning of database, metric, sample, WAL, and related terms.
 
@@ -101,6 +102,8 @@ curl "http://localhost:8428/api/v1/query?query=demo/room.temp"
 
 That flow is the point of NanoTDB: start one binary, write a few metrics, query
 them back, and inspect the local files without standing up anything else.
+
+For the built-in browser UI and dashboard customization, see [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
 Prefer ready-to-use binaries? Download the latest release assets from
 [GitHub Releases](https://github.com/aymanhs/nanotdb/releases/latest):

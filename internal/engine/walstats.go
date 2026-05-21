@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -49,6 +50,7 @@ func WalkWALFile(path string, fn WALRecordCallback) (WALFileStats, error) {
 	stats := WALFileStats{Path: path, FileBytes: st.Size()}
 
 	var baselineTS Timestamp
+	hasBaseline := false
 	for pos := 0; pos < len(blob); {
 		start := pos
 		payloadLen, n := binary.Uvarint(blob[pos:])
@@ -71,8 +73,11 @@ func WalkWALFile(path string, fn WALRecordCallback) (WALFileStats, error) {
 		payload := blob[pos : pos+int(payloadLen)]
 		pos += int(payloadLen)
 
-		rec, err := decodeWALPayloadCompactWithBaseline(payload, baselineTS)
+		rec, err := decodeWALPayloadCompactWithBaseline(payload, baselineTS, hasBaseline)
 		if err != nil {
+			if errors.Is(err, ErrWALMissingBaseline) && !hasBaseline {
+				continue
+			}
 			stats.HasTail = true
 			stats.TailBytes = int64(len(blob) - start)
 			stats.StopOffset = int64(start)
@@ -81,6 +86,7 @@ func WalkWALFile(path string, fn WALRecordCallback) (WALFileStats, error) {
 		}
 		if len(payload) > 5 && (payload[5]&walCompactNewBaseline) != 0 && len(payload) >= 14 {
 			baselineTS = Timestamp(binary.LittleEndian.Uint64(payload[6:14]))
+			hasBaseline = true
 		}
 
 		raw := make([]byte, pos-start)

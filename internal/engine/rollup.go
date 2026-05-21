@@ -519,65 +519,6 @@ func (e *Engine) triggerRollups(sourceDBName string) {
 	e.TriggerRollupsForSource(sourceDBName)
 }
 
-func (e *Engine) processRollupJob(sourceDB *Database, sourceRT *dbRuntime, job DBManifestRollupJob, lastCompleted Timestamp) Timestamp {
-	interval, err := time.ParseDuration(job.Interval)
-	if err != nil || interval <= 0 {
-		return lastCompleted
-	}
-
-	rollupDefaults := defaultRollupDestinationDBInfo(e.dbDefaults, interval)
-	rollupDB, _, err := e.getOrCreateDBWithDefaults(job.DestinationDB, rollupDefaults, true, interval)
-	if err != nil {
-		return lastCompleted
-	}
-
-	if _, ok := sourceDB.catalog.GetMetricEntry(job.SourceMetric); !ok {
-		return lastCompleted
-	}
-	maxSafeBySource, ok := latestMetricTimestamp(sourceDB, sourceRT, job.SourceMetric)
-	if !ok {
-		return lastCompleted
-	}
-
-	grace, err := resolveRollupGrace(sourceRT.info, job)
-	if err != nil {
-		grace = 1 * time.Hour
-	}
-
-	safeTS := Timestamp(time.Now().Add(-grace).UnixNano())
-	// Only compute fully closed periods. Allowing partial intervals to checkpoint
-	// causes incorrect aggregates when more source points arrive later.
-	if maxSafeBySource < safeTS {
-		safeTS = maxSafeBySource
-	}
-	startTS := lastCompleted
-	if startTS == 0 {
-		startTS = initialRollupStart(sourceDB, sourceRT, interval)
-		if startTS == 0 {
-			return lastCompleted
-		}
-	}
-
-	newLastCompleted := lastCompleted
-
-	for {
-		periodStart := startTS
-		periodEnd := periodStart + Timestamp(interval)
-
-		if periodEnd > safeTS {
-			break // not safe to compute yet
-		}
-
-		if err := e.buildRollupJobPeriod(rollupDB, sourceDB, job, periodStart, periodEnd); err != nil {
-			break
-		}
-		startTS = periodEnd
-		newLastCompleted = periodEnd
-	}
-
-	return newLastCompleted
-}
-
 func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, job DBManifestRollupJob, periodStart, periodEnd Timestamp) error {
 	points := make([]float32, 0, 256)
 
@@ -595,10 +536,6 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		return err
 	}
 
-	prefix := strings.TrimSpace(job.DestinationMetricPrefix)
-	if prefix == "" {
-		prefix = job.SourceMetric
-	}
 	for _, agg := range job.Aggregates {
 		aggFn, ok := getRollupAggregator(agg)
 		if !ok {
@@ -608,14 +545,28 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		if err != nil {
 			return err
 		}
-		if err := e.insertRollupSample(rollupDB.Name, prefix+"."+aggFn.Name(), periodStart, value); err != nil {
+		if err := e.insertRollupSample(rollupDB.Name, rollupDestinationMetricName(job, aggFn.Name()), periodStart, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func rollupDestinationMetricName(job DBManifestRollupJob, aggregate string) string {
+	prefix := strings.TrimSpace(job.DestinationMetricPrefix)
+	if prefix == "" {
+		prefix = strings.TrimSpace(job.SourceMetric)
+	}
+	aggregate = strings.TrimSpace(aggregate)
+	if prefix == "" || aggregate == "" {
+		return ""
+	}
+	return prefix + "." + aggregate
+}
+
 func (e *Engine) insertRollupSample(dbName, metricName string, ts Timestamp, val float32) error {
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 	return e.addParsedSample(dbName, metricName, ts, Float32Sample, 0, val, false, false, true)
 }
 
