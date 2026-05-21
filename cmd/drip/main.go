@@ -77,6 +77,9 @@ func buildCollectors(cfg Config) []Collector {
 	if cfg.Collectors.Memory.Enabled {
 		cs = append(cs, collectors.NewMemoryCollector())
 	}
+	if cfg.Collectors.Process.Enabled {
+		cs = append(cs, collectors.NewProcessCollector(cfg.Collectors.Process.ExeNames))
+	}
 	if cfg.Collectors.Disk.Enabled {
 		cs = append(cs, collectors.NewDiskCollector())
 	}

@@ -32,6 +32,14 @@ temp_metric = "temp.cpu"
 #        mem.swapcached, mem.swaptotal, mem.swapfree
 enabled = true
 
+[collectors.process]
+# Aggregates processes matched by executable basename.
+# Emits per configured executable:
+#   proc.{exe}.count, proc.{exe}.rss_bytes, proc.{exe}.vsize_bytes, proc.{exe}.cpu_pct
+# CPU is emitted as a per-cycle delta percentage, so the first cycle starts at 0.
+enabled = true
+exe_names = ["drip", "nanotdb"]
+
 [collectors.disk]
 # Emits per physical block device:
 #   disk.{dev}.reads, reads_merged, read_sectors, read_ms,

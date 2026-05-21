@@ -25,6 +25,7 @@ type DripConfig struct {
 type CollectorsConfig struct {
 	CPU          CPUCollectorConfig          `toml:"cpu"`
 	Memory       MemoryCollectorConfig       `toml:"memory"`
+	Process      ProcessCollectorConfig      `toml:"process"`
 	Disk         DiskCollectorConfig         `toml:"disk"`
 	IO           IOCollectorConfig           `toml:"io"`
 	Network      NetworkCollectorConfig      `toml:"network"`
@@ -41,6 +42,11 @@ type CPUCollectorConfig struct {
 
 type MemoryCollectorConfig struct {
 	Enabled bool `toml:"enabled"`
+}
+
+type ProcessCollectorConfig struct {
+	Enabled  bool     `toml:"enabled"`
+	ExeNames []string `toml:"exe_names"`
 }
 
 type DiskCollectorConfig struct {
@@ -92,6 +98,7 @@ func defaultConfig() Config {
 				TempMetric: "cpu.temp_mdeg",
 			},
 			Memory:  MemoryCollectorConfig{Enabled: true},
+			Process: ProcessCollectorConfig{Enabled: true, ExeNames: []string{"drip", "nanotdb"}},
 			Network: NetworkCollectorConfig{Enabled: true, Skip: []string{"lo"}},
 			LoadAvg: LoadAvgCollectorConfig{Enabled: true},
 			OneWire: OneWireCollectorConfig{
@@ -146,6 +153,9 @@ func validateConfig(cfg Config) error {
 		if cfg.Collectors.SDWriteProbe.EveryNCycles <= 0 {
 			return fmt.Errorf("collectors.sd_write_probe.every_n_cycles must be > 0")
 		}
+	}
+	if cfg.Collectors.Process.Enabled && len(cfg.Collectors.Process.ExeNames) == 0 {
+		return fmt.Errorf("collectors.process.exe_names must contain at least one executable name")
 	}
 	return nil
 }
