@@ -14,12 +14,12 @@ import (
 )
 
 type metricBuildPartitionReport struct {
-	Partition  string `json:"partition"`
-	SourcePath string `json:"source_path"`
-	MetricPath string `json:"metric_path"`
-	SourceBytes int64 `json:"source_bytes"`
-	MetricBytes int64 `json:"metric_bytes"`
-	Verified   bool   `json:"verified"`
+	Partition   string `json:"partition"`
+	SourcePath  string `json:"source_path"`
+	MetricPath  string `json:"metric_path"`
+	SourceBytes int64  `json:"source_bytes"`
+	MetricBytes int64  `json:"metric_bytes"`
+	Verified    bool   `json:"verified"`
 }
 
 type metricBuildReport struct {

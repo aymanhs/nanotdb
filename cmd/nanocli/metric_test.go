@@ -28,9 +28,9 @@ raw_ingest_action = "keep"
 	}
 	base := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
 	for _, sample := range []struct {
-		ts    time.Time
+		ts     time.Time
 		metric string
-		value float32
+		value  float32
 	}{
 		{ts: base, metric: "cpu.temp", value: 40.5},
 		{ts: base.Add(5 * time.Minute), metric: "cpu.temp", value: 41.0},
