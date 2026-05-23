@@ -430,6 +430,20 @@
   font-size: 0.8rem;
 }
 
+.field-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.25;
+  margin-top: 2px;
+}
+
+.field-hint code {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
 .toggle-field {
   min-height: 38px;
   padding: 0 12px;

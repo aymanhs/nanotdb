@@ -560,7 +560,7 @@
               '<label>Offset<input type="number" step="any" data-field="transform.offset" value="' + escapeHTML(transform.offset == null ? "" : transform.offset) + '" /></label>' +
               '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
               '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
-              '<label>Format<input type="text" data-field="transform.format" value="' + escapeHTML(transform.format || "") + '" /></label>' +
+              '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /><span class="field-hint">Use <code>{duration}</code> for durations/uptime.</span></label>' +
             '</div>' +
             '<div class="series-grid-thresholds">' +
               '<label>Threshold<select data-field="thresholds.direction">' +
@@ -883,9 +883,11 @@
     const days = Math.floor(total / 86400);
     const hours = Math.floor((total % 86400) / 3600);
     const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
     if (days > 0) return days + "d " + hours + "h " + mins + "m";
-    if (hours > 0) return hours + "h " + mins + "m";
-    return mins + "m";
+    if (hours > 0) return hours + "h " + mins + "m" + (secs > 0 ? " " + secs + "s" : "");
+    if (mins > 0) return mins + "m" + (secs > 0 ? " " + secs + "s" : "");
+    return secs + "s";
   }
 
   function formatWidgetValue(target, rawValue) {
@@ -1293,7 +1295,7 @@
   function wireStaticControls() {
     document.getElementById("addGroupBtn").addEventListener("click", () => {
       const id = uniqueID((state.draftConfig.groups || []).map((group) => group.id), "new_group");
-      state.draftConfig.groups.push({ id, label, widgets: [] });
+      state.draftConfig.groups.push({ id, label: "New Group", widgets: [] });
       state.selectedGroupId = id;
       state.selectedWidgetId = "";
       renderAll();

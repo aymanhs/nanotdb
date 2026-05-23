@@ -90,13 +90,17 @@
     const days = Math.floor(total / 86400);
     const hours = Math.floor((total % 86400) / 3600);
     const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
     if (days > 0) {
       return days + "d " + hours + "h " + mins + "m";
     }
     if (hours > 0) {
-      return hours + "h " + mins + "m";
+      return hours + "h " + mins + "m" + (secs > 0 ? " " + secs + "s" : "");
     }
-    return mins + "m";
+    if (mins > 0) {
+      return mins + "m" + (secs > 0 ? " " + secs + "s" : "");
+    }
+    return secs + "s";
   }
 
   function formatWidgetValue(target, rawValue) {
