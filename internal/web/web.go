@@ -35,6 +35,7 @@ type indexTemplateData struct {
 	AssetBase     string
 	ConfigJSON    template.JS
 	DashboardPath string
+	EditorPath    string
 	ExplorePath   string
 	EnginePath    string
 }
@@ -95,19 +96,59 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	mux.Handle("/assets/", http.StripPrefix("/assets/", assetSource.commonAssets))
 
 	dashboardJSONPath := resolveDashboardPath(dataDir, cfg.DashboardFile)
-	mux.HandleFunc("/api/dashboard-config", func(w http.ResponseWriter, _ *http.Request) {
-		payload, err := loadDashboardConfig(dashboardJSONPath, cfg)
-		if err != nil {
-			http.Error(w, "failed to load dashboard config", http.StatusInternalServerError)
+	mux.HandleFunc("/api/dashboard-config", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			payload, err := loadDashboardConfig(dashboardJSONPath, cfg)
+			if err != nil {
+				http.Error(w, "failed to load dashboard config", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(payload)
+		case http.MethodPut:
+			dashboardCfg, errs := readDashboardConfigRequest(r)
+			if len(errs) > 0 {
+				writeDashboardMutationResponse(w, http.StatusBadRequest, dashboardMutationResponse{OK: false, Errors: errs})
+				return
+			}
+			backupPath, savedPayload, err := saveDashboardConfig(dashboardJSONPath, dashboardCfg)
+			if err != nil {
+				http.Error(w, "failed to save dashboard config", http.StatusInternalServerError)
+				return
+			}
+			writeDashboardMutationResponse(w, http.StatusOK, dashboardMutationResponse{
+				OK:         true,
+				BackupPath: backupPath,
+				Config:     &dashboardCfg,
+				Payload:    savedPayload,
+			})
+		default:
+			w.Header().Set("Allow", "GET, PUT")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/dashboard-config/validate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(payload)
+		dashboardCfg, errs := readDashboardConfigRequest(r)
+		if len(errs) > 0 {
+			writeDashboardMutationResponse(w, http.StatusBadRequest, dashboardMutationResponse{OK: false, Errors: errs})
+			return
+		}
+		writeDashboardMutationResponse(w, http.StatusOK, dashboardMutationResponse{OK: true, Config: &dashboardCfg})
 	})
+
+	editorPath := cfg.BasePath + "/edit"
 
 	serveDashboard := func(w http.ResponseWriter, _ *http.Request) {
 		payload, _ := json.Marshal(map[string]interface{}{
 			"basePath":       cfg.BasePath,
+			"editorPath":     editorPath,
 			"refreshSeconds": cfg.RefreshSeconds,
 			"apiBaseURL":     cfg.APIBaseURL,
 		})
@@ -117,6 +158,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			AssetBase:     cfg.BasePath + "/assets",
 			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
+			EditorPath:    editorPath,
 			ExplorePath:   cfg.ExplorePath,
 			EnginePath:    cfg.EnginePath,
 		}); err != nil {
@@ -127,6 +169,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	serveExplore := func(w http.ResponseWriter, _ *http.Request) {
 		payload, _ := json.Marshal(map[string]interface{}{
 			"basePath":       cfg.BasePath,
+			"editorPath":     editorPath,
 			"refreshSeconds": cfg.RefreshSeconds,
 			"apiBaseURL":     cfg.APIBaseURL,
 		})
@@ -136,6 +179,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			AssetBase:     cfg.ExplorePath + "/assets",
 			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
+			EditorPath:    editorPath,
 			ExplorePath:   cfg.ExplorePath,
 			EnginePath:    cfg.EnginePath,
 		}); err != nil {
@@ -146,6 +190,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	serveEngine := func(w http.ResponseWriter, _ *http.Request) {
 		payload, _ := json.Marshal(map[string]interface{}{
 			"basePath":       cfg.BasePath,
+			"editorPath":     editorPath,
 			"refreshSeconds": cfg.RefreshSeconds,
 			"apiBaseURL":     cfg.APIBaseURL,
 			"enginePath":     cfg.EnginePath,
@@ -156,10 +201,32 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			AssetBase:     cfg.EnginePath + "/assets",
 			ConfigJSON:    template.JS(payload),
 			DashboardPath: cfg.BasePath,
+			EditorPath:    editorPath,
 			ExplorePath:   cfg.ExplorePath,
 			EnginePath:    cfg.EnginePath,
 		}); err != nil {
 			http.Error(w, "failed to render engine explorer", http.StatusInternalServerError)
+		}
+	}
+
+	serveEditor := func(w http.ResponseWriter, _ *http.Request) {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"basePath":       cfg.BasePath,
+			"editorPath":     editorPath,
+			"refreshSeconds": cfg.RefreshSeconds,
+			"apiBaseURL":     cfg.APIBaseURL,
+		})
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := assetSource.executeTemplate(w, assetSource.editorTemplatePath, "dashboard-editor", indexTemplateData{
+			Title:         cfg.Title,
+			AssetBase:     cfg.BasePath + "/assets",
+			ConfigJSON:    template.JS(payload),
+			DashboardPath: cfg.BasePath,
+			EditorPath:    editorPath,
+			ExplorePath:   cfg.ExplorePath,
+			EnginePath:    cfg.EnginePath,
+		}); err != nil {
+			http.Error(w, "failed to render dashboard editor", http.StatusInternalServerError)
 		}
 	}
 
@@ -175,6 +242,14 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	mux.HandleFunc(cfg.BasePath+"/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == cfg.BasePath+"/" {
 			serveDashboard(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc(editorPath, serveEditor)
+	mux.HandleFunc(editorPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == editorPath+"/" {
+			serveEditor(w, r)
 			return
 		}
 		http.NotFound(w, r)
@@ -246,6 +321,7 @@ func normalizeConfig(cfg Config) Config {
 
 type assetSource struct {
 	dashboardTemplatePath string
+	editorTemplatePath    string
 	exploreTemplatePath   string
 	engineTemplatePath    string
 	dashboardAssets       http.Handler
@@ -259,6 +335,7 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 	if webRoot != "" {
 		return assetSource{
 			dashboardTemplatePath: filepath.Join(webRoot, "dashboard.html"),
+			editorTemplatePath:    filepath.Join(webRoot, "editor.html"),
 			exploreTemplatePath:   filepath.Join(webRoot, "index.html"),
 			engineTemplatePath:    filepath.Join(webRoot, "engine.html"),
 			dashboardAssets:       http.FileServer(http.Dir(filepath.Join(webRoot, "dashboard_assets"))),
@@ -286,6 +363,7 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 	}
 	return assetSource{
 		dashboardTemplatePath: "static/dashboard.html",
+		editorTemplatePath:    "static/editor.html",
 		exploreTemplatePath:   "static/index.html",
 		engineTemplatePath:    "static/engine.html",
 		dashboardAssets:       http.FileServer(http.FS(dashboardAssets)),
@@ -351,4 +429,10 @@ func loadDashboardConfig(path string, cfg Config) ([]byte, error) {
 	}
 	payload["title"] = cfg.Title
 	return json.Marshal(payload)
+}
+
+func writeDashboardMutationResponse(w http.ResponseWriter, status int, resp dashboardMutationResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(resp)
 }

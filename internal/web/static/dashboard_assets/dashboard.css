@@ -184,7 +184,7 @@
 
 .numbers-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 10px 0 6px;
   align-items: end;
@@ -202,8 +202,7 @@
 .numbers-row-label {
   color: var(--muted);
   font-size: 0.78rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
 }
 
 .numbers-row-value {
@@ -326,9 +325,7 @@
   }
 
   .numbers-list {
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(140px, 1fr);
-    grid-template-columns: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .widget-number.widget-number--full {

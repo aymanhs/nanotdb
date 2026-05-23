@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} - Editor</title>
+  <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css" />
+  <link rel="stylesheet" href="/assets/common.css" />
+  <link rel="stylesheet" href="{{ .AssetBase }}/dashboard.css" />
+  <link rel="stylesheet" href="{{ .AssetBase }}/editor.css" />
+</head>
+<body>
+  <main class="page editor-page">
+    <header class="page-header editor-header">
+      <nav class="top-nav" aria-label="Navigation">
+        <a href="/">Home</a>
+        <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .EditorPath }}">Editor</a>
+        <a href="{{ .ExplorePath }}">Explore</a>
+        <a href="{{ .EnginePath }}">Engine</a>
+      </nav>
+      <div class="editor-title-row">
+        <h1>Dashboard Editor</h1>
+      </div>
+      <div class="editor-status-row">
+        <span id="editorStatus" aria-live="polite"></span>
+        <span id="backupStatus" class="backup-status"></span>
+      </div>
+    </header>
+
+    <section class="panel editor-meta">
+      <div class="editor-meta-grid">
+        <label>
+          Dashboard Title
+          <input id="dashboardTitleInput" type="text" />
+        </label>
+        <label>
+          Default Database
+          <select id="defaultDbSelect"></select>
+        </label>
+        <div class="editor-actions editor-meta-actions">
+          <button type="button" id="validateBtn" class="secondary-btn">Validate</button>
+          <button type="button" id="previewBtn" class="secondary-btn">Refresh Preview</button>
+          <button type="button" id="revertBtn" class="secondary-btn">Revert</button>
+          <button type="button" id="saveBtn">Save</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="editor-layout">
+      <aside class="panel editor-pane">
+        <div class="pane-head">
+          <h2>Groups</h2>
+          <button type="button" id="addGroupBtn" class="editor-btn icon-btn" title="Add group" aria-label="Add group">+</button>
+        </div>
+        <div id="groupsList" class="stack-list"></div>
+      </aside>
+
+      <aside class="panel editor-pane">
+        <div class="pane-head">
+          <h2>Widgets</h2>
+          <div class="inline-actions compact-actions">
+            <select id="existingWidgetSelect" class="widget-picker-select"></select>
+            <button type="button" id="addExistingWidgetBtn" class="editor-btn icon-btn" title="Add selected shared widget" aria-label="Add selected shared widget">+</button>
+            <button type="button" id="addWidgetBtn" class="editor-btn icon-btn" title="Create new widget" aria-label="Create new widget">✦</button>
+          </div>
+        </div>
+        <div id="widgetsList" class="stack-list"></div>
+      </aside>
+
+      <section class="panel editor-pane editor-main">
+        <div class="pane-head">
+          <h2>Widget Editor</h2>
+          <span id="widgetUsageBadge"></span>
+        </div>
+        <div id="widgetEditor" class="widget-editor-empty">Select a widget to edit it.</div>
+      </section>
+    </section>
+
+    <section class="panel editor-preview-panel">
+      <div class="pane-head">
+        <h2>Group Preview</h2>
+        <span id="previewLabel" class="preview-label"></span>
+      </div>
+      <div id="previewHost" class="preview-host"></div>
+    </section>
+  </main>
+
+  <datalist id="metricOptions"></datalist>
+
+  <script id="dashboardEditorConfig" type="application/json">{{ .ConfigJSON }}</script>
+  <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js" defer></script>
+  <script src="{{ .AssetBase }}/editor_app.js" defer></script>
+</body>
+</html>

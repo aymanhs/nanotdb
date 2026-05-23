@@ -20,7 +20,7 @@ timeout_ms = 5500
 
 [collectors.cpu]
 # Emits: cpu.user, cpu.nice, cpu.system, cpu.idle, cpu.iowait, cpu.irq, cpu.softirq,
-#        cpu.temp_mdeg (if thermal zone is available)
+#        cpu.busy_pct, sys.uptime_sec, cpu.temp_mdeg (if thermal zone is available)
 enabled = true
 # Optional explicit thermal file path (manual override).
 temp_path = "/sys/class/thermal/thermal_zone0/temp"
@@ -44,7 +44,8 @@ exe_names = ["drip", "nanotdb"]
 # Emits per physical block device:
 #   disk.{dev}.reads, reads_merged, read_sectors, read_ms,
 #   disk.{dev}.writes, writes_merged, write_sectors, write_ms,
-#   disk.{dev}.io_in_progress, io_ms, io_weighted_ms
+#   disk.{dev}.io_in_progress, io_ms, io_weighted_ms,
+#   disk.{dev}.busy_pct, iops, read_kbps, write_kbps
 # Emits per mounted filesystem:
 #   diskfs.{mount}.bytes_total, bytes_used, bytes_free, bytes_avail, used_pct
 enabled = true

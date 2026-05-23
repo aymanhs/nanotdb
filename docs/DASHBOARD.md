@@ -7,6 +7,7 @@ in the browser.
 ## Pages
 
 - `/` and `/dashboard` serve the configurable dashboard.
+- `/dashboard/edit` serves the in-browser dashboard editor.
 - `/explore` serves the manual database and metric explorer.
 - `/engine` serves the operational engine view for database, file, runtime, and active settings inspection.
 
@@ -33,6 +34,7 @@ Then open:
 
 - `http://localhost:8428/`
 - `http://localhost:8428/dashboard`
+- `http://localhost:8428/dashboard/edit`
 - `http://localhost:8428/explore`
 - `http://localhost:8428/engine`
 
@@ -126,6 +128,10 @@ UI-only display conversion is configured per series using `transform`, for examp
 `{"factor": 0.001, "unit": " C", "decimals": 1}` to convert millidegrees to
 degrees in the browser.
 
+Widgets can also opt out of timer-based refresh with `"auto_refresh": false`.
+This is useful for long-lookback charts or historical widgets that should only
+update when refreshed manually.
+
 ## Web Config
 
 The dashboard-related settings live under `[web]` in `engine.toml`:
@@ -181,6 +187,8 @@ so the browser pages call the NanoTDB API at the correct origin.
 ## API Endpoints Used By The UI
 
 - `GET /api/dashboard-config`
+- `POST /api/dashboard-config/validate`
+- `PUT /api/dashboard-config`
 - `GET /api/v1/databases`
 - `GET /api/v1/metrics?db=<name>`
 - `GET /api/v1/query`

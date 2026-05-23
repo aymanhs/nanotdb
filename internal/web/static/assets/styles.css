@@ -190,12 +190,23 @@ h2 {
   padding: 12px;
 }
 
-#chart {
+.chart-host {
   width: 100%;
+  min-height: 320px;
   max-height: 430px;
   background: linear-gradient(#1d2532, #171e2a);
   border-radius: 8px;
   border: 1px solid #2f3c52;
+  padding: 8px;
+}
+
+.chart-empty {
+  min-height: 302px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--chart-text);
+  font-size: 0.92rem;
 }
 
 @media (max-width: 700px) {

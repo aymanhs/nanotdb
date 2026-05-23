@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ .Title }} - Explore</title>
+  <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css" />
   <link rel="stylesheet" href="/assets/common.css" />
   <link rel="stylesheet" href="{{ .AssetBase }}/styles.css" />
 </head>
@@ -13,6 +14,7 @@
       <nav class="top-nav" aria-label="Navigation">
         <a href="/">Home</a>
         <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .EditorPath }}">Editor</a>
         <a href="{{ .ExplorePath }}">Explore</a>
         <a href="{{ .EnginePath }}">Engine</a>
       </nav>
@@ -73,11 +75,12 @@
         <h2>Live Chart</h2>
         <p>Range view over selected window</p>
       </header>
-      <canvas id="chart" width="1200" height="420"></canvas>
+      <div id="chart" class="chart-host" aria-live="polite"></div>
     </section>
   </main>
 
   <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>
-  <script src="{{ .AssetBase }}/app.js"></script>
+  <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js" defer></script>
+  <script src="{{ .AssetBase }}/app.js" defer></script>
 </body>
 </html>

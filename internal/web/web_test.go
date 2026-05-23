@@ -13,7 +13,7 @@ func TestRegister_ServesIndexOnRootAndDashboard(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, DefaultConfig(), t.TempDir())
 
-	for _, p := range []string{"/", "/dashboard", "/dashboard/", "/engine", "/engine/"} {
+	for _, p := range []string{"/", "/dashboard", "/dashboard/", "/dashboard/edit", "/dashboard/edit/", "/engine", "/engine/"} {
 		req := httptest.NewRequest(http.MethodGet, p, nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
@@ -103,6 +103,103 @@ func TestRegister_ServesDashboardConfigFromFile(t *testing.T) {
 	}
 }
 
+func TestRegister_ValidatesDashboardConfig(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {
+      "type": "line_chart",
+      "title": "Sample",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"metric": "temp.cpu"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_SavesDashboardConfigWithBackup(t *testing.T) {
+	root := t.TempDir()
+	original := []byte(`{
+  "title": "Original Dashboard",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {"type":"number","title":"Sample","series":[{"metric":"temp.cpu"}]}
+  }
+}`)
+	if err := os.WriteFile(filepath.Join(root, "dashboard.json"), original, 0o644); err != nil {
+		t.Fatalf("write original dashboard: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["history"]}],
+  "widgets": {
+    "history": {
+      "type": "line_chart",
+      "title": "History",
+      "refresh_sec": 60,
+      "auto_refresh": false,
+      "lookback": "24h",
+      "interval": "5m",
+      "series": [{"metric": "temp.cpu"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/dashboard-config", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	savedRaw, err := os.ReadFile(filepath.Join(root, "dashboard.json"))
+	if err != nil {
+		t.Fatalf("read saved dashboard: %v", err)
+	}
+	if !strings.Contains(string(savedRaw), `"Edited Dashboard"`) {
+		t.Fatalf("expected saved dashboard content, got %q", string(savedRaw))
+	}
+	if !strings.Contains(string(savedRaw), `"auto_refresh": false`) {
+		t.Fatalf("expected auto_refresh field in saved dashboard, got %q", string(savedRaw))
+	}
+	backupDir := filepath.Join(root, "dashboard_backups")
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatalf("read backup dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("expected at least one backup file")
+	}
+	backupRaw, err := os.ReadFile(filepath.Join(backupDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read backup file: %v", err)
+	}
+	if !strings.Contains(string(backupRaw), `"Original Dashboard"`) {
+		t.Fatalf("expected original dashboard in backup, got %q", string(backupRaw))
+	}
+}
+
 func TestRegister_UsesWebRootOverrides(t *testing.T) {
 	root := t.TempDir()
 	webRoot := filepath.Join(root, "ui")
@@ -173,7 +270,7 @@ func TestExportAssets_WritesBundle(t *testing.T) {
 	if err := ExportAssets(root); err != nil {
 		t.Fatalf("ExportAssets failed: %v", err)
 	}
-	for _, rel := range []string{"dashboard.html", "index.html", "engine.html", filepath.Join("dashboard_assets", "dashboard_app.js"), filepath.Join("assets", "app.js"), filepath.Join("engine_assets", "engine_app.js"), filepath.Join("common_assets", "common.css")} {
+	for _, rel := range []string{"dashboard.html", "editor.html", "index.html", "engine.html", filepath.Join("dashboard_assets", "dashboard_app.js"), filepath.Join("dashboard_assets", "editor_app.js"), filepath.Join("dashboard_assets", "editor.css"), filepath.Join("assets", "app.js"), filepath.Join("engine_assets", "engine_app.js"), filepath.Join("common_assets", "common.css")} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
 			t.Fatalf("expected exported file %s: %v", rel, err)
 		}

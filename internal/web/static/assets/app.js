@@ -16,8 +16,7 @@
   const refreshBtn = document.getElementById("refreshBtn");
   const statusEl = document.getElementById("status");
   const cards = document.getElementById("cards");
-  const canvas = document.getElementById("chart");
-  const ctx = canvas.getContext("2d");
+  const chartEl = document.getElementById("chart");
 
   const palette = ["#2dd4a4", "#46a3ff", "#f59e0b", "#f472b6", "#a78bfa", "#22d3ee"];
 
@@ -26,6 +25,8 @@
   const chartText = css.getPropertyValue("--chart-text").trim() || "#b9c6d9";
   let metricCatalog = [];
   let selectedMetricNames = [];
+  let chartInstance = null;
+  let lastSeriesByMetric = {};
 
   function setStatus(msg) {
     statusEl.textContent = msg;
@@ -162,12 +163,13 @@
   }
 
   async function loadSeries(db, metric, fromIso, toIso, step) {
-  const url = apiURL(
-    "/api/v1/query_range?db=" + encodeURIComponent(db) +
-      "&query=" + encodeURIComponent(metric) +
-      "&start=" + encodeURIComponent(fromIso) +
-      "&end=" + encodeURIComponent(toIso) +
-    "&step=" + encodeURIComponent(step));
+    const url = apiURL(
+      "/api/v1/query_range?db=" + encodeURIComponent(db) +
+        "&query=" + encodeURIComponent(metric) +
+        "&start=" + encodeURIComponent(fromIso) +
+        "&end=" + encodeURIComponent(toIso) +
+        "&step=" + encodeURIComponent(step)
+    );
     const payload = await fetchJSON(url);
     const result = payload.data && payload.data.result && payload.data.result[0];
     if (!result || !result.values) {
@@ -176,77 +178,75 @@
     return result.values.map((p) => ({ x: Number(p[0]), y: Number(p[1]) }));
   }
 
+  function destroyChart() {
+    if (chartInstance) {
+      chartInstance.destroy();
+      chartInstance = null;
+    }
+  }
+
+  function buildUPlotData(seriesByMetric) {
+    const timeSet = new Set();
+    Object.values(seriesByMetric).forEach((points) => {
+      (points || []).forEach((point) => timeSet.add(point.x));
+    });
+
+    const x = Array.from(timeSet).sort((a, b) => a - b);
+    const data = [x];
+    Object.keys(seriesByMetric).forEach((metric) => {
+      const byTs = new Map((seriesByMetric[metric] || []).map((point) => [point.x, point.y]));
+      data.push(x.map((ts) => (byTs.has(ts) ? byTs.get(ts) : null)));
+    });
+    return data;
+  }
+
   function drawChart(seriesByMetric) {
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.clientWidth || 800;
-    const height = canvas.clientHeight || 420;
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    lastSeriesByMetric = seriesByMetric;
+    if (typeof uPlot !== "function") {
+      throw new Error("uPlot not loaded");
+    }
 
-    ctx.clearRect(0, 0, width, height);
-
-    const all = [];
-    Object.values(seriesByMetric).forEach((arr) => arr.forEach((p) => all.push(p)));
-    if (all.length === 0) {
-      ctx.fillStyle = chartText;
-      ctx.fillText("No data in selected range", 20, 30);
+    const data = buildUPlotData(seriesByMetric);
+    if (!data[0] || data[0].length === 0) {
+      destroyChart();
+      chartEl.innerHTML = '<div class="chart-empty">No data in selected range</div>';
       return;
     }
 
-    const minX = Math.min(...all.map((p) => p.x));
-    const maxX = Math.max(...all.map((p) => p.x));
-    const minY = Math.min(...all.map((p) => p.y));
-    const maxY = Math.max(...all.map((p) => p.y));
-
-    const pad = { l: 52, r: 12, t: 12, b: 24 };
-    const plotW = width - pad.l - pad.r;
-    const plotH = height - pad.t - pad.b;
-
-    function sx(x) {
-      if (maxX === minX) return pad.l + plotW / 2;
-      return pad.l + ((x - minX) / (maxX - minX)) * plotW;
-    }
-    function sy(y) {
-      if (maxY === minY) return pad.t + plotH / 2;
-      return pad.t + (1 - (y - minY) / (maxY - minY)) * plotH;
-    }
-
-    ctx.strokeStyle = chartGrid;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(pad.l, pad.t);
-    ctx.lineTo(pad.l, pad.t + plotH);
-    ctx.lineTo(pad.l + plotW, pad.t + plotH);
-    ctx.stroke();
-
-    const metrics = Object.keys(seriesByMetric);
-    metrics.forEach((metric, idx) => {
-      const points = seriesByMetric[metric];
-      if (!points.length) return;
-      ctx.strokeStyle = palette[idx % palette.length];
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      points.forEach((p, i) => {
-        const x = sx(p.x);
-        const y = sy(p.y);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+    chartEl.innerHTML = "";
+    const labels = Object.keys(seriesByMetric);
+    const series = [{ label: "Time" }];
+    labels.forEach((label, idx) => {
+      series.push({
+        label,
+        stroke: palette[idx % palette.length],
+        width: 2,
+        spanGaps: true,
+        points: { show: false },
       });
-      ctx.stroke();
-
-      const legendY = 18 + idx * 16;
-      ctx.fillStyle = palette[idx % palette.length];
-      ctx.fillRect(width - 190, legendY - 8, 10, 10);
-      ctx.fillStyle = chartText;
-      ctx.font = "12px sans-serif";
-      ctx.fillText(metric, width - 176, legendY);
     });
 
-    ctx.fillStyle = chartText;
-    ctx.font = "12px sans-serif";
-    ctx.fillText(minY.toFixed(2), 6, pad.t + plotH);
-    ctx.fillText(maxY.toFixed(2), 6, pad.t + 10);
+    const width = Math.max(chartEl.clientWidth || 0, 280);
+    const height = Math.max(chartEl.clientHeight || 0, 320);
+    const opts = {
+      width,
+      height,
+      padding: window.matchMedia("(max-width: 699px)").matches ? [4, 4, 2, 2] : [8, 8, 4, 4],
+      scales: { x: { time: true } },
+      series,
+      axes: [
+        { stroke: chartText, grid: { stroke: chartGrid, width: 1 } },
+        {
+          stroke: chartText,
+          grid: { stroke: chartGrid, width: 1 },
+          values: (u, vals) => vals.map((value) => (value == null ? "" : Number(value).toFixed(2))),
+        },
+      ],
+      legend: { show: true, live: true, isolate: false },
+    };
+
+    destroyChart();
+    chartInstance = new uPlot(opts, data, chartEl);
   }
 
   async function refreshAll() {
@@ -254,6 +254,8 @@
     const metrics = selectedMetrics();
     if (!db || metrics.length === 0) {
       cards.innerHTML = "";
+      lastSeriesByMetric = {};
+      destroyChart();
       drawChart({});
       return;
     }
@@ -294,6 +296,11 @@
   windowSelect.addEventListener("change", refreshAll);
   stepSelect.addEventListener("change", refreshAll);
   refreshBtn.addEventListener("click", refreshAll);
+  window.addEventListener("resize", () => {
+    if (chartInstance) {
+      drawChart(lastSeriesByMetric);
+    }
+  });
 
   async function init() {
     try {

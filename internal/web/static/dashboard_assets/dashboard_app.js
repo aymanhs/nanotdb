@@ -322,7 +322,15 @@
     return item.values.map((v) => ({ x: Number(v[0]), y: Number(v[1]) })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   }
 
-  function createWidgetRefresher(run, refreshMs, controls) {
+  function widgetAutoRefreshEnabled(widget) {
+    if (widget && typeof widget.auto_refresh === "boolean") {
+      return widget.auto_refresh;
+    }
+    return true;
+  }
+
+  function createWidgetRefresher(run, refreshMs, controls, options) {
+    const autoRefresh = !options || options.autoRefresh !== false;
     let inFlight = false;
     let paused = false;
     let timerId = null;
@@ -334,6 +342,7 @@
       if (controls.pauseBtn) {
         controls.pauseBtn.textContent = paused ? "Resume" : "Pause";
         controls.pauseBtn.setAttribute("aria-pressed", paused ? "true" : "false");
+        controls.pauseBtn.disabled = !autoRefresh;
       }
     }
 
@@ -363,7 +372,9 @@
         return;
       }
       void tick();
-      timerId = setInterval(tick, refreshMs);
+      if (autoRefresh) {
+        timerId = setInterval(tick, refreshMs);
+      }
     }
 
     function setPaused(nextPaused) {
@@ -377,7 +388,11 @@
     }
 
     controls.refreshBtn.addEventListener("click", () => void tick());
-    controls.pauseBtn.addEventListener("click", () => setPaused(!paused));
+    controls.pauseBtn.addEventListener("click", () => {
+      if (autoRefresh) {
+        setPaused(!paused);
+      }
+    });
     updateControls();
 
     return { start, stop, setPaused };
@@ -496,6 +511,7 @@
 
   function buildWidget(widget, containerEl, dashboardCfg) {
     const refreshMs = Math.max((widget.refresh_sec || 10) * 1000, 5000);
+    const autoRefresh = widgetAutoRefreshEnabled(widget);
 
     if (widget.type === "number") {
       const els = createNumberWidget(widget, containerEl);
@@ -520,7 +536,7 @@
         applySeverityClass(els.card, classifySeverity(series || widget, point.value));
         els.foot.textContent = "updated " + new Date().toLocaleTimeString();
       };
-      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn });
+      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, { autoRefresh });
     }
 
     if (widget.type === "numbers") {
@@ -549,7 +565,7 @@
         }));
         els.foot.textContent = validCount > 0 ? "updated " + new Date().toLocaleTimeString() : "no values";
       };
-      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn });
+      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, { autoRefresh });
     }
 
     if (widget.type === "line_chart") {
@@ -571,7 +587,7 @@
         const hasData = renderUPlotChart(els.plot, widget, seriesMap);
         els.foot.textContent = hasData ? "updated " + new Date().toLocaleTimeString() : "no points";
       };
-      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn });
+      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, { autoRefresh });
     }
 
     mountError(containerEl, "unsupported widget type: " + widget.type);
