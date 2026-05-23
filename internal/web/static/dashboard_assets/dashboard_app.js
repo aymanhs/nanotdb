@@ -1,5 +1,5 @@
 (function () {
-  const cfg = window.NANOTDB_DASH_CONFIG || { basePath: "/dashboard", refreshSeconds: 10, apiBaseURL: "" };
+  const cfg = JSON.parse(document.getElementById("dashboardConfig").textContent) || { basePath: "/dashboard", refreshSeconds: 10, apiBaseURL: "" };
   const chartState = new Map();
   const groupPanes = new Map();
   const groupTimers = new Map();
@@ -19,203 +19,23 @@
     });
   }
 
-  function parseDurationSeconds(v, fallback) {
-    if (!v || typeof v !== "string") {
-      return fallback;
-    }
-    const m = v.trim().match(/^(\d+)(s|m|h|d|w)$/i);
-    if (!m) {
-      return fallback;
-    }
-    const n = Number(m[1]);
-    const u = m[2].toLowerCase();
-    if (u === "s") return n;
-    if (u === "m") return n * 60;
-    if (u === "h") return n * 3600;
-    if (u === "d") return n * 86400;
-    if (u === "w") return n * 604800;
-    return fallback;
-  }
-
-  function seriesDB(series, dashboardCfg) {
-    return series.db || series.database || dashboardCfg.default_db || "";
-  }
-
-  function seriesMetric(series) {
-    if (series.metric) {
-      return series.metric;
-    }
-    if (series.measurement && series.field) {
-      return series.measurement + "." + series.field;
-    }
-    return "";
-  }
-
-  function resolveDisplayConfig(target) {
-    const transform = target && target.transform && typeof target.transform === "object" ? target.transform : null;
-    return {
-      factor: Number.isFinite(transform && transform.factor) ? Number(transform.factor) : (Number.isFinite(target && target.scale) ? Number(target.scale) : 1),
-      offset: Number.isFinite(transform && transform.offset) ? Number(transform.offset) : (Number.isFinite(target && target.offset) ? Number(target.offset) : 0),
-      unit: typeof (transform && transform.unit) === "string" ? transform.unit : (typeof (target && target.unit) === "string" ? target.unit : ""),
-      decimals: Number.isInteger(transform && transform.decimals) && transform.decimals >= 0 ? transform.decimals : (Number.isInteger(target && target.decimals) && target.decimals >= 0 ? target.decimals : 1),
-      format: typeof (transform && transform.format) === "string" ? transform.format : (typeof (target && target.format) === "string" ? target.format : ""),
-    };
-  }
-
-  function transformValue(target, rawValue) {
-    const n = Number(rawValue);
-    if (!Number.isFinite(n)) {
-      return NaN;
-    }
-    const cfg = resolveDisplayConfig(target);
-    return n * cfg.factor + cfg.offset;
-  }
-
-  function trimTrailingZeros(numText) {
-    return String(numText)
-      .replace(/(\.\d*?[1-9])0+$/u, "$1")
-      .replace(/\.0+$/u, "");
-  }
-
-  function formatNumericValue(value, precision) {
-    const p = Number.isInteger(precision) && precision >= 0 ? precision : 0;
-    return trimTrailingZeros(Number(value).toFixed(p));
-  }
-
-  function formatDurationFromSeconds(value) {
-    const total = Math.max(0, Math.floor(Number(value)));
-    if (!Number.isFinite(total)) {
-      return "--";
-    }
-    const days = Math.floor(total / 86400);
-    const hours = Math.floor((total % 86400) / 3600);
-    const mins = Math.floor((total % 3600) / 60);
-    const secs = total % 60;
-    if (days > 0) {
-      return days + "d " + hours + "h " + mins + "m";
-    }
-    if (hours > 0) {
-      return hours + "h " + mins + "m" + (secs > 0 ? " " + secs + "s" : "");
-    }
-    if (mins > 0) {
-      return mins + "m" + (secs > 0 ? " " + secs + "s" : "");
-    }
-    return secs + "s";
-  }
-
-  function formatWidgetValue(target, rawValue) {
-    const cfg = resolveDisplayConfig(target);
-    const value = transformValue(target, rawValue);
-    if (!Number.isFinite(value)) {
-      return "--";
-    }
-
-    const fixed = formatNumericValue(value, cfg.decimals);
-    const format = cfg.format;
-    const unit = cfg.unit;
-
-    if (format) {
-      if (format.includes("{duration}")) {
-        return format.replaceAll("{duration}", formatDurationFromSeconds(value));
-      }
-      if (format.includes("{value}")) {
-        return format.replaceAll("{value}", fixed);
-      }
-    }
-
-    return unit ? fixed + unit : fixed;
-  }
-
-  function classifySeverity(target, rawValue) {
-    if (!target || !target.thresholds) {
-      return "none";
-    }
-
-    const value = transformValue(target, rawValue);
-    if (!Number.isFinite(value)) {
-      return "none";
-    }
-
-    const thresholds = target.thresholds;
-    const dir = thresholds.direction === "below" ? "below" : "above";
-    const hasWarning = Number.isFinite(thresholds.warning);
-    const hasCritical = Number.isFinite(thresholds.critical);
-    if (!hasWarning && !hasCritical) {
-      return "none";
-    }
-
-    if (dir === "above") {
-      if (hasCritical && value >= thresholds.critical) {
-        return "critical";
-      }
-      if (hasWarning && value >= thresholds.warning) {
-        return "warning";
-      }
-      return "normal";
-    }
-
-    if (hasCritical && value <= thresholds.critical) {
-      return "critical";
-    }
-    if (hasWarning && value <= thresholds.warning) {
-      return "warning";
-    }
-    return "normal";
-  }
-
-  function applySeverityClass(el, severity) {
-    el.classList.remove("value-normal", "value-warning", "value-critical");
-    if (severity === "normal" || severity === "warning" || severity === "critical") {
-      el.classList.add("value-" + severity);
-    }
-  }
-
-  function pickSeriesColor(idx) {
-    const palette = ["#2dd4a4", "#60a5fa", "#f59e0b", "#ef4444", "#22d3ee", "#f472b6"];
-    return palette[idx % palette.length];
-  }
-
-  function chartTheme() {
-    const root = getComputedStyle(document.documentElement);
-    return {
-      text: root.getPropertyValue("--text").trim() || "#e8ecf1",
-      muted: root.getPropertyValue("--muted").trim() || "#a8b5c5",
-      border: root.getPropertyValue("--border").trim() || "#3a4558",
-    };
-  }
-
-  function yAxisSizeForValues(target, vals) {
-    let maxLen = 0;
-    (vals || []).forEach((value) => {
-      const label = value == null ? "" : formatWidgetValue(target, value);
-      maxLen = Math.max(maxLen, String(label).length);
-    });
-    const isMobile = window.matchMedia("(max-width: 699px)").matches;
-    const minSize = isMobile ? 40 : 80;
-    const maxSize = isMobile ? 84 : 220;
-    return Math.min(maxSize, Math.max(minSize, maxLen * 8 + 16));
-  }
-
-  function buildUPlotData(seriesMap) {
-    const timeSet = new Set();
-    Object.values(seriesMap).forEach((points) => {
-      (points || []).forEach((point) => timeSet.add(point.x));
-    });
-    const x = Array.from(timeSet).sort((a, b) => a - b);
-    const data = [x];
-    Object.keys(seriesMap).forEach((label) => {
-      const byTs = new Map((seriesMap[label] || []).map((point) => [point.x, point.y]));
-      data.push(x.map((ts) => (byTs.has(ts) ? byTs.get(ts) : null)));
-    });
-    return data;
-  }
-
-  function chartDisplayTarget(widget) {
-    if (widget && Array.isArray(widget.series) && widget.series.length > 0) {
-      return widget.series[0];
-    }
-    return widget;
-  }
+  const {
+    parseDurationSeconds,
+    seriesDB,
+    seriesMetric,
+    resolveDisplayConfig,
+    transformValue,
+    formatDurationFromSeconds,
+    formatWidgetValue,
+    classifySeverity,
+    applySeverityClass,
+    pickSeriesColor,
+    chartTheme,
+    yAxisSizeForValues,
+    buildUPlotData,
+    chartDisplayTarget,
+    rebalanceSingleNumberRows
+  } = window.NANOTDB_UTILS;
 
   function renderUPlotChart(plotEl, widget, seriesMap) {
     if (typeof uPlot !== "function") {

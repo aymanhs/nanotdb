@@ -475,7 +475,7 @@
   background: #0f172a;
   position: relative;
   flex: 0 0 auto;
-  transition: background 0.14s ease, border-color 0.14s ease;
+  transition: background 0.2s ease, border-color 0.2s ease;
 }
 
 .toggle-switch::after {
@@ -487,7 +487,7 @@
   height: 14px;
   border-radius: 50%;
   background: #9aa8bc;
-  transition: transform 0.14s ease, background 0.14s ease;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s ease;
 }
 
 .toggle-label {

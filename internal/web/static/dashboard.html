@@ -25,8 +25,9 @@
     <div id="widgets"></div>
   </main>
 
-  <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>
+  <script id="dashboardConfig" type="application/json">{{ .ConfigJSON }}</script>
   <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js" defer></script>
+  <script src="/assets/dashboard_utils.js" defer></script>
   <script src="{{ .AssetBase }}/dashboard_app.js" defer></script>
 </body>
 </html>
