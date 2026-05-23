@@ -132,6 +132,83 @@ Widgets can also opt out of timer-based refresh with `"auto_refresh": false`.
 This is useful for long-lookback charts or historical widgets that should only
 update when refreshed manually.
 
+In the live dashboard, line-chart widgets also expose a local lookback picker in
+the widget header so users can temporarily widen or narrow the visible time
+window without editing `dashboard.json`.
+
+Config shape summary:
+
+- `title` is required.
+- `default_db` sets the database used when a series does not override it.
+- `groups[]` defines dashboard tabs/sections in display order.
+- `groups[].widgets[]` references widget ids from the top-level `widgets` map.
+- `widgets.<id>.type` currently supports `number`, `numbers`, and `line_chart`.
+- Each widget must define at least one series.
+- A series must define either `metric` or `measurement` + `field`.
+- `line_chart` widgets require valid duration strings for `lookback` and `interval`.
+- `line_chart` widgets must not contain duplicate effective labels. A duplicate
+  label is any repeated explicit `label`, or repeated fallback label derived
+  from `metric` or `measurement.field`.
+
+Series support:
+
+- `db` or `database` overrides `default_db` for a single series.
+- `transform.factor`, `transform.offset`, `transform.unit`,
+  `transform.decimals`, and `transform.format` are display-only changes applied
+  in the browser.
+- `thresholds.direction` must be `above` or `below` when warning or critical
+  thresholds are set.
+- Thresholds only affect number and numbers widgets. Line charts render the
+  transformed values but do not apply severity coloring.
+
+## Editor
+
+`/dashboard/edit` loads the current server-side `dashboard.json`, lets you edit
+it in-place, previews the selected group in the browser, and saves the result
+back through the dashboard config API.
+
+The editor layout has four working areas:
+
+- Dashboard metadata for title, default database, and the Validate, Refresh
+  Preview, Revert, and Save actions.
+- A Groups pane for adding, renaming, reordering, and deleting groups.
+- A Widgets pane for adding a new widget to the selected group or attaching an
+  existing shared widget to that group.
+- A Widget Editor pane for editing the selected widget and its series.
+
+Important editor behavior:
+
+- Widgets are reusable across groups. Adding an existing widget links the same
+  widget id into another group instead of cloning it.
+- The usage badge shows whether the selected widget is shared by multiple
+  groups.
+- The group preview is live but debounced; most edits trigger a refresh of the
+  currently selected group preview after a short delay.
+- `Refresh Preview` forces an immediate preview rebuild.
+- The preview uses the configured widget `lookback` and `interval`. The live
+  dashboard's local lookback picker is not part of the editor preview.
+- There is no browser-side autosave. `Revert` restores the last config loaded
+  from the server, or the last successfully saved config.
+- `Save` sends the normalized draft to `PUT /api/dashboard-config`. When the
+  server writes a backup of the previous file, the editor displays that backup
+  path in the status row.
+- `Validate` sends the draft to `POST /api/dashboard-config/validate` without
+  writing the file.
+
+Widget editor details:
+
+- Widget ids are slugged to lowercase underscore-separated identifiers and kept
+  unique when renamed or created.
+- New widgets default to type `numbers`, inherit the global refresh cadence, and
+  start with one series.
+- Line-chart widgets expose `lookback` and `interval` fields in the editor.
+- Series rows can be reordered, duplicated, and deleted.
+- Series can point at a metric directly or use `measurement` + `field`.
+- The editor loads the live database list and metric catalog from the NanoTDB
+  API to populate database selects and metric suggestions.
+- Empty transform and threshold objects are removed before save, so the emitted
+  JSON stays compact.
+
 ## Web Config
 
 The dashboard-related settings live under `[web]` in `engine.toml`:
@@ -173,6 +250,7 @@ Then set `[web].web_root` to that directory. NanoTDB will serve these files from
 disk instead of the embedded bundle:
 
 - `dashboard.html`
+- `editor.html`
 - `index.html`
 - `engine.html`
 - `dashboard_assets/`
@@ -197,6 +275,21 @@ so the browser pages call the NanoTDB API at the correct origin.
 - `GET /api/engine/database?db=<name>`
 - `GET /api/engine/files?db=<name>`
 - `GET /api/engine/runtime?db=<name>`
+
+## Browser Smoke Test
+
+For a browser-level regression check of the dashboard and editor:
+
+```bash
+npm install
+npx playwright install
+npm run test:web-smoke
+```
+
+The smoke script starts a temporary NanoTDB server, stubs the chart library and
+metric API responses in-browser, verifies dashboard widget refresh failures are
+surfaced inline, and checks that editor validation rejects duplicate line-chart
+labels.
 
 ## Sample Rollup Fixture
 

@@ -151,14 +151,17 @@
   }
 
   function buildUPlotData(seriesMap) {
+    const seriesItems = Array.isArray(seriesMap)
+      ? seriesMap
+      : Object.keys(seriesMap || {}).map((label) => ({ label, points: seriesMap[label] || [] }));
     const timeSet = new Set();
-    Object.values(seriesMap).forEach((points) => {
-      (points || []).forEach((point) => timeSet.add(point.x));
+    seriesItems.forEach((item) => {
+      (item && item.points ? item.points : []).forEach((point) => timeSet.add(point.x));
     });
     const x = Array.from(timeSet).sort((a, b) => a - b);
     const data = [x];
-    Object.keys(seriesMap).forEach((label) => {
-      const byTs = new Map((seriesMap[label] || []).map((point) => [point.x, point.y]));
+    seriesItems.forEach((item) => {
+      const byTs = new Map(((item && item.points) || []).map((point) => [point.x, point.y]));
       data.push(x.map((ts) => (byTs.has(ts) ? byTs.get(ts) : null)));
     });
     return data;

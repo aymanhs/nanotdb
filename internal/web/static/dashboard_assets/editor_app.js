@@ -833,11 +833,12 @@
     rebalanceSingleNumberRows
   } = window.NANOTDB_UTILS;
 
-  function renderUPlotChart(plotEl, widget, seriesMap) {
+  function renderUPlotChart(plotEl, widget, seriesItems) {
     if (typeof uPlot !== "function") {
       throw new Error("uPlot not loaded");
     }
-    const data = buildUPlotData(seriesMap);
+    const items = Array.isArray(seriesItems) ? seriesItems : [];
+    const data = buildUPlotData(items);
     if (!data[0] || data[0].length === 0) {
       const existing = chartState.get(widget.id);
       if (existing) {
@@ -847,11 +848,10 @@
       plotEl.innerHTML = "";
       return false;
     }
-    const labels = Object.keys(seriesMap);
     const seriesDefs = [{ label: "Time" }];
-    labels.forEach((label, idx) => {
+    items.forEach((item, idx) => {
       seriesDefs.push({
-        label,
+        label: item && item.label ? item.label : ("Series " + (idx + 1)),
         stroke: pickSeriesColor(idx),
         width: 2,
         spanGaps: true,
@@ -1052,18 +1052,20 @@
 
       const lookbackSec = parseDurationSeconds(widget.lookback || "1h", 3600);
       const step = widget.interval || "30s";
-      const seriesMap = {};
+      const seriesItems = new Array((widget.series || []).length);
       await Promise.all((widget.series || []).map(async (series, idx) => {
         const db = seriesDB(series, dashboardCfg);
         const metric = seriesMetric(series);
         if (!db || !metric) {
           return;
         }
-        const key = series.label || metric || ("Series " + (idx + 1));
         const points = await fetchRange(db, metric, lookbackSec, step);
-        seriesMap[key] = points.map((point) => ({ x: point.x, y: transformValue(series, point.y) })).filter((point) => Number.isFinite(point.y));
+        seriesItems[idx] = {
+          label: series.label || metric || ("Series " + (idx + 1)),
+          points: points.map((point) => ({ x: point.x, y: transformValue(series, point.y) })).filter((point) => Number.isFinite(point.y)),
+        };
       }));
-      const hasData = renderUPlotChart(plot, widget, seriesMap);
+      const hasData = renderUPlotChart(plot, widget, seriesItems.filter(Boolean));
       foot.textContent = hasData ? "preview updated " + new Date().toLocaleTimeString() : "no points";
       return;
     }

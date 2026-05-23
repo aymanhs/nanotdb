@@ -37,12 +37,13 @@
     rebalanceSingleNumberRows
   } = window.NANOTDB_UTILS;
 
-  function renderUPlotChart(plotEl, widget, seriesMap) {
+  function renderUPlotChart(plotEl, widget, seriesItems) {
     if (typeof uPlot !== "function") {
       throw new Error("uPlot not loaded");
     }
 
-    const data = buildUPlotData(seriesMap);
+    const items = Array.isArray(seriesItems) ? seriesItems : [];
+    const data = buildUPlotData(items);
     if (!data[0] || data[0].length === 0) {
       const existing = chartState.get(widget.id);
       if (existing) {
@@ -53,11 +54,10 @@
       return false;
     }
 
-    const labels = Object.keys(seriesMap);
     const seriesDefs = [{ label: "Time" }];
-    labels.forEach((label, idx) => {
+    items.forEach((item, idx) => {
       seriesDefs.push({
-        label,
+        label: item && item.label ? item.label : ("Series " + (idx + 1)),
         stroke: pickSeriesColor(idx),
         width: 2,
         spanGaps: true,
@@ -100,27 +100,6 @@
     return true;
   }
 
-  function rebalanceSingleNumberRows(containerEl) {
-    if (!containerEl) {
-      return;
-    }
-    const cards = Array.from(containerEl.children || []).filter((card) => card.classList.contains("widget-number"));
-    cards.forEach((card) => card.classList.remove("widget-number--full"));
-    const rows = new Map();
-    cards.forEach((card) => {
-      const top = Math.round(card.getBoundingClientRect().top);
-      if (!rows.has(top)) {
-        rows.set(top, []);
-      }
-      rows.get(top).push(card);
-    });
-    rows.forEach((rowCards) => {
-      if (rowCards.length === 1) {
-        rowCards[0].classList.add("widget-number--full");
-      }
-    });
-  }
-
   async function fetchLast(db, metric) {
   const payload = await fetchJSON(apiURL("/api/v1/query?db=" + encodeURIComponent(db) + "&query=" + encodeURIComponent(metric)));
     const item = payload.data && payload.data.result && payload.data.result[0];
@@ -155,9 +134,18 @@
 
   function createWidgetRefresher(run, refreshMs, controls, options) {
     const autoRefresh = !options || options.autoRefresh !== false;
+    const onError = options && typeof options.onError === "function" ? options.onError : null;
+    const onSuccess = options && typeof options.onSuccess === "function" ? options.onSuccess : null;
+    const widgetEl = options && options.widgetEl ? options.widgetEl : null;
     let inFlight = false;
     let paused = false;
     let timerId = null;
+
+    function setRefreshing(active) {
+      if (widgetEl) {
+        widgetEl.classList.toggle("widget-refreshing", Boolean(active));
+      }
+    }
 
     function updateControls() {
       if (controls.refreshBtn) {
@@ -175,11 +163,22 @@
         return;
       }
       inFlight = true;
+      setRefreshing(true);
       updateControls();
       try {
         await run();
+        if (onSuccess) {
+          onSuccess();
+        }
+      } catch (err) {
+        if (onError) {
+          onError(err);
+          return;
+        }
+        throw err;
       } finally {
         inFlight = false;
+        setRefreshing(false);
         updateControls();
       }
     }
@@ -219,7 +218,7 @@
     });
     updateControls();
 
-    return { start, stop, setPaused };
+    return { start, stop, setPaused, refreshNow: tick };
   }
 
   function createWidgetHeader(titleText, titleClassName) {
@@ -247,7 +246,15 @@
     controls.appendChild(pauseBtn);
     header.appendChild(title);
     header.appendChild(controls);
-    return { header, refreshBtn, pauseBtn };
+    return { header, controls, refreshBtn, pauseBtn };
+  }
+
+  function chartLookbackChoices(currentLookback) {
+    const values = ["15m", "1h", "6h", "12h", "24h", "7d"];
+    if (currentLookback && !values.includes(currentLookback)) {
+      values.push(currentLookback);
+    }
+    return values.sort((left, right) => parseDurationSeconds(left, 0) - parseDurationSeconds(right, 0));
   }
 
   function mountError(containerEl, message) {
@@ -265,6 +272,26 @@
     card.appendChild(title);
     card.appendChild(body);
     containerEl.appendChild(card);
+  }
+
+  function formatRefreshError(err) {
+    const message = err && err.message ? String(err.message) : String(err || "refresh failed");
+    return message.length > 160 ? message.slice(0, 157) + "..." : message;
+  }
+
+  function markWidgetRefreshError(card, foot, err) {
+    if (card) {
+      card.classList.add("widget-refresh-error");
+    }
+    if (foot) {
+      foot.textContent = "refresh failed: " + formatRefreshError(err);
+    }
+  }
+
+  function clearWidgetRefreshError(card) {
+    if (card) {
+      card.classList.remove("widget-refresh-error");
+    }
   }
 
   function createNumberWidget(widget, containerEl) {
@@ -317,10 +344,23 @@
     return { card, items, foot, refreshBtn: header.refreshBtn, pauseBtn: header.pauseBtn };
   }
 
-  function createChartWidget(widget, containerEl) {
+  function createChartWidget(widget, containerEl, currentLookback) {
     const card = document.createElement("article");
     card.className = "widget-chart";
     const header = createWidgetHeader(widget.title || widget.id, "chart-title");
+    const lookbackSelect = document.createElement("select");
+    lookbackSelect.className = "widget-control-select widget-lookback-select";
+    lookbackSelect.setAttribute("aria-label", "Chart lookback");
+    chartLookbackChoices(currentLookback).forEach((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      if (value === currentLookback) {
+        option.selected = true;
+      }
+      lookbackSelect.appendChild(option);
+    });
+    header.controls.insertBefore(lookbackSelect, header.refreshBtn);
     const plot = document.createElement("div");
     plot.className = "chart-plot";
     const foot = document.createElement("p");
@@ -330,7 +370,7 @@
     card.appendChild(plot);
     card.appendChild(foot);
     containerEl.appendChild(card);
-    return { plot, foot, refreshBtn: header.refreshBtn, pauseBtn: header.pauseBtn };
+    return { card, plot, foot, refreshBtn: header.refreshBtn, pauseBtn: header.pauseBtn, lookbackSelect };
   }
 
   function buildWidget(widget, containerEl, dashboardCfg) {
@@ -360,7 +400,15 @@
         applySeverityClass(els.card, classifySeverity(series || widget, point.value));
         els.foot.textContent = "updated " + new Date().toLocaleTimeString();
       };
-      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, { autoRefresh });
+      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, {
+        autoRefresh,
+        widgetEl: els.card,
+        onError: (err) => {
+          applySeverityClass(els.card, "none");
+          markWidgetRefreshError(els.card, els.foot, err);
+        },
+        onSuccess: () => clearWidgetRefreshError(els.card),
+      });
     }
 
     if (widget.type === "numbers") {
@@ -389,29 +437,47 @@
         }));
         els.foot.textContent = validCount > 0 ? "updated " + new Date().toLocaleTimeString() : "no values";
       };
-      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, { autoRefresh });
+      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, {
+        autoRefresh,
+        widgetEl: els.card,
+        onError: (err) => markWidgetRefreshError(els.card, els.foot, err),
+        onSuccess: () => clearWidgetRefreshError(els.card),
+      });
     }
 
     if (widget.type === "line_chart") {
-      const els = createChartWidget(widget, containerEl);
+      let currentLookback = widget.lookback || "1h";
+      const els = createChartWidget(widget, containerEl, currentLookback);
       const refresh = async () => {
-        const lookbackSec = parseDurationSeconds(widget.lookback || "1h", 3600);
+        const lookbackSec = parseDurationSeconds(currentLookback, 3600);
         const step = widget.interval || "30s";
-        const seriesMap = {};
+        const seriesItems = new Array((widget.series || []).length);
         await Promise.all((widget.series || []).map(async (series, idx) => {
           const db = seriesDB(series, dashboardCfg);
           const metric = seriesMetric(series);
           if (!db || !metric) {
             return;
           }
-          const key = series.label || metric || ("Series " + (idx + 1));
           const points = await fetchRange(db, metric, lookbackSec, step);
-          seriesMap[key] = points.map((p) => ({ x: p.x, y: transformValue(series, p.y) })).filter((p) => Number.isFinite(p.y));
+          seriesItems[idx] = {
+            label: series.label || metric || ("Series " + (idx + 1)),
+            points: points.map((p) => ({ x: p.x, y: transformValue(series, p.y) })).filter((p) => Number.isFinite(p.y)),
+          };
         }));
-        const hasData = renderUPlotChart(els.plot, widget, seriesMap);
-        els.foot.textContent = hasData ? "updated " + new Date().toLocaleTimeString() : "no points";
+        const hasData = renderUPlotChart(els.plot, widget, seriesItems.filter(Boolean));
+        els.foot.textContent = hasData ? "updated " + new Date().toLocaleTimeString() + " · " + currentLookback : "no points for " + currentLookback;
       };
-      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, { autoRefresh });
+      const refresher = createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, {
+        autoRefresh,
+        widgetEl: els.plot.parentElement,
+        onError: (err) => markWidgetRefreshError(els.plot.parentElement, els.foot, err),
+        onSuccess: () => clearWidgetRefreshError(els.plot.parentElement),
+      });
+      els.lookbackSelect.addEventListener("change", () => {
+        currentLookback = els.lookbackSelect.value || currentLookback;
+        void refresher.refreshNow();
+      });
+      return refresher;
     }
 
     mountError(containerEl, "unsupported widget type: " + widget.type);
@@ -423,6 +489,7 @@
     groupTimers.clear();
     groupPanes.forEach((pane, gid) => {
       pane.hidden = gid !== groupId;
+      pane.classList.remove("widgets-stage-in");
     });
     document.querySelectorAll(".group-tab, .accordion-header").forEach((el) => {
       el.classList.toggle("active", el.dataset.groupId === groupId);
@@ -432,6 +499,8 @@
     groupTimers.set(groupId, refreshers);
     const pane = groupPanes.get(groupId);
     if (pane) {
+      void pane.offsetWidth;
+      pane.classList.add("widgets-stage-in");
       requestAnimationFrame(() => rebalanceSingleNumberRows(pane));
     }
   }

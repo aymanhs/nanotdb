@@ -92,22 +92,6 @@ func readDashboardConfigRequest(req *http.Request) (DashboardConfigDocument, []s
 	return cfg, nil
 }
 
-func readDashboardConfigRequestFromBody(body io.Reader) (DashboardConfigDocument, []string) {
-	raw, err := io.ReadAll(io.LimitReader(body, 1<<20))
-	if err != nil {
-		return DashboardConfigDocument{}, []string{"failed to read request body"}
-	}
-	var cfg DashboardConfigDocument
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return DashboardConfigDocument{}, []string{"invalid dashboard config JSON: " + err.Error()}
-	}
-	normalizeDashboardConfig(&cfg)
-	if errs := validateDashboardConfig(cfg); len(errs) > 0 {
-		return DashboardConfigDocument{}, errs
-	}
-	return cfg, nil
-}
-
 func normalizeDashboardConfig(cfg *DashboardConfigDocument) {
 	if cfg.Groups == nil {
 		cfg.Groups = []DashboardGroup{}
@@ -163,6 +147,7 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			continue
 		}
 		widget := cfg.Widgets[widgetID]
+		lineChartLabels := make(map[string]int)
 		switch widget.Type {
 		case "number", "numbers":
 			if len(widget.Series) == 0 {
@@ -191,6 +176,14 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			if metric == "" && (measurement == "" || field == "") {
 				errs = append(errs, fmt.Sprintf("widget %q series[%d] must define metric or measurement+field", widgetID, idx))
 			}
+			if widget.Type == "line_chart" {
+				label := effectiveDashboardSeriesLabel(series, idx)
+				if prevIdx, exists := lineChartLabels[label]; exists {
+					errs = append(errs, fmt.Sprintf("widget %q has duplicate line chart label %q at series[%d] and series[%d]", widgetID, label, prevIdx, idx))
+				} else {
+					lineChartLabels[label] = idx
+				}
+			}
 			if series.Thresholds != nil {
 				direction := strings.TrimSpace(series.Thresholds.Direction)
 				hasWarning := series.Thresholds.Warning != nil
@@ -211,6 +204,21 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 	}
 
 	return errs
+}
+
+func effectiveDashboardSeriesLabel(series DashboardSeries, idx int) string {
+	if label := strings.TrimSpace(series.Label); label != "" {
+		return label
+	}
+	if metric := strings.TrimSpace(series.Metric); metric != "" {
+		return metric
+	}
+	measurement := strings.TrimSpace(series.Measurement)
+	field := strings.TrimSpace(series.Field)
+	if measurement != "" || field != "" {
+		return measurement + "." + field
+	}
+	return fmt.Sprintf("Series %d", idx+1)
 }
 
 func isValidDashboardDuration(value string) bool {

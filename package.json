@@ -1,0 +1,10 @@
+{
+  "name": "nanotdb-web-smoke",
+  "private": true,
+  "scripts": {
+    "test:web-smoke": "node scripts/web_smoke_test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.54.2"
+  }
+}

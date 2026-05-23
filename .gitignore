@@ -3,6 +3,7 @@ devdata-*/
 .tmp/
 test-data/
 .vscode/
+/node_modules/
 
 # Build artifacts
 /drip
