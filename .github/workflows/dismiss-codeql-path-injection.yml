@@ -1,0 +1,67 @@
+name: Dismiss CodeQL Path Injection
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '43 3 * * *'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dismiss-alerts:
+    name: Dismiss go/path-injection alerts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dismiss open go/path-injection alerts
+        env:
+          API_VERSION: 2022-11-28
+          COMMENT: Automatically dismissed by workflow: repository-wide false positive.
+          REPOSITORY: ${{ github.repository }}
+          RULE_ID: go/path-injection
+          TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          owner="${REPOSITORY%/*}"
+          repo="${REPOSITORY#*/}"
+          page=1
+          dismissed=0
+
+          while :; do
+            response="$({
+              curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "X-GitHub-Api-Version: ${API_VERSION}" \
+                "https://api.github.com/repos/${owner}/${repo}/code-scanning/alerts?state=open&tool_name=CodeQL&per_page=100&page=${page}"
+            })"
+
+            if [[ "$(jq 'length' <<<"${response}")" -eq 0 ]]; then
+              break
+            fi
+
+            mapfile -t alert_numbers < <(
+              jq -r --arg rule_id "${RULE_ID}" '.[] | select(.rule.id == $rule_id) | .number' <<<"${response}"
+            )
+
+            for alert_number in "${alert_numbers[@]}"; do
+              curl -fsSL \
+                -X PATCH \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "X-GitHub-Api-Version: ${API_VERSION}" \
+                "https://api.github.com/repos/${owner}/${repo}/code-scanning/alerts/${alert_number}" \
+                -d "{\"state\":\"dismissed\",\"dismissed_reason\":\"false positive\",\"dismissed_comment\":\"${COMMENT}\"}" \
+                >/dev/null
+
+              dismissed=$((dismissed + 1))
+            done
+
+            page=$((page + 1))
+          done
+
+          echo "Dismissed ${dismissed} open alerts for ${RULE_ID}."
