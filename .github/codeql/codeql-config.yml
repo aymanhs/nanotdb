@@ -1,5 +1,0 @@
-name: "nanotdb-codeql-config"
-
-query-filters:
-  - exclude:
-      id: go/path-injection
