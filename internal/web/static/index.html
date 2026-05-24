@@ -27,7 +27,7 @@
         Database
         <select id="dbSelect"></select>
       </label>
-      <label>
+      <label class="metric-picker-control">
         Metric Picker
         <div class="combo-row">
           <input id="metricInput" list="metricsOptions" placeholder="Type metric name" />
@@ -53,7 +53,20 @@
           <option value="5m">5m</option>
         </select>
       </label>
-      <button id="refreshBtn">Refresh Now</button>
+      <label class="refresh-control">
+        Refresh
+        <div class="refresh-row">
+          <button type="button" id="autoRefreshBtn" title="Pause auto refresh" aria-label="Pause auto refresh">⏸</button>
+          <select id="refreshIntervalSelect" aria-label="Auto refresh interval">
+            <option value="5">5s</option>
+            <option value="10" selected>10s</option>
+            <option value="15">15s</option>
+            <option value="30">30s</option>
+            <option value="60">1m</option>
+          </select>
+          <button type="button" id="refreshBtn" class="secondary-btn" title="Refresh now" aria-label="Refresh now">↻</button>
+        </div>
+      </label>
       <span id="status" aria-live="polite"></span>
 
       <div class="selected-row">

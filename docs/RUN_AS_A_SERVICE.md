@@ -9,6 +9,26 @@ It is based on the service templates already in the repo:
 
 Adjust paths and usernames for your machine.
 
+## Typical Edge Deployment
+
+One of the most common setups for NanoTDB is a Raspberry Pi or small Linux box
+running both services locally:
+
+- `nanotdb` stores the metrics, serves the dashboard, and exposes the query API.
+- `drip` collects host telemetry such as CPU, memory, disk, IO, network, load,
+  and temperature metrics.
+- the browser UI is served directly by NanoTDB on the same machine.
+- data stays local on disk unless you choose to export it somewhere else later.
+
+In practice, this gives you a very small observability stack:
+
+1. one box
+2. one TSDB binary
+3. one optional collector binary
+4. one local dashboard and editor
+
+That is the deployment model this guide is optimizing for.
+
 ## 1. Put the binary and config somewhere stable
 
 Example layout:

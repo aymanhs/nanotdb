@@ -4,34 +4,120 @@
   <img src="docs/NanoTDB.png" alt="NanoTDB mascot" width="220">
 </p>
 
-A small embedded time-series database for Raspberry Pi, edge devices, appliances,
-and other single-node systems where you want local metrics storage without a big
-stack behind it.
+Single-binary observability, time-series storage, and built-in dashboards for
+Raspberry Pi, edge devices, appliances, and local metrics.
 
-NanoTDB is built for the case where InfluxDB-, VictoriaMetrics-, or Prometheus-
-style tooling can feel heavier than the problem. It stores metrics as plain
-files under one directory, supports offline inspection with `nanocli`, and keeps
-rollups inside the engine instead of pushing you into extra services.
+Ingest metrics, query history, explore series, edit dashboards in the browser,
+and inspect data offline with `nanocli` without assembling a separate TSDB,
+dashboard service, or support stack.
 
-## Why NanoTDB
+Designed for the cases where a bigger observability stack is heavier than the
+problem: one machine, local files, clear operational behavior, and a UI that is
+ready as soon as the binary starts.
 
-- Plain files on disk: WAL, catalog, manifests, and partitioned `.dat` files are easy to inspect, back up, and reason about.
-- Small-system fit: designed for Raspberry Pi, edge nodes, and other resource-constrained hosts.
-- Offline workflow: `nanocli` can inspect data, export line protocol, inspect WAL files, and rebuild rollups without a running server.
-- Optional metric files: build query-optimized `metric-*.dat` files when raw ingest order is no longer the best shape for reads.
-- Engine-owned rollups: hourly or daily summaries live in the database workflow instead of a separate pipeline.
-- Operationally simple: no external dependencies at runtime, no separate index service, and retention maps cleanly to file deletion.
+**One binary. Local files. Built-in dashboard and editor. Offline CLI.**
 
-## Best Fit
+## Get Started Fast
 
-NanoTDB is a good fit when you want:
+1. Start `nanotdb` against a local data directory.
+2. Send line protocol directly or collect host metrics with `drip`.
+3. Open the built-in dashboard or Explore to see live metrics immediately.
+4. Use the in-browser editor or `nanocli` when you want to shape dashboards or inspect data offline.
 
-- Local metrics storage on one machine.
+## Typical Workflow
+
+Run `drip` on a Raspberry Pi or small Linux box to collect host metrics, store
+them locally in NanoTDB, inspect them live in the built-in dashboard or
+Explore, and use `nanocli` when you need offline inspection, export, recovery,
+or rollup operations.
+
+## Sample Footprint
+
+Actual live Raspberry Pi data:
+
+- 84 metrics collected every 10 seconds
+- About 700,000 samples per day
+
+| Day | Metrics | Points | Metric file size | Coverage |
+|---|---:|---:|---:|---|
+| 2026-05-22 | 83 | 693,091 | 757 KB | 24h |
+| 2026-05-23 | 83 | 717,036 | 935 KB | 24h |
+
+
+<figure align="center">
+  <img src="docs/nano-dashboard.png" alt="NanoTDB dashboard showing CPU and memory widgets">
+  <figcaption><em>Mobile-friendly dashboard showing a compact live operational view.</em></figcaption>
+</figure>
+
+<figure align="center">
+  <img src="docs/dashboard-wide.png" alt="NanoTDB wide desktop dashboard layout" width="900">
+  <figcaption><em>Wide desktop dashboard layout for larger operational views.</em></figcaption>
+</figure>
+
+<figure align="center">
+  <img src="docs/explore.png" alt="NanoTDB Explore view with metric picker and live chart" width="440">
+  <figcaption><em>Explore for ad hoc metric lookup and charting.</em></figcaption>
+</figure>
+
+<figure align="center">
+  <img src="docs/dashboard-editor.png" alt="NanoTDB dashboard editor" width="440">
+  <figcaption><em>In-browser dashboard editor for groups, widgets, series, preview, validation, and save.</em></figcaption>
+</figure>
+
+### Product Tour
+
+- Dashboard: mobile-friendly live CPU, memory, disk, and sensor-style widgets from one local NanoTDB instance.
+- Dashboard Wide: a wider desktop dashboard layout for broader operational views on larger screens.
+- Explore: ad hoc metric selection with a live chart and last-value cards for long metric names and quick drill-down.
+- Dashboard Editor: in-browser editing for groups, widgets, series, preview, validation, and save.
+
+## Everything In One Binary
+
+- Metric ingest API for local applications, devices, and collectors.
+- Built-in dashboard for live operational views on both mobile-width and desktop-width layouts.
+- Built-in dashboard editor for in-browser dashboard authoring.
+- Explore view for ad hoc metric lookup and charting.
+- Engine inspector for operational state, files, runtime, and settings.
+- Offline CLI tools for inspect, export, import, recover, and rollup workflows.
+- Rollups and query-optimized metric files without adding separate services.
+
+## When Simpler Wins
+
+| Question | NanoTDB | Bigger stack |
+|---|---|---|
+| Single Raspberry Pi or edge box? | One binary, local files, built-in dashboard | Usually multiple services and more moving parts |
+| Need local observability first? | Storage, UI, CLI, and rollups are already together | Often starts with separate TSDB + dashboard + supporting services |
+| Want to inspect everything on disk? | WAL, manifests, catalog, and data files stay understandable | More layers and components between writes and storage |
+| Need huge fleet-scale cardinality? | Not the target | Usually the better fit |
+
+## Why Teams Pick It
+
+- One deployable binary: ingest, query, dashboard, Explore, editor, and local operations ship together.
+- Fast path to visibility: start writing metrics and open a usable dashboard immediately instead of assembling a separate stack first.
+- Built for small systems: a strong fit for Raspberry Pi, edge nodes, appliances, and local application metrics.
+- Files you can inspect: WAL, catalog, manifests, raw partitions, and metric files stay understandable on disk.
+- Offline by default: `nanocli` lets you inspect, export, recover, and compare data without a running server.
+- Read-optimized when needed: optional metric files and built-in rollups improve read paths without adding extra services.
+- Operationally boring: no runtime dependency chain, no separate dashboard service, and retention maps cleanly to file deletion.
+
+## Best For
+
+| Good fit | Use something larger |
+|---|---|
+| Single-binary observability on one machine | Distributed or horizontally scaled deployments |
+| Raspberry Pi, edge nodes, appliances, and local app metrics | Large fleets and high-cardinality multi-tenant workloads |
+| Hundreds of metrics you want to keep local and inspect directly | Broader ecosystems where many external integrations matter more than simplicity |
+| Built-in dashboard plus offline CLI workflow | Systems that need looser ordering guarantees or broader platform features |
+
+NanoTDB fits best when you want:
+
+- Single-binary observability on one machine.
+- Local metrics storage with a built-in dashboard.
 - Something you can understand from the filesystem.
 - A TSDB for hundreds of metrics, not huge multi-tenant cardinality.
 - A small self-hosted stack for sensors, host telemetry, appliances, or embedded apps.
 
-## Not A Fit
+## Not Built For
 
 NanoTDB is not trying to be:
 
@@ -40,20 +126,22 @@ NanoTDB is not trying to be:
 - A system that accepts arbitrary out-of-order writes.
 - A system that hides its durability tradeoffs behind marketing language.
 
-## Use Cases
+## Common Uses
 
 ### Raspberry Pi and edge host telemetry
 
 NanoTDB is a strong fit for small Linux systems where you want to keep metrics
 local, survive restart, and avoid wearing out SD storage with unnecessarily
 heavy write patterns. Pair it with `drip` when you want CPU, memory, disk, IO,
-network, load, one-wire, or SD write probe metrics on one box.
+network, load, one-wire, or SD write probe metrics on one box, then view them
+through the built-in dashboard without standing up a second service.
 
 ### Local app metrics without a bigger stack
 
 If you have one appliance, one embedded app, or one self-hosted node, NanoTDB
-gives you metric writes, queries, rollups, and offline inspection without
-standing up a larger metrics platform just to answer simple history questions.
+gives you metric writes, queries, rollups, dashboarding, and offline inspection
+without standing up a larger metrics platform just to answer simple history
+questions.
 
 ### Sensor retention you can inspect directly
 
@@ -76,7 +164,7 @@ Start here:
 
 - [Hello World](docs/HELLO_WORLD.md) for the fastest copy/paste path.
 - [Getting Started](GETTING_STARTED.md) for installation, examples, and a longer guided tour.
-- [Dashboard](docs/DASHBOARD.md) for the built-in UI, dashboard.json, and editable web assets.
+- [Dashboard](docs/DASHBOARD.md) for the built-in UI, dashboard.json, and dashboard/editor workflow.
 - [Metric Files](docs/METRIC_FILES.md) for query-optimized metric storage, config, inspection, and standalone benchmarking.
 - [Run As A Service](docs/RUN_AS_A_SERVICE.md) for a brief systemd setup path.
 - [Glossary](docs/GLOSSARY.md) for the canonical meaning of database, metric, sample, WAL, and related terms.
@@ -104,7 +192,8 @@ curl "http://localhost:8428/api/v1/query?query=demo/room.temp"
 ```
 
 That flow is the point of NanoTDB: start one binary, write a few metrics, query
-them back, and inspect the local files without standing up anything else.
+them back, inspect the local files, and serve a local dashboard without
+standing up anything else.
 
 For the built-in browser UI and dashboard customization, see [docs/DASHBOARD.md](docs/DASHBOARD.md).
 

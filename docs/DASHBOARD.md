@@ -4,6 +4,37 @@ NanoTDB includes a lightweight browser UI served by the `internal/web` package.
 The UI stays thin on the server side and does its rendering and refresh behavior
 in the browser.
 
+The dashboard is mobile-friendly and works for both narrow phone-width layouts
+and wider desktop-style layouts.
+
+## Screenshots
+
+### Dashboard (Mobile-Friendly)
+
+![NanoTDB dashboard showing CPU and memory widgets](nano-dashboard.png)
+
+> Caption: Compact mobile-width dashboard for quick CPU, memory, disk, and sensor checks.
+
+### Dashboard (Wide Desktop Layout)
+
+![NanoTDB wide desktop dashboard layout](dashboard-wide.png)
+
+> Caption: Wider desktop dashboard layout for broader operational views and denser widget placement.
+
+### Explore
+
+![NanoTDB Explore view with metric picker and live chart](explore.png)
+
+> Caption: Ad hoc metric exploration with a wide metric picker, last-value cards, and a live chart.
+
+### Dashboard Editor
+
+![NanoTDB dashboard editor](dashboard-editor.png)
+
+> Caption: In-browser editor for groups, widgets, series, preview, validation, and save.
+
+In-browser editor for groups, widgets, series, preview, validation, and save.
+
 ## Pages
 
 - `/` and `/dashboard` serve the configurable dashboard.

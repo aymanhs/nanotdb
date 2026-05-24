@@ -13,6 +13,8 @@
   const selectedMetricsEl = document.getElementById("selectedMetrics");
   const windowSelect = document.getElementById("windowSelect");
   const stepSelect = document.getElementById("stepSelect");
+  const autoRefreshBtn = document.getElementById("autoRefreshBtn");
+  const refreshIntervalSelect = document.getElementById("refreshIntervalSelect");
   const refreshBtn = document.getElementById("refreshBtn");
   const statusEl = document.getElementById("status");
   const cards = document.getElementById("cards");
@@ -27,9 +29,46 @@
   let selectedMetricNames = [];
   let chartInstance = null;
   let lastSeriesByMetric = {};
+  let lastMetricOrder = [];
+  let autoRefreshEnabled = true;
+  let autoRefreshTimer = null;
+  let refreshInFlight = false;
+
+  const initialRefreshSeconds = Math.max(2, Number(cfg.refreshSeconds || 10));
 
   function setStatus(msg) {
-    statusEl.textContent = msg;
+    if (!statusEl) {
+      return;
+    }
+    statusEl.textContent = msg || "";
+    statusEl.classList.toggle("is-visible", Boolean(msg));
+  }
+
+  function syncRefreshControls(updateStatus) {
+    autoRefreshBtn.textContent = autoRefreshEnabled ? "⏸" : "▶";
+    autoRefreshBtn.title = autoRefreshEnabled ? "Pause auto refresh" : "Resume auto refresh";
+    autoRefreshBtn.setAttribute("aria-label", autoRefreshEnabled ? "Pause auto refresh" : "Resume auto refresh");
+    autoRefreshBtn.setAttribute("aria-pressed", autoRefreshEnabled ? "false" : "true");
+    refreshBtn.disabled = refreshInFlight;
+    if (updateStatus !== false) {
+      setStatus("");
+    }
+  }
+
+  function restartAutoRefreshTimer() {
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+    if (!autoRefreshEnabled) {
+      return;
+    }
+    const seconds = Math.max(2, Number(refreshIntervalSelect.value || initialRefreshSeconds));
+    autoRefreshTimer = setInterval(() => {
+      refreshAll().catch((err) => {
+        setStatus("Refresh failed: " + err.message);
+      });
+    }, seconds * 1000);
   }
 
   async function fetchJSON(url) {
@@ -149,17 +188,17 @@
       if (!result) {
         card.innerHTML =
           '<div class="metric">' + metric + '</div><div class="value">-</div><div class="ts">no data</div>';
-        cards.appendChild(card);
-        return;
+        return card;
       }
       const ts = Number(result.value[0]) * 1000;
       card.innerHTML =
         '<div class="metric">' + metric + "</div>" +
         '<div class="value">' + result.value[1] + "</div>" +
         '<div class="ts">' + new Date(ts).toLocaleString() + "</div>";
-      cards.appendChild(card);
+      return card;
     });
-    await Promise.all(jobs);
+    const renderedCards = await Promise.all(jobs);
+    renderedCards.forEach((card) => cards.appendChild(card));
   }
 
   async function loadSeries(db, metric, fromIso, toIso, step) {
@@ -185,28 +224,31 @@
     }
   }
 
-  function buildUPlotData(seriesByMetric) {
+  function buildUPlotData(seriesByMetric, metricOrder) {
     const timeSet = new Set();
-    Object.values(seriesByMetric).forEach((points) => {
-      (points || []).forEach((point) => timeSet.add(point.x));
+    metricOrder.forEach((metric) => {
+      const points = seriesByMetric[metric] || [];
+      points.forEach((point) => timeSet.add(point.x));
     });
 
     const x = Array.from(timeSet).sort((a, b) => a - b);
     const data = [x];
-    Object.keys(seriesByMetric).forEach((metric) => {
+    metricOrder.forEach((metric) => {
       const byTs = new Map((seriesByMetric[metric] || []).map((point) => [point.x, point.y]));
       data.push(x.map((ts) => (byTs.has(ts) ? byTs.get(ts) : null)));
     });
     return data;
   }
 
-  function drawChart(seriesByMetric) {
+  function drawChart(seriesByMetric, metricOrder) {
     lastSeriesByMetric = seriesByMetric;
+    lastMetricOrder = Array.isArray(metricOrder) ? metricOrder.slice() : [];
     if (typeof uPlot !== "function") {
       throw new Error("uPlot not loaded");
     }
 
-    const data = buildUPlotData(seriesByMetric);
+    const labels = lastMetricOrder.length ? lastMetricOrder.slice() : Object.keys(seriesByMetric);
+    const data = buildUPlotData(seriesByMetric, labels);
     if (!data[0] || data[0].length === 0) {
       destroyChart();
       chartEl.innerHTML = '<div class="chart-empty">No data in selected range</div>';
@@ -214,7 +256,6 @@
     }
 
     chartEl.innerHTML = "";
-    const labels = Object.keys(seriesByMetric);
     const series = [{ label: "Time" }];
     labels.forEach((label, idx) => {
       series.push({
@@ -250,34 +291,48 @@
   }
 
   async function refreshAll() {
+    if (refreshInFlight) {
+      return;
+    }
     const db = dbSelect.value;
     const metrics = selectedMetrics();
     if (!db || metrics.length === 0) {
       cards.innerHTML = "";
       lastSeriesByMetric = {};
+      lastMetricOrder = [];
       destroyChart();
-      drawChart({});
+      drawChart({}, []);
+      syncRefreshControls(false);
       return;
     }
 
+    refreshInFlight = true;
+    syncRefreshControls(false);
     setStatus("Refreshing...");
-    await renderLastValues(db, metrics);
+    try {
+      await renderLastValues(db, metrics);
 
-    const now = new Date();
-    const windowSec = Number(windowSelect.value || "3600");
-    const start = new Date(now.getTime() - windowSec * 1000);
-    const fromIso = start.toISOString();
-    const toIso = now.toISOString();
-    const step = stepSelect.value || "30s";
+      const now = new Date();
+      const windowSec = Number(windowSelect.value || "3600");
+      const start = new Date(now.getTime() - windowSec * 1000);
+      const fromIso = start.toISOString();
+      const toIso = now.toISOString();
+      const step = stepSelect.value || "30s";
 
-    const seriesByMetric = {};
-    await Promise.all(
-      metrics.map(async (m) => {
-        seriesByMetric[m] = await loadSeries(db, m, fromIso, toIso, step);
-      })
-    );
-    drawChart(seriesByMetric);
-    setStatus("Updated at " + new Date().toLocaleTimeString());
+      const seriesResults = await Promise.all(metrics.map((metric) => loadSeries(db, metric, fromIso, toIso, step)));
+      const seriesByMetric = {};
+      metrics.forEach((metric, idx) => {
+        seriesByMetric[metric] = seriesResults[idx];
+      });
+      drawChart(seriesByMetric, metrics);
+      syncRefreshControls(true);
+    } catch (err) {
+      setStatus("Refresh failed: " + err.message);
+      throw err;
+    } finally {
+      refreshInFlight = false;
+      syncRefreshControls(false);
+    }
   }
 
   dbSelect.addEventListener("change", async () => {
@@ -295,18 +350,29 @@
   });
   windowSelect.addEventListener("change", refreshAll);
   stepSelect.addEventListener("change", refreshAll);
+  autoRefreshBtn.addEventListener("click", () => {
+    autoRefreshEnabled = !autoRefreshEnabled;
+    restartAutoRefreshTimer();
+    syncRefreshControls(true);
+  });
+  refreshIntervalSelect.addEventListener("change", () => {
+    restartAutoRefreshTimer();
+    syncRefreshControls(true);
+  });
   refreshBtn.addEventListener("click", refreshAll);
   window.addEventListener("resize", () => {
     if (chartInstance) {
-      drawChart(lastSeriesByMetric);
+      drawChart(lastSeriesByMetric, lastMetricOrder);
     }
   });
 
   async function init() {
     try {
+      refreshIntervalSelect.value = String(initialRefreshSeconds);
+      syncRefreshControls(true);
       await loadDatabases();
       await refreshAll();
-      setInterval(refreshAll, Math.max(2, Number(cfg.refreshSeconds || 10)) * 1000);
+      restartAutoRefreshTimer();
     } catch (err) {
       setStatus("Failed to load dashboard: " + err.message);
     }

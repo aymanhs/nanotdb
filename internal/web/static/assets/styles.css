@@ -1,7 +1,7 @@
 .controls {
   padding: 14px;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   align-items: end;
 }
@@ -35,6 +35,40 @@ button:focus {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
+}
+
+.metric-picker-control {
+  grid-column: span 2;
+}
+
+.refresh-control {
+  grid-column: span 2;
+}
+
+.refresh-row {
+  display: grid;
+  grid-template-columns: 44px 76px 44px;
+  gap: 8px;
+  align-items: center;
+}
+
+#autoRefreshBtn,
+#refreshBtn {
+  min-width: 44px;
+  width: 44px;
+  height: 40px;
+  padding: 0;
+  font-size: 1.05rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#refreshIntervalSelect {
+  min-width: 0;
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .secondary-btn {
@@ -112,13 +146,17 @@ button:hover {
 #status {
   color: var(--muted);
   font-size: 0.82rem;
-  display: inline-flex;
+  display: none;
   align-items: center;
   min-height: 36px;
   padding: 0 10px;
   border: 1px dashed #4b5a73;
   border-radius: 9px;
   background: rgba(12, 18, 26, 0.35);
+}
+
+#status.is-visible {
+	display: inline-flex;
 }
 
 h2 {
@@ -169,8 +207,9 @@ h2 {
 .card .metric {
   font-size: 0.8rem;
   color: var(--muted);
-  text-transform: uppercase;
   letter-spacing: 0.03em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .card .value {
@@ -211,7 +250,13 @@ h2 {
 
 @media (max-width: 700px) {
   .controls { grid-template-columns: 1fr 1fr; }
-  label:nth-child(2) { grid-column: 1 / -1; }
+  .metric-picker-control,
+  .refresh-control {
+    grid-column: 1 / -1;
+  }
+  .refresh-row {
+    grid-template-columns: 1fr;
+  }
   .selected-row { grid-column: 1 / -1; }
   .section-head {
     flex-direction: column;
