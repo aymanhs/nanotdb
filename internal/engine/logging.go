@@ -72,9 +72,11 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 		WALMaxSegSize:         cfg.WAL.MaxSegmentSize,
 		WALFsyncPolicy:        cfg.WAL.FsyncPolicy,
 		Durability:            cfg.Durability.Profile,
-		MetricFilesEnabled:    cfg.Metrics.Enabled,
+		PreferMetricFiles:     true,
+		AutoCreateMetricFiles: cfg.Metrics.Enabled,
 		MetricFileCompression: cfg.Metrics.Compression,
 		MetricRawIngestAction: cfg.Metrics.RawIngestAction,
+		MetricTimeCacheSlots:  cfg.Metrics.TimeCacheSlots,
 		Logging:               cfg.Logging,
 		logger:                logger,
 		SyncDataFile:          syncData,
@@ -86,6 +88,7 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 		runtimes:              make(map[string]*dbRuntime),
 		stats:                 newEngineStatStore(),
 	}
+	configureMetricTimeFrameCacheSlotsV2(cfg.Metrics.TimeCacheSlots)
 	e.rollupAuto.Store(true)
 	for _, dbName := range cfg.Defaults.Databases {
 		dbName = strings.TrimSpace(dbName)
@@ -96,7 +99,7 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 			return nil, fmt.Errorf("create default database %q: %w", dbName, err)
 		}
 	}
-	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile, "metric_files_enabled", cfg.Metrics.Enabled, "metric_file_compression", cfg.Metrics.Compression, "metric_raw_ingest_action", cfg.Metrics.RawIngestAction)
+	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile, "metric_auto_create", cfg.Metrics.Enabled, "prefer_metric_files", true, "metric_file_compression", cfg.Metrics.Compression, "metric_raw_ingest_action", cfg.Metrics.RawIngestAction, "metric_time_cache_slots", cfg.Metrics.TimeCacheSlots)
 	return e, nil
 }
 

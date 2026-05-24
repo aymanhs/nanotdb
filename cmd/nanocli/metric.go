@@ -25,6 +25,7 @@ type metricBuildPartitionReport struct {
 type metricBuildReport struct {
 	RootDir         string                       `json:"root_dir"`
 	Database        string                       `json:"database"`
+	Format          string                       `json:"format"`
 	Codec           string                       `json:"codec"`
 	RawIngestAction string                       `json:"raw_ingest_action"`
 	Verified        bool                         `json:"verified"`
@@ -35,33 +36,34 @@ type metricBuildReport struct {
 	DurationMS      int64                        `json:"duration_ms"`
 }
 
-func runMetric(args []string) error {
+func runBuild(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: nanocli metric build --root <root-dir> --db <database> [--part <partition>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]")
+		return fmt.Errorf("usage: nanocli build metric --root <root-dir> --db <database> [--part <partition>] [--format <v2|v1>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]")
 	}
 	cmd := args[0]
 	args = args[1:]
 	switch cmd {
-	case "build":
+	case "metric":
 		return runMetricBuild(args)
 	default:
-		return fmt.Errorf("unknown metric command: %s", cmd)
+		return fmt.Errorf("unknown build command: %s", cmd)
 	}
 }
 
 func runMetricBuild(args []string) error {
-	fs := flag.NewFlagSet("metric build", flag.ContinueOnError)
+	fs := flag.NewFlagSet("build metric", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	rootDir := fs.String("root", "", "root data directory that contains engine.toml")
 	dbName := fs.String("db", "", "database name")
 	partition := fs.String("part", "", "optional partition key to build (for example 2026-05-03 or 2026-05)")
+	format := fs.String("format", "v2", "metric file format to build: v2 (default) or v1")
 	codecName := fs.String("codec", "", "optional metric file compression override")
 	rawAction := fs.String("raw-ingest-action", "", "optional raw ingest action override: keep, rename, or delete")
 	verify := fs.Bool("verify", false, "compare source raw and metric files after build")
 	jsonOut := fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli metric build --root <root-dir> --db <database> [--part <partition>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]")
+		return fmt.Errorf("usage: nanocli build metric --root <root-dir> --db <database> [--part <partition>] [--format <v2|v1>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]")
 	}
 
 	ctx, err := resolveDBContext(*rootDir, *dbName)
@@ -75,6 +77,10 @@ func runMetricBuild(args []string) error {
 	}
 	if len(partitions) == 0 {
 		return fmt.Errorf("no data-*.dat or raw-*.dat partitions found under %s", ctx.DatabaseDir)
+	}
+	buildFormat := strings.ToLower(strings.TrimSpace(*format))
+	if buildFormat != "v1" && buildFormat != "v2" {
+		return fmt.Errorf("invalid --format %q (expected v1 or v2)", *format)
 	}
 
 	eng, err := engine.OpenEngine(ctx.RootDir, 0)
@@ -104,6 +110,7 @@ func runMetricBuild(args []string) error {
 	report := metricBuildReport{
 		RootDir:         ctx.RootDir,
 		Database:        ctx.Database,
+		Format:          buildFormat,
 		Codec:           eng.MetricFileCompression,
 		RawIngestAction: eng.MetricRawIngestAction,
 		Verified:        *verify,
@@ -116,7 +123,13 @@ func runMetricBuild(args []string) error {
 		if err != nil {
 			return err
 		}
-		metricPath, err := eng.BuildMetricFileV1(ctx.Database, part)
+		var metricPath string
+		switch buildFormat {
+		case "v1":
+			metricPath, err = eng.BuildMetricFileV1(ctx.Database, part)
+		case "v2":
+			metricPath, err = eng.BuildMetricFile(ctx.Database, part)
+		}
 		if err != nil {
 			return fmt.Errorf("build metric partition %s: %w", part, err)
 		}
@@ -125,8 +138,15 @@ func runMetricBuild(args []string) error {
 			return err
 		}
 		if *verify {
-			if err := eng.CompareDataAndMetricPartitionV1(ctx.Database, part); err != nil {
-				return fmt.Errorf("verify metric partition %s: %w", part, err)
+			var verifyErr error
+			switch buildFormat {
+			case "v1":
+				verifyErr = eng.CompareDataAndMetricPartitionV1(ctx.Database, part)
+			case "v2":
+				verifyErr = eng.CompareDataAndMetricPartition(ctx.Database, part)
+			}
+			if verifyErr != nil {
+				return fmt.Errorf("verify metric partition %s: %w", part, verifyErr)
 			}
 		}
 		report.Partitions = append(report.Partitions, metricBuildPartitionReport{
@@ -147,7 +167,7 @@ func runMetricBuild(args []string) error {
 	return ow.emit(report, func(w io.Writer) {
 		fmt.Fprintf(w, "Metric build for %s\n", report.Database)
 		fmt.Fprintf(w, "Root: %s\n", report.RootDir)
-		fmt.Fprintf(w, "codec=%s raw_ingest_action=%s partitions=%d duration_ms=%d\n", report.Codec, report.RawIngestAction, report.PartitionCount, report.DurationMS)
+		fmt.Fprintf(w, "format=%s codec=%s raw_ingest_action=%s partitions=%d duration_ms=%d\n", report.Format, report.Codec, report.RawIngestAction, report.PartitionCount, report.DurationMS)
 		rows := make([][]string, 0, len(report.Partitions))
 		for _, part := range report.Partitions {
 			ratio := "-"

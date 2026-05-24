@@ -140,7 +140,7 @@ func TestOpenEngineCreatesConfigFiles(t *testing.T) {
 
 func TestOpenEngineReadsEngineConfig(t *testing.T) {
 	root := t.TempDir()
-	cfg := []byte("[wal]\nmax_segment_size = 777777\nfsync_policy = \"always\"\n\n[stats]\nenabled = false\ninterval = \"5s\"\n\n[metrics]\nenabled = true\ncompression = \"zstd_fastest\"\nraw_ingest_action = \"rename\"\n\n[defaults]\ndatabases = [\"prod\"]\n")
+	cfg := []byte("[wal]\nmax_segment_size = 777777\nfsync_policy = \"always\"\n\n[stats]\nenabled = false\ninterval = \"5s\"\n\n[metrics]\nenabled = true\ncompression = \"zstd_fastest\"\nraw_ingest_action = \"rename\"\ntime_cache_slots = 64\n\n[defaults]\ndatabases = [\"prod\"]\n")
 	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
 		t.Fatalf("write engine.toml failed: %v", err)
 	}
@@ -163,14 +163,20 @@ func TestOpenEngineReadsEngineConfig(t *testing.T) {
 	if e.StatsInterval != 5*time.Second {
 		t.Fatalf("stats interval mismatch: got=%s want=5s", e.StatsInterval)
 	}
-	if !e.MetricFilesEnabled {
-		t.Fatalf("metric files enabled mismatch: got=%t want=%t", e.MetricFilesEnabled, true)
+	if !e.PreferMetricFiles {
+		t.Fatalf("prefer metric files mismatch: got=%t want=%t", e.PreferMetricFiles, true)
+	}
+	if !e.AutoCreateMetricFiles {
+		t.Fatalf("auto-create metric files mismatch: got=%t want=%t", e.AutoCreateMetricFiles, true)
 	}
 	if e.MetricFileCompression != CompressionCodecZstdFastestName {
 		t.Fatalf("metric file compression mismatch: got=%q want=%q", e.MetricFileCompression, CompressionCodecZstdFastestName)
 	}
 	if e.MetricRawIngestAction != MetricRawIngestActionRename {
 		t.Fatalf("metric raw ingest action mismatch: got=%q want=%q", e.MetricRawIngestAction, MetricRawIngestActionRename)
+	}
+	if e.MetricTimeCacheSlots != 64 {
+		t.Fatalf("metric time cache slots mismatch: got=%d want=%d", e.MetricTimeCacheSlots, 64)
 	}
 	if len(e.Logging.Loggers) != 1 {
 		t.Fatalf("logger count mismatch: got=%d want=1", len(e.Logging.Loggers))

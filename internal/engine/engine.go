@@ -144,6 +144,7 @@ type EngineConfigMetrics struct {
 	Enabled         bool   `toml:"enabled"`
 	Compression     string `toml:"compression"`
 	RawIngestAction string `toml:"raw_ingest_action"`
+	TimeCacheSlots  int    `toml:"time_cache_slots"`
 }
 
 type EngineConfigLogging struct {
@@ -200,9 +201,11 @@ type Engine struct {
 	WALMaxSegSize         int64
 	WALFsyncPolicy        string
 	Durability            string
-	MetricFilesEnabled    bool
+	PreferMetricFiles     bool
+	AutoCreateMetricFiles bool
 	MetricFileCompression string
 	MetricRawIngestAction string
+	MetricTimeCacheSlots  int
 	Logging               EngineConfigLogging
 	logger                *slog.Logger
 	SyncDataFile          bool
@@ -282,6 +285,7 @@ func defaultEngineConfig(walMaxSegSize int64) EngineConfig {
 			Enabled:         false,
 			Compression:     CompressionCodecZstdFastestName,
 			RawIngestAction: MetricRawIngestActionKeep,
+			TimeCacheSlots:  metricTimeFrameCacheMaxEntriesV2,
 		},
 		Logging: EngineConfigLogging{Loggers: []EngineConfigLogger{{
 			Output: "console",
@@ -391,6 +395,12 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	cfg.Metrics.RawIngestAction = strings.ToLower(strings.TrimSpace(cfg.Metrics.RawIngestAction))
 	if !isValidMetricRawIngestAction(cfg.Metrics.RawIngestAction) {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.raw_ingest_action: %q", cfg.Metrics.RawIngestAction)
+	}
+	if cfg.Metrics.TimeCacheSlots <= 0 {
+		cfg.Metrics.TimeCacheSlots = def.Metrics.TimeCacheSlots
+	}
+	if cfg.Metrics.TimeCacheSlots <= 0 {
+		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.time_cache_slots: must be > 0")
 	}
 	loggingCfg, err := normalizeLoggingConfig(cfg.Logging, def.Logging)
 	if err != nil {
@@ -1317,7 +1327,7 @@ func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, str
 			continue
 		}
 		lastPath = path
-		if e.MetricFilesEnabled {
+		if e.PreferMetricFiles {
 			metricPath := filepath.Join(db.RootDataDir, "metric-"+part+".dat")
 			if err := collectMetricFromMetricFile(database, metric, entry, metricPath, fromTS, toTS, stride, &count, fn); err == nil {
 				// metric frames processed, skip raw file to avoid double counting
@@ -1773,6 +1783,7 @@ func (e *Engine) flushStatsToInternal(ts Timestamp) {
 func (e *Engine) captureRuntimeStats() {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
+	cacheStats := metricTimeFrameCacheStatsSnapshotV2()
 	e.stats.set("runtime/goroutines", float64(runtime.NumGoroutine()))
 	e.stats.set("runtime/heap_alloc_bytes", float64(mem.HeapAlloc))
 	e.stats.set("runtime/heap_inuse_bytes", float64(mem.HeapInuse))
@@ -1783,6 +1794,12 @@ func (e *Engine) captureRuntimeStats() {
 	e.stats.set("runtime/next_gc_bytes", float64(mem.NextGC))
 	e.stats.set("runtime/num_gc", float64(mem.NumGC))
 	e.stats.set("runtime/last_gc_unix_ns", float64(mem.LastGC))
+	e.stats.set("metric_file/time_cache_entries", float64(cacheStats.Entries))
+	e.stats.set("metric_file/time_cache_bytes", float64(cacheStats.Bytes))
+	e.stats.set("metric_file/time_cache_max_entries", float64(cacheStats.MaxEntries))
+	e.stats.set("metric_file/time_cache_hits", float64(cacheStats.Hits))
+	e.stats.set("metric_file/time_cache_misses", float64(cacheStats.Misses))
+	e.stats.set("metric_file/time_cache_evictions", float64(cacheStats.Evictions))
 	if mem.NumGC > 0 {
 		idx := (mem.NumGC - 1) % uint32(len(mem.PauseNs))
 		e.stats.set("runtime/last_gc_pause_ns", float64(mem.PauseNs[idx]))
@@ -1921,6 +1938,11 @@ func sealDay(e *Engine, db *Database, rt *dbRuntime, dbName, day string, nowTS T
 		return err
 	}
 	e.captureWALStats(db, dbName)
+	if e != nil && e.AutoCreateMetricFiles {
+		if _, err := e.buildMetricFileFromSealedPartition(db, rt, day); err != nil {
+			e.logInfo("metric file auto-build failed", "database", dbName, "partition", day, "error", err)
+		}
+	}
 	rt.sealedDays[day] = struct{}{}
 	cleanupRetention(db, rt.info.RetentionDays, nowTS)
 	return nil

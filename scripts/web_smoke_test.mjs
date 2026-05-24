@@ -53,7 +53,7 @@ async function writeFixture(rootDir, port) {
         interval: "1m",
         series: [
           { label: "CPU", metric: "temp.cpu" },
-          { label: "CPU", metric: "temp.gpu" },
+          { label: "GPU", metric: "temp.gpu" },
         ],
       },
     },
@@ -95,7 +95,9 @@ function uPlotStubJS() {
   return `
     window.__uPlotSeriesLabels = [];
     window.__uPlotData = null;
+    window.__uPlotCreateCount = 0;
     window.uPlot = function(opts, data, el) {
+      window.__uPlotCreateCount += 1;
       window.__uPlotSeriesLabels = (opts.series || []).slice(1).map(function(series) { return series.label; });
       window.__uPlotData = data;
       const legend = document.createElement('div');
@@ -186,29 +188,51 @@ async function run() {
       );
     });
 
-    await dashboardPage.selectOption(".widget-lookback-select", "24h");
-    await dashboardPage.waitForFunction(() => {
-      const chartFoot = document.querySelector(".widget-chart .widget-foot");
-      return chartFoot && chartFoot.textContent && chartFoot.textContent.includes("24h");
-    });
-
-    const dashboardResult = await dashboardPage.evaluate(() => ({
-      refreshErrorText: document.querySelector(".widget-number .widget-foot")?.textContent || "",
-      refreshErrorClass: document.querySelector(".widget-number")?.classList.contains("widget-refresh-error") || false,
+    const readDashboardChartState = () => dashboardPage.evaluate(() => ({
       labels: Array.isArray(window.__uPlotSeriesLabels) ? window.__uPlotSeriesLabels.slice() : [],
       dataColumns: Array.isArray(window.__uPlotData) ? window.__uPlotData.length : 0,
+      createCount: Number(window.__uPlotCreateCount || 0),
       lookbackValue: document.querySelector(".widget-lookback-select")?.value || "",
       chartFoot: document.querySelector(".widget-chart .widget-foot")?.textContent || "",
+      refreshErrorText: document.querySelector(".widget-number .widget-foot")?.textContent || "",
+      refreshErrorClass: document.querySelector(".widget-number")?.classList.contains("widget-refresh-error") || false,
     }));
+
+    let dashboardResult = await readDashboardChartState();
+    if (dashboardResult.labels.length !== 2 || dashboardResult.labels[0] !== "CPU" || dashboardResult.labels[1] !== "GPU") {
+      throw new Error(`dashboard did not render expected initial chart labels: ${JSON.stringify(dashboardResult)}`);
+    }
+    if (dashboardResult.dataColumns !== 3) {
+      throw new Error(`dashboard chart did not build expected initial data columns: ${JSON.stringify(dashboardResult)}`);
+    }
+    const initialCreateCount = dashboardResult.createCount;
+
+    await dashboardPage.click(".widget-chart .widget-control-btn");
+    await dashboardPage.waitForFunction((prevCount) => Number(window.__uPlotCreateCount || 0) > prevCount, initialCreateCount);
+
+    dashboardResult = await readDashboardChartState();
+    if (dashboardResult.createCount <= initialCreateCount) {
+      throw new Error(`dashboard chart was not rebuilt on manual refresh: ${JSON.stringify(dashboardResult)}`);
+    }
+
+    const afterRefreshCreateCount = dashboardResult.createCount;
+
+    await dashboardPage.selectOption(".widget-lookback-select", "24h");
+    await dashboardPage.waitForFunction((prevCount) => {
+      const chartFoot = document.querySelector(".widget-chart .widget-foot");
+      return Number(window.__uPlotCreateCount || 0) > prevCount && chartFoot && chartFoot.textContent && chartFoot.textContent.includes("24h");
+    }, afterRefreshCreateCount);
+
+    dashboardResult = await readDashboardChartState();
 
     if (!dashboardResult.refreshErrorClass || !dashboardResult.refreshErrorText.includes("refresh failed")) {
       throw new Error(`dashboard did not surface per-widget refresh error: ${JSON.stringify(dashboardResult)}`);
     }
-    if (dashboardResult.labels.length !== 2 || dashboardResult.labels[0] !== "CPU" || dashboardResult.labels[1] !== "CPU") {
-      throw new Error(`dashboard did not preserve duplicate chart labels: ${JSON.stringify(dashboardResult)}`);
-    }
     if (dashboardResult.dataColumns !== 3) {
       throw new Error(`dashboard chart did not build expected data columns: ${JSON.stringify(dashboardResult)}`);
+    }
+    if (dashboardResult.createCount <= afterRefreshCreateCount) {
+      throw new Error(`dashboard chart was not rebuilt on lookback change: ${JSON.stringify(dashboardResult)}`);
     }
     if (dashboardResult.lookbackValue !== "24h" || !dashboardResult.chartFoot.includes("24h")) {
       throw new Error(`dashboard lookback control did not update chart state: ${JSON.stringify(dashboardResult)}`);

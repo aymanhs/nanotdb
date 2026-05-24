@@ -96,15 +96,22 @@ Recommended frame metadata fields:
 ### Query-optimized metric file (`metric-<partition>.dat`)
 - Read-optimized rewrite output for one partition file
 - Read-optimized layout: metric samples are grouped by metric instead of interleaved ingest order
-- Contains data identical to the source `data-<partition>.dat`, reordered into consolidated metric-local frames for faster metric scans and better compression
-- Built by `BuildMetricFileV1`, which flushes the target database, reads `data-<partition>.dat`, and writes `metric-<partition>.dat`
-- Query use is controlled by `engine.toml` via `[metrics].enabled`
+- Contains data identical to the source `data-<partition>.dat`, reordered for faster metric scans
+- Built by the default metric-file builder, which flushes the target database, reads `data-<partition>.dat`, and writes `metric-<partition>.dat`
+- QueryRange prefers metric files whenever they exist; `[metrics].enabled` controls auto-creation on partition seal, not query selection
 - Compression codec is selected from `engine.toml` via `[metrics].compression`
+- Shared `v2` time-frame cache sizing is selected from `engine.toml` via `[metrics].time_cache_slots`
 - Source raw ingest file handling after metric-file build is controlled by `[metrics].raw_ingest_action` with `keep|rename|delete`
-- `CompareDataAndMetricPartitionV1` is the correctness check: it verifies the raw data file and metric file produce the same per-metric sample stream
+- `CompareDataAndMetricPartition` is the default correctness check; explicit `V1` and `V2` compare helpers remain available for format-specific testing
 - Uses an explicit file-format version so future layout changes can be detected before reads
 
-Final binary format (`metric-<partition>.dat`, v1):
+Design status:
+- `v1` remains implemented for explicit comparison and regression checks
+- `v2` is the current default format for aligned, low-cardinality workloads such as `drip`
+- Real Pi measurements showed `v1` can be much larger than raw ingest because it rewrites one full timestamp vector per metric frame
+- The same Pi measurements also showed a shared-time design can be substantially smaller than both `v1` and the raw ingest file for these workloads
+
+Implemented binary format (`metric-<partition>.dat`, v1):
 - Endianness: little-endian for all integer fields
 - Time encoding: signed `int64` Unix nanoseconds (UTC)
 - Compression codec ids:
@@ -227,6 +234,203 @@ Reader note:
 - Builder creates the parent directory if needed and writes to `<path>.tmp` before rename.
 - After successful metric-file build, the source raw ingest file is either kept in place, renamed to `raw-<partition>.dat`, or deleted according to `[metrics].raw_ingest_action`.
 - Unknown `version`/`trailer_version` values are hard read failures.
+
+#### V1 format lessons
+
+- `v1` stores `times` plus `values` inside every metric-local frame.
+- For aligned workloads, this duplicates the same timestamp vector across many metrics.
+- Raw ingest pages compress repeated cross-metric timestamps very well because many metrics share the same wall-clock sample times inside the same compressed block.
+- `v1` loses that cross-metric compression locality by splitting each metric into an independent frame.
+- The measured Pi `drip` workload had no singleton timestamps in raw ingest; every unique timestamp was shared by many metrics, so duplicating times per metric is the dominant waste.
+
+#### Implemented binary format (`metric-<partition>.dat`, v2)
+
+`v2` keeps the same logical data as raw ingest, but separates shared timestamp vectors from metric value payloads.
+
+Goals:
+- store each shared timestamp vector once
+- let many metric frames reference the same time frame
+- keep per-frame decompression independent
+- keep range-query planning header-driven and index-driven
+- avoid a complex sparse encoding in the first pass
+
+File shape:
+- fixed file header
+- time frames
+- metric value frames
+- time-frame index payload
+- metric-frame index payload
+- fixed EOF footer
+
+Core design rule:
+- A metric frame never stores full timestamps directly.
+- A metric frame references one shared time frame by `time_frame_id`, plus a `time_offset` describing which slice of that shared timeline it uses.
+- Metric point count is derived from the decoded values payload length and `value_type`; it is not stored separately in `v2` metric metadata.
+- This handles the common case where most metrics use the same full timeline and a few metrics are late starters or shorter suffixes.
+
+Header reuse rule:
+- `v2` should reuse as much of the `v1` frame-header structure as practical so on-disk parsing stays familiar.
+- Time-frame headers and metric-frame headers should stay close to the existing 48-byte `v1` frame shape: magic, header length, codec id, primary identifiers, time range, payload lengths, reserved fields, and trailing header CRC.
+- The main semantic change is that `v2` metric frames replace duplicated timestamp payloads with a shared time-frame reference.
+
+##### V2 File Header
+
+The exact byte layout can still move, but the header must contain enough information to open indexes without scanning the whole file.
+
+Required header fields:
+- `magic`
+- `version = 2`
+- `header_len`
+- `flags`
+- `partition_kind`
+- `file_min_ts`
+- `file_max_ts`
+- `time_frame_count`
+- `metric_frame_count`
+- `time_index_offset`
+- `metric_index_offset`
+- header checksum
+
+##### V2 Time Frame
+
+A time frame stores one shared timestamp vector.
+
+Required frame metadata:
+- `frame_type = time`
+- `time_frame_id`
+- `codec_id`
+- `time_encoding`
+- `point_count`
+- `start_ts`
+- `end_ts`
+- `payload_len`
+- `decoded_len`
+- header checksum
+
+Recommended on-disk shape:
+- keep the same general field order as the `v1` metric frame header where practical
+- use one small `arg0/arg1` style area for `time_frame_id`-specific metadata rather than inventing a completely different header family
+
+Time frame payload:
+- one decoded timestamp vector for the frame
+- compressed as one independent block
+- initial `v2` does not require fancy timestamp encoding; raw `int64` timestamps compressed as a block are acceptable if that keeps the implementation simple
+- delta or delta-of-delta time encoding can be added later behind `time_encoding` if needed
+
+##### V2 Metric Frame
+
+A metric frame stores values only and references a shared time frame.
+
+Required frame metadata:
+- `frame_type = metric`
+- `metric_id`
+- `value_type`
+- `codec_id`
+- `time_frame_id`
+- `time_offset`
+- `start_ts`
+- `end_ts`
+- `payload_len`
+- `decoded_len`
+- header checksum
+
+Recommended on-disk shape:
+- keep the `v1` field ordering where practical: magic, header_len, codec_id, metric_id, value_type, reserved, `start_ts`, `end_ts`, then `v2`-specific reference fields, then payload lengths and CRC
+- `time_frame_id` and `time_offset` are the only new metric-reference fields required on disk for the first `v2`
+
+Metric frame payload:
+- decoded payload is scalar values only
+- no timestamps in the payload
+- compressed as one independent block
+- decoded point count is derived as `decoded_len / scalar_width(value_type)`
+
+Interpretation rule:
+- the metric frame uses timestamps from `time_frame[time_offset : time_offset+decoded_point_count]`
+- `decoded_point_count` must be an exact integer derived from the decoded payload length and metric value width
+- `start_ts` and `end_ts` must match the referenced slice of the time frame
+
+This is intentionally the first-pass sparse story for `v2`:
+- full alignment: many metrics reference the same time frame with `time_offset = 0`
+- late starter / short suffix: metric references the same time frame with non-zero `time_offset`
+- alternate aligned group: metric references a different shared time frame
+
+Non-goal for first `v2`:
+- no per-point presence bitmap or arbitrary scatter/gather timestamp references unless real data proves it is necessary
+
+##### V2 Indexes
+
+The footer area contains two independent index payloads.
+
+Time-frame index entry requirements:
+- `time_frame_id`
+- absolute frame offset
+- `point_count`
+- `start_ts`
+- `end_ts`
+- `payload_len`
+- `decoded_len`
+
+Metric-frame index entry requirements:
+- `metric_id`
+- absolute frame offset
+- `time_frame_id`
+- `time_offset`
+- `start_ts`
+- `end_ts`
+- `payload_len`
+- `decoded_len`
+
+Metric index note:
+- `v2` metric index entries should not duplicate metric `point_count`; readers derive it from `decoded_len` and `value_type`
+
+Reader rule:
+- metric range queries should reach metric frames through the metric index first, then resolve referenced time frames through the time index
+
+##### V2 Reader Model And Time-Frame Cache
+
+The reader should treat decoded time vectors as reusable shared state.
+
+Two cache layers are expected:
+- query-local cache: avoids decoding the same time frame twice during one query
+- process-wide bounded cache: reuses decoded time frames across repeated queries
+
+Recommended cache key:
+- `(file_identity, time_frame_id)`
+
+`file_identity` should be stable enough to prevent stale reuse after rebuilds, for example:
+- absolute path
+- file size
+- modification time
+
+Reader flow for metric range queries:
+1. Use the metric index to locate metric frames for the requested metric.
+2. For each metric frame, resolve `time_frame_id` through the time index.
+3. Load the decoded time vector from query-local cache, process cache, or disk decode.
+4. Derive metric point count from the decoded values payload length and `value_type`.
+5. Apply `time_offset` and derived point count to get the time slice for this metric frame.
+6. Binary-search the time slice for the requested range.
+7. Decode only the metric values payload and emit matching samples.
+
+Reader cache requirements:
+- cached decoded time vectors are immutable
+- cache must be bounded by entry count, byte size, or both
+- cache miss must not change correctness; it only affects decode cost
+- invalid or mismatched frame metadata must fail the read even if a cached time frame exists
+
+##### V2 Writer Rules
+
+- Builders must group metrics by identical time vectors when writing `v2`.
+- A metric frame may only reference one time frame.
+- Writers should prefer the largest shared time groups first, then place shorter aligned groups into separate time frames.
+- File writing stays temp + atomic rename.
+- Footer is written last; incomplete footer means the file is invalid.
+- Unknown `version` values are hard read failures.
+
+##### V2 Compatibility Rules
+
+- `v1` and `v2` readers must be selected by file header version.
+- Query behavior does not depend on how the metric file was built; once a readable metric file exists, QueryRange should prefer it.
+- `CompareDataAndMetricPartition*` style validation must still prove that raw ingest and metric files produce the same per-metric sample stream.
 
 ### Catalog file
 - Database-scoped catalog store
@@ -379,8 +583,9 @@ This maps config keys to runtime fields in `internal/engine/engine.go`.
 | `wal.max_segment_size` | `EngineConfig.WAL.MaxSegmentSize` | `Engine.WALMaxSegSize` | If `<= 0`, falls back to default (`64 MiB`) |
 | `wal.fsync_policy` | `EngineConfig.WAL.FsyncPolicy` | `Engine.WALFsyncPolicy` | Valid values: `segment`, `always` |
 | `durability.profile` | `EngineConfig.Durability.Profile` | `Engine.Durability`, plus sync policy | Valid values: `strict`, `balanced`, `throughput` |
-| `metrics.enabled` | `EngineConfig.Metrics.Enabled` | `Engine.MetricFilesEnabled` and `QueryRange` metric-file routing | Default `false` |
-| `metrics.compression` | `EngineConfig.Metrics.Compression` | `Engine.MetricFileCompression` and `BuildMetricFileV1` frame codec selection | Valid values: `s2`, `s2_better`, `zstd_fastest`, `zstd_default`; default `zstd_fastest` |
+| `metrics.enabled` | `EngineConfig.Metrics.Enabled` | `Engine.AutoCreateMetricFiles` sealed-partition auto-build toggle | QueryRange still prefers metric files whenever they exist; default `false` |
+| `metrics.compression` | `EngineConfig.Metrics.Compression` | `Engine.MetricFileCompression` and default metric-file build codec selection | Valid values: `s2`, `s2_better`, `zstd_fastest`, `zstd_default`; default `zstd_fastest` |
+| `metrics.time_cache_slots` | `EngineConfig.Metrics.TimeCacheSlots` | `Engine.MetricTimeCacheSlots` and shared `v2` decoded time-frame cache entry limit | Must be `> 0`; default `256` |
 | `metrics.raw_ingest_action` | `EngineConfig.Metrics.RawIngestAction` | `Engine.MetricRawIngestAction` and post-build raw-file handling | Valid values: `keep`, `rename`, `delete`; `rename` uses `raw-<partition>.dat` |
 | `stats.enabled` | `EngineConfig.Stats.Enabled` | `Engine.StatsEnabled` | Enables internal metrics emission |
 | `stats.interval` | `EngineConfig.Stats.Interval` | `Engine.StatsInterval` | Parsed with Go duration (`time.ParseDuration`) |

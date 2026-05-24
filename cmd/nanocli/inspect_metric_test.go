@@ -102,6 +102,12 @@ func TestBuildInspectMetricReport_ShowsCoalescedFrames(t *testing.T) {
 	if report.FileCount != 1 {
 		t.Fatalf("file count mismatch: got=%d want=1", report.FileCount)
 	}
+	if report.Files[0].Version != 1 {
+		t.Fatalf("version mismatch: got=%d want=1", report.Files[0].Version)
+	}
+	if report.Files[0].TimeFrames != 0 {
+		t.Fatalf("time frame count mismatch: got=%d want=0", report.Files[0].TimeFrames)
+	}
 	if report.TotalFrames != 2 {
 		t.Fatalf("total frames mismatch: got=%d want=2", report.TotalFrames)
 	}
@@ -197,5 +203,66 @@ func TestBuildInspectMetricReport_NonVerboseUsesPageInfosOnly(t *testing.T) {
 	}
 	if verboseReport.Files[0].ScanError != fmt.Sprintf("invalid frame magic at offset %d", infos[0].PageOffset) {
 		t.Fatalf("unexpected verbose scan error: %q", verboseReport.Files[0].ScanError)
+	}
+}
+
+func TestBuildInspectMetricReport_V2ShowsSharedTimeFrames(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	base := engine.Timestamp(time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC).UnixNano())
+	for i := 0; i < 4; i++ {
+		ts := base + engine.Timestamp(i*10)
+		if err := e.AddSample("prod", "cpu.temp", ts, float32(40+i)); err != nil {
+			t.Fatalf("AddSample cpu.temp failed: %v", err)
+		}
+		if err := e.AddSample("prod", "cpu.idle", ts, int32(80-i)); err != nil {
+			t.Fatalf("AddSample cpu.idle failed: %v", err)
+		}
+	}
+	partition := time.Unix(0, int64(base)).UTC().Format("2006-01-02")
+	if _, err := e.BuildMetricFileV2("prod", partition); err != nil {
+		t.Fatalf("BuildMetricFileV2 failed: %v", err)
+	}
+
+	ctx, err := resolveDBContext(root, "prod")
+	if err != nil {
+		t.Fatalf("resolveDBContext failed: %v", err)
+	}
+	report, err := buildInspectMetricReport(ctx, true)
+	if err != nil {
+		t.Fatalf("buildInspectMetricReport failed: %v", err)
+	}
+
+	if report.FileCount != 1 {
+		t.Fatalf("file count mismatch: got=%d want=1", report.FileCount)
+	}
+	if report.Files[0].Version != 2 {
+		t.Fatalf("version mismatch: got=%d want=2", report.Files[0].Version)
+	}
+	if report.Files[0].TimeFrames != 1 {
+		t.Fatalf("time frame count mismatch: got=%d want=1", report.Files[0].TimeFrames)
+	}
+	if report.Files[0].Frames != 2 {
+		t.Fatalf("metric frame count mismatch: got=%d want=2", report.Files[0].Frames)
+	}
+	if report.TotalPoints != 8 {
+		t.Fatalf("total points mismatch: got=%d want=8", report.TotalPoints)
+	}
+	if len(report.Files[0].FramesDetail) != 2 {
+		t.Fatalf("frame detail count mismatch: got=%d want=2", len(report.Files[0].FramesDetail))
+	}
+	for _, frame := range report.Files[0].FramesDetail {
+		if frame.PointCount != 4 {
+			t.Fatalf("expected frame point count 4, got %d", frame.PointCount)
+		}
 	}
 }

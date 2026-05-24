@@ -107,9 +107,9 @@ func runQuery(args []string) error {
 	switch strings.ToLower(strings.TrimSpace(*metricFiles)) {
 	case "", "config":
 	case "on":
-		eng.MetricFilesEnabled = true
+		eng.PreferMetricFiles = true
 	case "off":
-		eng.MetricFilesEnabled = false
+		eng.PreferMetricFiles = false
 	default:
 		return fmt.Errorf("invalid --metric-files %q (expected config, on, or off)", *metricFiles)
 	}

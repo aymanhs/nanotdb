@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aymanhs/nanotdb/internal/engine"
@@ -42,5 +43,15 @@ func TestParseGlobalLoggingArgsStripsExplicitLevel(t *testing.T) {
 	}
 	if len(args) != 3 || args[0] != "query" {
 		t.Fatalf("remaining args mismatch: got=%v", args)
+	}
+}
+
+func TestRunBuildRejectsUnknownSubcommand(t *testing.T) {
+	err := runBuild([]string{"mystery"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unknown build command") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

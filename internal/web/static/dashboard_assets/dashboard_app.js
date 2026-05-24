@@ -69,33 +69,31 @@
     const width = Math.max(plotEl.clientWidth || 0, 280);
     const height = Math.max(plotEl.clientHeight || 0, 220);
     const axisTarget = chartDisplayTarget(widget);
-    let instance = chartState.get(widget.id);
-
-    if (!instance) {
-      const isMobile = window.matchMedia("(max-width: 699px)").matches;
-      const opts = {
-        width,
-        height,
-        padding: isMobile ? [4, 4, 2, 2] : [8, 8, 4, 4],
-        scales: { x: { time: true } },
-        series: seriesDefs,
-        axes: [
-          { stroke: theme.muted, grid: { stroke: theme.border, width: 1 } },
-          {
-            stroke: theme.muted,
-            size: (u, vals) => yAxisSizeForValues(axisTarget, vals),
-            grid: { stroke: theme.border, width: 1 },
-            values: (u, vals) => vals.map((value) => (value == null ? "" : formatWidgetValue(axisTarget, value))),
-          },
-        ],
-        legend: { show: true, live: true, isolate: false },
-      };
-      instance = new uPlot(opts, data, plotEl);
-      chartState.set(widget.id, instance);
-    } else {
-      instance.setSize({ width, height });
-      instance.setData(data);
+    const isMobile = window.matchMedia("(max-width: 699px)").matches;
+    const opts = {
+      width,
+      height,
+      padding: isMobile ? [4, 4, 2, 2] : [8, 8, 4, 4],
+      scales: { x: { time: true } },
+      series: seriesDefs,
+      axes: [
+        { stroke: theme.muted, grid: { stroke: theme.border, width: 1 } },
+        {
+          stroke: theme.muted,
+          size: (u, vals) => yAxisSizeForValues(axisTarget, vals),
+          grid: { stroke: theme.border, width: 1 },
+          values: (u, vals) => vals.map((value) => (value == null ? "" : formatWidgetValue(axisTarget, value))),
+        },
+      ],
+      legend: { show: true, live: true, isolate: false },
+    };
+    const existing = chartState.get(widget.id);
+    if (existing) {
+      existing.destroy();
+      chartState.delete(widget.id);
     }
+    const instance = new uPlot(opts, data, plotEl);
+    chartState.set(widget.id, instance);
 
     return true;
   }

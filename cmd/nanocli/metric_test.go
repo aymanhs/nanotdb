@@ -53,6 +53,9 @@ raw_ingest_action = "keep"
 	if !strings.Contains(got, "codec=s2") {
 		t.Fatalf("expected codec override in output, got:\n%s", got)
 	}
+	if !strings.Contains(got, "format=v2") {
+		t.Fatalf("expected default v2 format in output, got:\n%s", got)
+	}
 	for _, partition := range []string{"2026-05-03", "2026-05-04"} {
 		if _, err := os.Stat(filepath.Join(root, "prod", "metric-"+partition+".dat")); err != nil {
 			t.Fatalf("metric file missing for %s: %v", partition, err)

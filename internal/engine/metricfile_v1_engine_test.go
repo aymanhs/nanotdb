@@ -386,9 +386,9 @@ func TestBuildMetricFileV1AppliesRawIngestAction(t *testing.T) {
 	}
 }
 
-func TestQueryRangePrefersMetricPartitionsWhenEnabled(t *testing.T) {
+func TestQueryRangePrefersMetricPartitionsWhenPresent(t *testing.T) {
 	root := t.TempDir()
-	cfg := []byte("[metrics]\nenabled = true\nraw_ingest_action = \"rename\"\n")
+	cfg := []byte("[metrics]\nraw_ingest_action = \"rename\"\n")
 	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
 		t.Fatalf("write engine.toml failed: %v", err)
 	}
@@ -438,6 +438,50 @@ func TestQueryRangePrefersMetricPartitionsWhenEnabled(t *testing.T) {
 		if sample.TS != wantTS {
 			t.Fatalf("sample %d timestamp mismatch: got=%d want=%d", i, sample.TS, wantTS)
 		}
+	}
+}
+
+func TestSealDayAutoBuildsMetricFileWhenEnabled(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[metrics]\nenabled = true\nraw_ingest_action = \"keep\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	day1 := Timestamp(time.Date(2023, 11, 14, 0, 0, 0, 0, time.UTC).UnixNano())
+	day2 := Timestamp(time.Date(2023, 11, 15, 0, 0, 0, 0, time.UTC).UnixNano())
+	day3 := Timestamp(time.Date(2023, 11, 16, 0, 0, 0, 0, time.UTC).UnixNano())
+
+	if err := e.AddSample("prod", "cpu.temp", day1+1, float32(41.25)); err != nil {
+		t.Fatalf("AddSample day1 failed: %v", err)
+	}
+	if err := e.AddSample("prod", "cpu.temp", day2+1, float32(42.25)); err != nil {
+		t.Fatalf("AddSample day2 failed: %v", err)
+	}
+	if err := e.AddSample("prod", "cpu.temp", day3+1, float32(43.25)); err != nil {
+		t.Fatalf("AddSample day3 failed: %v", err)
+	}
+
+	partition := dayKey(day1)
+	metricPath := filepath.Join(root, "prod", "metric-"+partition+".dat")
+	if _, err := os.Stat(metricPath); err != nil {
+		t.Fatalf("expected auto-built metric file for sealed partition: %v", err)
+	}
+	version, err := readMetricFrameVersion(metricPath)
+	if err != nil {
+		t.Fatalf("readMetricFrameVersion failed: %v", err)
+	}
+	if version != metricFileV2Version {
+		t.Fatalf("expected auto-built metric file version %d, got %d", metricFileV2Version, version)
+	}
+	if err := e.CompareDataAndMetricPartition("prod", partition); err != nil {
+		t.Fatalf("CompareDataAndMetricPartition failed for auto-built metric file: %v", err)
 	}
 }
 

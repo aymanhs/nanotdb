@@ -53,15 +53,21 @@ fsync_policy = "segment"
 profile = "strict"
 
 [metrics]
-# Enable metric-*.dat files for query routing. When false, QueryRange reads raw data-*.dat files only.
+# Automatically build metric-*.dat files when a partition is sealed out of the
+# active ingest window. QueryRange prefers metric-*.dat whenever they exist,
+# regardless of this flag.
 enabled = false
-# Compression codec used for query-optimized metric-*.dat files built by BuildMetricFileV1.
+# Compression codec used for query-optimized metric-*.dat files built by the default
+# metric-file writer (currently v2 shared-time metric files).
 # Valid values:
 # - "s2": fastest baseline block codec
 # - "s2_better": slower S2 encoder with better compression
 # - "zstd_fastest": faster Zstandard mode with better compression than s2 on metric payloads
 # - "zstd_default": default Zstandard level with highest compression of the built-in options
 compression = "zstd_fastest"
+# Number of decoded shared-time frames to keep in the in-process metric-file cache.
+# Larger values reduce re-decode work across repeated v2 queries at the cost of memory.
+time_cache_slots = 256
 # What to do with the source raw ingest file after building metric-*.dat:
 # - "keep": leave data-<partition>.dat in place
 # - "rename": move it to raw-<partition>.dat

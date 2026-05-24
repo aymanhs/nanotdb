@@ -54,8 +54,8 @@ func main() {
 		runErr = runRecover(args)
 	case "query":
 		runErr = runQuery(args)
-	case "metric":
-		runErr = runMetric(args)
+	case "build":
+		runErr = runBuild(args)
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return
@@ -87,7 +87,7 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  nanocli export --root <root-dir> --db <database> [--out <line-protocol-file>] [--json]")
 	fmt.Fprintln(w, "  nanocli compact --root <root-dir> --db <database> --part <partition> [--json]")
 	fmt.Fprintln(w, "  nanocli recover --root <root-dir> --db <database> --part <partition> --out <path> [--json]")
-	fmt.Fprintln(w, "  nanocli metric build --root <root-dir> --db <database> [--part <partition>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]")
+	fmt.Fprintln(w, "  nanocli build metric --root <root-dir> --db <database> [--part <partition>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]")
 	fmt.Fprintln(w, "  nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--metric-files <config|on|off>] [--format table|json]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Global logging flags:")

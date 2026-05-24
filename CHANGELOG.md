@@ -8,13 +8,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Metric-file `v2` shared-time format with version-aware readers, a dedicated `CompareDataAndMetricPartitionV2` checker, and shared decoded time-frame caching for query reuse.
+- Engine config support for `[metrics].time_cache_slots` plus internal cache metrics under `internal/nanotdb/metric_file/time_cache_*`.
+- Version-aware metric inspection so `nanocli inspect metric` can summarize and fully validate both legacy `v1` and default `v2` metric files.
 - Structured `slog` logging configuration via `[logging]` / `[[logging.logger]]`, plus file-only diagnostic logging controls for `nanocli` with `--log-file` and `--log-level`.
 - Task-oriented onboarding docs with a copy/paste Hello World guide, a dedicated architecture page, a brief systemd service guide, and glossary-linked terminology references.
 
 ### Changed
+- Metric-file builds now default to `v2` for sealed-partition auto-builds and `nanocli build metric`; legacy `v1` builds remain available only through explicit comparison flows such as `nanocli build metric --format v1`.
+- Metric-file verification and inspection paths are now format-aware, and metric-file docs/design docs were updated to reflect the shipped `v2` default workflow and cache configuration.
 - The main README now positions NanoTDB more clearly around edge and single-node use cases, WAL-backed recovery, SD-friendly storage, and fit-versus-tradeoff guidance instead of leading with internals.
 
 ### Fixed
+- Auto-built sealed metric files now validate through the default version-aware checker instead of assuming the legacy trailer format.
+- `nanocli inspect metric` no longer assumes `v1` page walkers when reading the default `v2` metric-file format.
 - WAL reset now flushes eligible non-current open day pages during ingest, fixing a case where a stale pre-midnight page could block WAL truncation after midnight and let the active WAL grow far larger than expected.
 - `nanocli inspect wal` now reports sane WAL start/duration timestamps for live current-era WAL files, avoiding misleading `1970-01-01` ranges in inspection output.
 
