@@ -7,23 +7,41 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-24
+
 ### Added
 - Metric-file `v2` shared-time format with version-aware readers, a dedicated `CompareDataAndMetricPartitionV2` checker, and shared decoded time-frame caching for query reuse.
 - Engine config support for `[metrics].time_cache_slots` plus internal cache metrics under `internal/nanotdb/metric_file/time_cache_*`.
 - Version-aware metric inspection so `nanocli inspect metric` can summarize and fully validate both legacy `v1` and default `v2` metric files.
 - Structured `slog` logging configuration via `[logging]` / `[[logging.logger]]`, plus file-only diagnostic logging controls for `nanocli` with `--log-file` and `--log-level`.
-- Task-oriented onboarding docs with a copy/paste Hello World guide, a dedicated architecture page, a brief systemd service guide, and glossary-linked terminology references.
+- Task-oriented onboarding docs with a copy/paste Hello World guide, a dedicated architecture page, a brief systemd service guide, glossary-linked terminology references, and expanded dashboard/editor/explore documentation.
 
 ### Changed
 - Metric-file builds now default to `v2` for sealed-partition auto-builds and `nanocli build metric`; legacy `v1` builds remain available only through explicit comparison flows such as `nanocli build metric --format v1`.
 - Metric-file verification and inspection paths are now format-aware, and metric-file docs/design docs were updated to reflect the shipped `v2` default workflow and cache configuration.
-- The main README now positions NanoTDB more clearly around edge and single-node use cases, WAL-backed recovery, SD-friendly storage, and fit-versus-tradeoff guidance instead of leading with internals.
+- The dashboard and Explore UI now use a more consistent refresh model, improved chart stability, wider metric selection, and more polished presentation.
+- The main README now positions NanoTDB more clearly around edge and single-node use cases, WAL-backed recovery, SD-friendly storage, real Raspberry Pi footprint examples, and fit-versus-tradeoff guidance instead of leading with internals.
 
 ### Fixed
 - Auto-built sealed metric files now validate through the default version-aware checker instead of assuming the legacy trailer format.
 - `nanocli inspect metric` no longer assumes `v1` page walkers when reading the default `v2` metric-file format.
 - WAL reset now flushes eligible non-current open day pages during ingest, fixing a case where a stale pre-midnight page could block WAL truncation after midnight and let the active WAL grow far larger than expected.
 - `nanocli inspect wal` now reports sane WAL start/duration timestamps for live current-era WAL files, avoiding misleading `1970-01-01` ranges in inspection output.
+
+## [1.2.0] - 2026-05-19
+
+### Added
+- Structured `slog`-based logging support for NanoTDB via `[logging]` / `[[logging.logger]]` configuration and shared engine logging infrastructure.
+- File-based diagnostic logging flags for `nanocli` through `--log-file` and `--log-level`.
+- New documentation pages for architecture, Hello World onboarding, and running NanoTDB as a service.
+
+### Changed
+- Startup, configuration, and getting-started docs were refreshed, including a broader README rewrite and bundled project artwork.
+- Default engine configuration and design docs were updated to document the new logging controls.
+
+### Fixed
+- WAL reset and data-file close handling now flush eligible non-current open day pages before truncation, preventing a stale pre-midnight page from blocking WAL cleanup and allowing WAL files to grow far beyond expectations.
+- Added test coverage around CLI logging flag parsing, engine logging setup, and WAL durability behavior.
 
 ## [1.1.2] - 2026-05-18
 
@@ -88,7 +106,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   https://github.com/aymanhs/nanotdb/releases
 - Detailed project history: this file (`CHANGELOG.md`)
 
-[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/aymanhs/nanotdb/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.2.0
 [1.1.2]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.2
 [1.1.1]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.0
