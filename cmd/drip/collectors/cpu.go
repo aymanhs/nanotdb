@@ -92,7 +92,7 @@ func (c *CPUCollector) Collect(ctx context.Context, ch chan<- Metric) {
 
 	if freq, ok := readCPUFreqKHz(); ok {
 		select {
-		case ch <- Metric{Name: "cpu.freq_khz", Value: int32(freq)}:
+		case ch <- Metric{Name: "cpu.freq_khz", Value: freq}:
 		case <-ctx.Done():
 			return
 		}
@@ -196,7 +196,7 @@ func readSystemUptimeSeconds() (int32, bool) {
 
 // readCPUFreqKHz reads the current CPU frequency for cpu0 from cpufreq sysfs.
 // Returns the frequency in kHz and true on success.
-func readCPUFreqKHz() (int64, bool) {
+func readCPUFreqKHz() (int32, bool) {
 	paths := []string{
 		"/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
 		"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq",
@@ -206,11 +206,14 @@ func readCPUFreqKHz() (int64, bool) {
 		if err != nil {
 			continue
 		}
-		v, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		v, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 32)
 		if err != nil {
 			continue
 		}
-		return v, true
+		if v < 0 {
+			continue
+		}
+		return int32(v), true
 	}
 	return 0, false
 }
