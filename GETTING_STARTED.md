@@ -522,14 +522,17 @@ Inspect query-optimized metric files:
 Build metric files for all discovered partitions with the configured codec and verify the result:
 
 ```bash
-./nanocli metric build --root ~/nanotdb-data --db home_sensors --verify
+./nanocli build metric --root ~/nanotdb-data --db home_sensors --verify
 ```
 
 Override the codec for one build without editing `engine.toml`:
 
 ```bash
-./nanocli metric build --root ~/nanotdb-data --db home_sensors --codec zstd_default --verify
+./nanocli build metric --root ~/nanotdb-data --db home_sensors --codec zstd_default --verify
 ```
+
+The default builder writes the current `v2` metric-file format. Use `--format v1`
+only if you want a direct comparison against the legacy layout.
 
 ### Export data to a file
 
@@ -553,12 +556,43 @@ Bulk-import data from a line-protocol file.
 ./nanocli query --root ~/nanotdb-data --db home_sensors --metric "living_room.*" --format table
 ```
 
+Aggregate queries are windowed range queries over exactly one matched metric:
+
+```bash
+./nanocli query \
+    --root ~/nanotdb-data \
+    --db home_sensors \
+    --metric '^living_room\.temp$' \
+    --start 2026-05-24T12:00:00Z \
+    --end 2026-05-24T13:00:00Z \
+    --aggregate min,max,sum,avg,count \
+    --window 5m \
+    --format table
+```
+
+Rules worth remembering:
+
+- supported aggregates are `min`, `max`, `sum`, `avg`, and `count`
+- aggregate queries require both `--aggregate` and `--window`
+- aggregate queries require `--start`; `--end` is optional
+- output timestamps are bucket ends, with edge buckets clipped to your requested range
+
 For diagnostics or benchmarking, force raw or metric-backed query routing regardless of config:
 
 ```bash
 ./nanocli query --root ~/nanotdb-data --db home_sensors --metric "living_room.*" --metric-files off --format json > /dev/null
 ./nanocli query --root ~/nanotdb-data --db home_sensors --metric "living_room.*" --metric-files on --format json > /dev/null
 ```
+
+The HTTP API exposes the same aggregate behavior on `query_range` using
+`aggregate=<csv>` and `window=<duration>`. Example:
+
+```bash
+curl "http://localhost:8428/api/v1/query_range?query=home_sensors/living_room.temp&start=2026-05-24T12:00:00Z&end=2026-05-24T13:00:00Z&aggregate=min,max,sum,avg,count&window=5m"
+```
+
+For aggregate HTTP queries, omit `step`; `query_range` rejects `step` when
+`aggregate` and `window` are used together.
 
 ### Standalone metric-file benchmarks
 

@@ -69,6 +69,10 @@ ingest. Existing older partitions are not retroactively rebuilt just because the
 flag changed; use `nanocli build metric` to backfill metric files for partitions
 that already exist on disk.
 
+The builder discovers both `data-<partition>.dat` and `raw-<partition>.dat`
+source files. That matters when `raw_ingest_action = "rename"`, because later
+rebuild or verification runs still work against the renamed raw source.
+
 Build all discovered partitions for one database:
 
 ```bash
@@ -101,6 +105,20 @@ Override codec or raw-file handling for one run without editing config:
 ```
 
 `--verify` runs the raw-vs-metric correctness comparison after each build. For the default path this is version-aware; for `--format v1` it uses the legacy v1 checker.
+
+## Query Routing And Tradeoffs
+
+Metric files change query layout, not the logical result stream.
+
+- `QueryRange` prefers `metric-*.dat` whenever it exists for a partition
+- if a metric file is missing, queries fall back to the raw `data-*.dat` or `raw-*.dat` source
+- `nanocli query --metric-files off` forces raw-only reads for diagnostics or benchmarks
+- `nanocli query --metric-files on` forces metric-file reads whenever available
+
+`v2` reduces one of `v1`'s main costs by storing shared time frames once per
+file instead of repeating one timestamp vector per metric frame. `v1` is still
+useful for controlled comparisons, but on interleaved real-world workloads it
+can be materially larger than the source raw partitions.
 
 ## Inspect Metric Files
 

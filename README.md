@@ -535,9 +535,11 @@ nanocli inspect wal --root <dir> --db <name> [--verbose] [--json]  — WAL inspe
 nanocli import --root <dir> --in <file.lp>  [--json]     — bulk import line-protocol file
 nanocli rollup --root <dir> [--db <source-db>] [--json]  — reset and recompute rollup destinations from source manifests
 nanocli export --root <dir> --db <name> [--out <file.lp>] — export database to line protocol (stdout when --out is omitted)
+nanocli build metric --root <dir> --db <name> [--part <partition>] [--format <v2|v1>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]
 
 nanocli query  --root <dir> --db <name> --metric <regex>
-               [--start <time>] [--end <time>] [--format table|json]
+               [--start <time>] [--end <time>] [--aggregate <list> --window <duration>]
+               [--metric-files <config|on|off>] [--format table|json]
 ```
 
 LP timestamps (import and exported files) accept / use: `YYYY-MM-DD HH:MM:SS.nnnnnnnnn` (UTC)
@@ -545,6 +547,27 @@ and also accept raw Unix nanoseconds on import.
 
 `--start` / `--end` accept RFC3339 strings, `YYYY-MM-DD [HH[:MM[:SS[.nnnnnnnnn]]]]`,
 or Unix timestamps (seconds or nanoseconds).
+
+Aggregate query notes:
+
+- supported aggregates are `min`, `max`, `sum`, `avg`, and `count`
+- aggregate queries require both `--aggregate` and `--window`
+- aggregate queries require `--start`; `--end` is optional and defaults to open-ended
+- aggregate queries must match exactly one metric after regex expansion
+- aggregate rows are emitted at bucket end timestamps; the first and last bucket are clipped to the requested range
+
+Examples:
+
+```bash
+nanocli build metric --root ~/nanotdb-data --db sensors --verify
+
+nanocli query --root ~/nanotdb-data --db sensors --metric '^temp\.out_dry$' \
+  --start 2026-05-24T12:00:00Z --end 2026-05-24T13:00:00Z \
+  --aggregate min,max,sum,avg,count --window 5m --format table
+
+nanocli query --root ~/nanotdb-data --db sensors --metric '^temp\.out_dry$' \
+  --start 2026-05-24T12:00:00Z --aggregate sum,count --window 5m --json
+```
 
 ### `drip` — metrics collector
 

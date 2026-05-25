@@ -15,6 +15,7 @@
     wal: walPane,
     runtime: runtimePane,
   };
+  const tabButtons = Array.from(document.querySelectorAll('.engine-tab'));
   let activeTab = "overview";
   let refreshTimer = null;
   let selectedDataFileByDB = Object.create(null);
@@ -176,10 +177,6 @@
         '</tr>';
     }).join('');
       return '<div class="table-wrap"><table><thead><tr><th>Path</th><th>Bytes</th><th>Frames</th><th>Records</th><th>Start</th><th>End</th><th>Compact</th><th>Status</th><th>Error</th></tr></thead><tbody>' + body + '</tbody></table></div>';
-  }
-
-  function renderToggle(name, checked, label) {
-    return '<label class="toggle-control"><input type="checkbox" class="toggle-input" data-toggle-name="' + escapeHTML(name) + '"' + (checked ? ' checked' : '') + ' /><span>' + label + '</span></label>';
   }
 
   function yesNo(value) {
@@ -674,12 +671,22 @@
     Object.keys(panes).forEach((key) => {
       panes[key].hidden = key !== name;
     });
-    document.querySelectorAll('.engine-tab').forEach((btn) => {
+    tabButtons.forEach((btn) => {
       const isActive = btn.dataset.tab === name;
       btn.classList.toggle('active', isActive);
       btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      btn.tabIndex = isActive ? 0 : -1;
     });
     refreshActiveTab();
+  }
+
+  function focusTab(offset) {
+    const currentIndex = tabButtons.findIndex((btn) => btn.dataset.tab === activeTab);
+    if (currentIndex < 0) return;
+    const nextIndex = (currentIndex + offset + tabButtons.length) % tabButtons.length;
+    const nextTab = tabButtons[nextIndex];
+    nextTab.focus();
+    activateTab(nextTab.dataset.tab);
   }
 
   function scheduleRefresh() {
@@ -695,8 +702,25 @@
 
   refreshBtn.addEventListener('click', refreshActiveTab);
   dbSelect.addEventListener('change', refreshActiveTab);
-  document.querySelectorAll('.engine-tab').forEach((btn) => {
+  tabButtons.forEach((btn) => {
     btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+    btn.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        focusTab(1);
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        focusTab(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        tabButtons[0].focus();
+        activateTab(tabButtons[0].dataset.tab);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        tabButtons[tabButtons.length - 1].focus();
+        activateTab(tabButtons[tabButtons.length - 1].dataset.tab);
+      }
+    });
   });
 
   scheduleRefresh();
