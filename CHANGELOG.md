@@ -7,6 +7,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Shared raw-partition metric-file preparation helpers were moved into a neutral engine file and renamed away from `v1`-specific terminology, clarifying that both legacy `v1` and default `v2` metric builds use the same partition scan/coalesce path.
+
+### Fixed
+- Default `v2` metric-file builds now tolerate sealed raw partitions whose per-metric samples appear out of timestamp order in raw page append order by normalizing each metric stream during build and verification.
+
 ## [1.3.0] - 2026-05-24
 
 ### Added

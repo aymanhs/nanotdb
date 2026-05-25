@@ -1350,7 +1350,7 @@ func (e *Engine) buildMetricFileForPartitionV2(db *Database, partitionKind byte,
 	}
 	metricPath := filepath.Join(db.RootDataDir, "metric-"+partition+".dat")
 
-	pages, err := buildCoalescedMetricPagesFromDataFile(db, dataPath)
+	pages, err := buildCoalescedMetricInputsFromDataFile(db, dataPath)
 	if err != nil {
 		return "", err
 	}
@@ -1370,7 +1370,7 @@ func (e *Engine) buildMetricFileForPartitionV2(db *Database, partitionKind byte,
 	return metricPath, nil
 }
 
-func compareMetricPartitionSamplesFromFileV2(c *Catalog, path string, expected map[MetricID][]metricFileSamplePoint) error {
+func compareMetricPartitionSamplesFromFileV2(c *Catalog, path string, expected map[MetricID][]partitionSamplePoint) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err

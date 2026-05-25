@@ -39,7 +39,7 @@ func TestEstimateSharedTimeMetricLayoutFromScratchPiData(t *testing.T) {
 				t.Fatalf("resolveMetricRawPartitionPath failed: %v", err)
 			}
 
-			pages, err := buildCoalescedMetricPagesFromDataFile(db, dataPath)
+			pages, err := buildCoalescedMetricInputsFromDataFile(db, dataPath)
 			if err != nil {
 				t.Fatalf("buildCoalescedMetricPagesFromDataFile failed: %v", err)
 			}
