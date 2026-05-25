@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -270,6 +271,74 @@ func TestBuildMetricFileV2FromEngineData(t *testing.T) {
 		if points != 4 {
 			t.Fatalf("derived point count mismatch: got=%d want=%d", points, 4)
 		}
+	}
+}
+
+func TestBuildMetricFileV2SortsOutOfOrderRawPartitionSamples(t *testing.T) {
+	root := t.TempDir()
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	db, _, err := e.getOrCreateDB("prod")
+	if err != nil {
+		t.Fatalf("getOrCreateDB failed: %v", err)
+	}
+	metricID, err := GetMetricID[float32](db.catalog, "cpu.temp")
+	if err != nil {
+		t.Fatalf("GetMetricID failed: %v", err)
+	}
+
+	base := Timestamp(time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC).UnixNano())
+	partition := dayKey(base)
+
+	newer := NewPage(base + 200)
+	var newerRaw [4]byte
+	binary.LittleEndian.PutUint32(newerRaw[:], math.Float32bits(42.5))
+	if err := newer.AddSample(metricID, base+200, newerRaw[:]); err != nil {
+		t.Fatalf("newer.AddSample failed: %v", err)
+	}
+	if err := writePage(db, partition, newer); err != nil {
+		t.Fatalf("writePage newer failed: %v", err)
+	}
+
+	older := NewPage(base + 100)
+	var olderRaw [4]byte
+	binary.LittleEndian.PutUint32(olderRaw[:], math.Float32bits(41.5))
+	if err := older.AddSample(metricID, base+100, olderRaw[:]); err != nil {
+		t.Fatalf("older.AddSample failed: %v", err)
+	}
+	if err := writePage(db, partition, older); err != nil {
+		t.Fatalf("writePage older failed: %v", err)
+	}
+
+	metricPath, err := e.BuildMetricFileV2("prod", partition)
+	if err != nil {
+		t.Fatalf("BuildMetricFileV2 failed: %v", err)
+	}
+	if err := e.CompareDataAndMetricPartitionV2("prod", partition); err != nil {
+		t.Fatalf("CompareDataAndMetricPartitionV2 failed: %v", err)
+	}
+
+	entry, ok := db.catalog.GetMetricEntry("cpu.temp")
+	if !ok {
+		t.Fatal("cpu.temp missing from catalog")
+	}
+	count := 0
+	var got []Sample
+	if err := collectMetricFromMetricFile("prod", "cpu.temp", entry, metricPath, base, base+500, 1, &count, func(s Sample) error {
+		got = append(got, s)
+		return nil
+	}); err != nil {
+		t.Fatalf("collectMetricFromMetricFile failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("sample count mismatch: got=%d want=2", len(got))
+	}
+	if got[0].TS != base+100 || got[1].TS != base+200 {
+		t.Fatalf("timestamps not sorted: got=[%d,%d] want=[%d,%d]", got[0].TS, got[1].TS, base+100, base+200)
 	}
 }
 
