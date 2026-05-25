@@ -27,6 +27,73 @@ type metricBuildCursor struct {
 	next  int
 }
 
+func appendEncodedTimestamps(dst *bytes.Buffer, times []Timestamp) error {
+	for _, ts := range times {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(ts))
+		if _, err := dst.Write(b[:]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func appendEncodedMetricValues(dst *bytes.Buffer, metricID MetricID, valueType byte, count int, intValues []int32, floatValues []float32, invalidLabel string) error {
+	switch valueType {
+	case Int32Sample:
+		if len(intValues) != count || len(floatValues) != 0 {
+			return fmt.Errorf("invalid int32 %s for metric %d", invalidLabel, metricID)
+		}
+		for _, value := range intValues {
+			var b [4]byte
+			binary.LittleEndian.PutUint32(b[:], uint32(value))
+			if _, err := dst.Write(b[:]); err != nil {
+				return err
+			}
+		}
+	case Float32Sample:
+		if len(floatValues) != count || len(intValues) != 0 {
+			return fmt.Errorf("invalid float32 %s for metric %d", invalidLabel, metricID)
+		}
+		for _, value := range floatValues {
+			var b [4]byte
+			binary.LittleEndian.PutUint32(b[:], math.Float32bits(value))
+			if _, err := dst.Write(b[:]); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported value type: %d", valueType)
+	}
+	return nil
+}
+
+func lookupMetricValueType(c *Catalog, mid MetricID) (byte, error) {
+	_, entry, ok := c.GetMetricByID(mid)
+	if !ok {
+		return 0, fmt.Errorf("unknown metric id in page: %d", mid)
+	}
+	return entry.ValueType, nil
+}
+
+func validateDataPageMetrics(p *Page) error {
+	if len(p.Metrics) != len(p.Times) {
+		return fmt.Errorf("page corruption: metrics/times length mismatch")
+	}
+	return nil
+}
+
+func dataPageValues(p *Page) ([]byte, error) {
+	if err := validateDataPageMetrics(p); err != nil {
+		return nil, err
+	}
+	values := p.Values.Bytes()
+	if len(values) < len(p.Metrics)*4 {
+		return nil, fmt.Errorf("page corruption: values blob too short")
+	}
+	return values, nil
+}
+
 func buildCoalescedMetricInputsFromDataFile(db *Database, dataPath string) ([]MetricFilePageInput, error) {
 	totals, order, err := scanMetricBuildPlansFromDataFile(db.catalog, dataPath)
 	if err != nil {
@@ -81,21 +148,21 @@ func scanMetricBuildPlansFromDataFile(c *Catalog, dataPath string) (map[MetricID
 	totals := make(map[MetricID]metricBuildPlan)
 	order := make([]MetricID, 0)
 	err := walkDataPages(dataPath, func(p *Page) error {
-		if len(p.Metrics) != len(p.Times) {
-			return fmt.Errorf("page corruption: metrics/times length mismatch")
+		if err := validateDataPageMetrics(p); err != nil {
+			return err
 		}
 		for _, mid := range p.Metrics {
-			_, entry, ok := c.GetMetricByID(mid)
-			if !ok {
-				return fmt.Errorf("unknown metric id in page: %d", mid)
+			valueType, err := lookupMetricValueType(c, mid)
+			if err != nil {
+				return err
 			}
 			plan, ok := totals[mid]
 			if !ok {
-				totals[mid] = metricBuildPlan{valueType: entry.ValueType, points: 1}
+				totals[mid] = metricBuildPlan{valueType: valueType, points: 1}
 				order = append(order, mid)
 				continue
 			}
-			if plan.valueType != entry.ValueType {
+			if plan.valueType != valueType {
 				return fmt.Errorf("value type mismatch while planning metric %d", mid)
 			}
 			plan.points++
@@ -110,25 +177,23 @@ func scanMetricBuildPlansFromDataFile(c *Catalog, dataPath string) (map[MetricID
 }
 
 func appendPageSamplesToMetricPages(c *Catalog, p *Page, out []MetricFilePageInput, cursors map[MetricID]metricBuildCursor) error {
-	if len(p.Metrics) != len(p.Times) {
-		return fmt.Errorf("page corruption: metrics/times length mismatch")
-	}
-	values := p.Values.Bytes()
-	if len(values) < len(p.Metrics)*4 {
-		return fmt.Errorf("page corruption: values blob too short")
+	values, err := dataPageValues(p)
+	if err != nil {
+		return err
 	}
 
 	for i, mid := range p.Metrics {
-		_, entry, ok := c.GetMetricByID(mid)
-		if !ok {
-			return fmt.Errorf("unknown metric id in page: %d", mid)
+		valueType, err := lookupMetricValueType(c, mid)
+		if err != nil {
+			return err
 		}
+
 		cursor, ok := cursors[mid]
 		if !ok {
 			return fmt.Errorf("metric %d missing from build plan", mid)
 		}
 		page := &out[cursor.index]
-		if page.ValueType != entry.ValueType {
+		if page.ValueType != valueType {
 			return fmt.Errorf("value type mismatch while filling metric %d", mid)
 		}
 		if cursor.next >= len(page.Times) {
@@ -138,13 +203,13 @@ func appendPageSamplesToMetricPages(c *Catalog, p *Page, out []MetricFilePageInp
 		page.Times[cursor.next] = p.Times[i]
 
 		raw := binary.LittleEndian.Uint32(values[i*4 : i*4+4])
-		switch entry.ValueType {
+		switch valueType {
 		case Int32Sample:
 			page.Int32[cursor.next] = int32(raw)
 		case Float32Sample:
 			page.Float32[cursor.next] = math.Float32frombits(raw)
 		default:
-			return fmt.Errorf("unsupported value type: %d", entry.ValueType)
+			return fmt.Errorf("unsupported value type: %d", valueType)
 		}
 
 		cursor.next++
@@ -202,62 +267,6 @@ func walkDataPages(dataPath string, fn func(*Page) error) error {
 			return err
 		}
 	}
-}
-
-func buildMetricPagesFromDataFile(db *Database, dataPath string) ([]MetricFilePageInput, error) {
-	out := make([]MetricFilePageInput, 0)
-	err := walkDataPages(dataPath, func(p *Page) error {
-		pageInputs, err := splitPageByMetric(db.catalog, p)
-		if err != nil {
-			return err
-		}
-		out = append(out, pageInputs...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func splitPageByMetric(c *Catalog, p *Page) ([]MetricFilePageInput, error) {
-	if len(p.Metrics) != len(p.Times) {
-		return nil, fmt.Errorf("page corruption: metrics/times length mismatch")
-	}
-	values := p.Values.Bytes()
-	if len(values) < len(p.Metrics)*4 {
-		return nil, fmt.Errorf("page corruption: values blob too short")
-	}
-
-	order := make([]MetricID, 0)
-	byMetric := make(map[MetricID]*MetricFilePageInput)
-
-	for i, mid := range p.Metrics {
-		_, entry, ok := c.GetMetricByID(mid)
-		if !ok {
-			return nil, fmt.Errorf("unknown metric id in page: %d", mid)
-		}
-		bucket := byMetric[mid]
-		if bucket == nil {
-			bucket = &MetricFilePageInput{MetricID: mid, ValueType: entry.ValueType}
-			byMetric[mid] = bucket
-			order = append(order, mid)
-		}
-
-		bucket.Times = append(bucket.Times, p.Times[i])
-		raw := binary.LittleEndian.Uint32(values[i*4 : i*4+4])
-		if entry.ValueType == Int32Sample {
-			bucket.Int32 = append(bucket.Int32, int32(raw))
-		} else {
-			bucket.Float32 = append(bucket.Float32, math.Float32frombits(raw))
-		}
-	}
-
-	out := make([]MetricFilePageInput, 0, len(order))
-	for _, mid := range order {
-		out = append(out, *byMetric[mid])
-	}
-	return out, nil
 }
 
 func coalesceMetricPageInputs(pages []MetricFilePageInput) ([]MetricFilePageInput, error) {
@@ -407,21 +416,18 @@ func normalizePartitionSamplePointOrder(points []partitionSamplePoint) {
 func collectRawPartitionSamples(db *Database, dataPath string) (map[MetricID][]partitionSamplePoint, error) {
 	out := make(map[MetricID][]partitionSamplePoint)
 	err := walkDataPages(dataPath, func(p *Page) error {
-		if len(p.Metrics) != len(p.Times) {
-			return fmt.Errorf("page corruption: metrics/times length mismatch")
-		}
-		values := p.Values.Bytes()
-		if len(values) < len(p.Metrics)*4 {
-			return fmt.Errorf("page corruption: values blob too short")
+		values, err := dataPageValues(p)
+		if err != nil {
+			return err
 		}
 		for i, mid := range p.Metrics {
-			_, entry, ok := db.catalog.GetMetricByID(mid)
-			if !ok {
-				return fmt.Errorf("unknown metric id in page: %d", mid)
+			valueType, err := lookupMetricValueType(db.catalog, mid)
+			if err != nil {
+				return err
 			}
 			out[mid] = append(out[mid], partitionSamplePoint{
 				TS:        p.Times[i],
-				ValueType: entry.ValueType,
+				ValueType: valueType,
 				Raw:       binary.LittleEndian.Uint32(values[i*4 : i*4+4]),
 			})
 		}

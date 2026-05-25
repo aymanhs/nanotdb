@@ -73,8 +73,8 @@ func TestRegister_ServesDashboardAssetsWithRegressionFixes(t *testing.T) {
 	if !strings.Contains(dashJS, "widget-refresh-error") {
 		t.Fatalf("dashboard asset should include widget refresh error handling")
 	}
-	if !strings.Contains(dashJS, "const seriesItems = new Array((widget.series || []).length)") {
-		t.Fatalf("dashboard asset should preserve ordered chart series items")
+	if !strings.Contains(dashJS, "function expandedChartSeries(widget)") || !strings.Contains(dashJS, "const chartSeries = expandedChartSeries(widget)") {
+		t.Fatalf("dashboard asset should expand shorthand chart series before rendering")
 	}
 
 	commonReq := httptest.NewRequest(http.MethodGet, "/assets/dashboard_utils.js", nil)
@@ -152,6 +152,138 @@ func TestRegister_ValidatesDashboardConfig(t *testing.T) {
       "lookback": "6h",
       "interval": "1m",
       "series": [{"metric": "temp.cpu"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_ValidatesDashboardQueryConfig(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {
+      "type": "line_chart",
+      "title": "Sample",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"query": "temp.cpu", "aggregate": "avg", "window": "5m"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_ValidatesDashboardAggregateBandConfig(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {
+			"type": "aggregate_band",
+      "title": "CPU Busy",
+      "lookback": "24h",
+      "interval": "10m",
+      "series": [
+		{"query": "cpu.busy_pct", "aggregate": "avg"},
+		{"query": "cpu.busy_pct", "aggregate": "min"},
+		{"query": "cpu.busy_pct", "aggregate": "max"}
+      ]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_ValidatesDashboardAggregateBandShortcutConfig(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {
+			"type": "aggregate_band",
+      "title": "CPU Busy",
+      "lookback": "24h",
+      "interval": "10m",
+      "series": [
+        {"query": "cpu.busy_pct", "window": "10m"}
+      ]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_ValidatesDashboardAggregateBandShortcutUsingIntervalWindow(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {
+      "type": "aggregate_band",
+      "title": "CPU Busy",
+      "lookback": "24h",
+      "interval": "10m",
+      "series": [
+        {"query": "cpu.busy_pct"}
+      ]
     }
   }
 }`)

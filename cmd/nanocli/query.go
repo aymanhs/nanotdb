@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -18,6 +19,12 @@ import (
 
 type queryRow struct {
 	Metric       string `json:"metric"`
+	Aggregate    string `json:"aggregate,omitempty"`
+	Window       string `json:"window,omitempty"`
+	StartNS      int64  `json:"start_ns,omitempty"`
+	StartUTC     string `json:"start_utc,omitempty"`
+	EndNS        int64  `json:"end_ns,omitempty"`
+	EndUTC       string `json:"end_utc,omitempty"`
 	TimestampNS  int64  `json:"timestamp_ns"`
 	TimestampUTC string `json:"timestamp_utc"`
 	ValueType    string `json:"value_type"`
@@ -45,11 +52,13 @@ func runQuery(args []string) error {
 	metricRegex := fs.String("metric", ".*", "regex applied to metric names")
 	startText := fs.String("start", "", "optional range start time (RFC3339Nano, unix seconds, or unix nanos)")
 	endText := fs.String("end", "", "optional range end time (RFC3339Nano, unix seconds, or unix nanos)")
+	aggregateText := fs.String("aggregate", "", "optional comma-separated aggregate list: min,max,sum,avg,count")
+	windowText := fs.String("window", "", "aggregate bucket window (for example: 5m, 1h)")
 	metricFiles := fs.String("metric-files", "config", "metric file routing mode: config, on, or off")
 	format := fs.String("format", "table", "output format: table or json")
 	jsonOut := fs.Bool("json", false, "alias for --format json")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--format table|json]")
+		return fmt.Errorf("usage: nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--aggregate <list> --window <duration>] [--format table|json]")
 	}
 
 	ctx, err := resolveDBContext(*rootDir, *dbName)
@@ -83,11 +92,31 @@ func runQuery(args []string) error {
 			fromTS = 0
 		}
 		if strings.TrimSpace(*endText) == "" {
-			toTS = engine.Timestamp(time.Now().UnixNano())
+			toTS = engine.Timestamp(math.MaxInt64)
 		}
 		if toTS < fromTS {
 			return fmt.Errorf("--end must be >= --start")
 		}
+	}
+
+	aggregateMode := strings.TrimSpace(*aggregateText) != "" || strings.TrimSpace(*windowText) != ""
+	if aggregateMode {
+		if strings.TrimSpace(*aggregateText) == "" || strings.TrimSpace(*windowText) == "" {
+			return fmt.Errorf("aggregate queries require both --aggregate and --window")
+		}
+		if !useRange || strings.TrimSpace(*startText) == "" {
+			return fmt.Errorf("aggregate queries require --start")
+		}
+	}
+
+	var aggregateNames []string
+	var aggregateWindow time.Duration
+	if aggregateMode {
+		aggregateWindow, err = time.ParseDuration(strings.TrimSpace(*windowText))
+		if err != nil || aggregateWindow <= 0 {
+			return fmt.Errorf("invalid --window: %w", err)
+		}
+		aggregateNames = splitCSVList(*aggregateText)
 	}
 
 	outFormat := strings.ToLower(strings.TrimSpace(*format))
@@ -118,35 +147,55 @@ func runQuery(args []string) error {
 	if err != nil {
 		return err
 	}
+	matchedMetrics := make([]string, 0, len(metrics))
+	for _, metric := range metrics {
+		if rx.MatchString(metric) {
+			matchedMetrics = append(matchedMetrics, metric)
+		}
+	}
 
 	rows := make([]queryRow, 0, 256)
-	for _, metric := range metrics {
-		if !rx.MatchString(metric) {
-			continue
+	if aggregateMode {
+		if len(matchedMetrics) != 1 {
+			return fmt.Errorf("aggregate queries require exactly one matching metric, got %d", len(matchedMetrics))
 		}
-		if !useRange {
-			s, found, err := eng.QueryLast(ctx.Database, metric)
-			if err != nil {
-				return err
-			}
-			if !found {
-				continue
-			}
-			rows = append(rows, sampleToQueryRow(s))
-			continue
-		}
-		err := eng.QueryRange(ctx.Database, metric, fromTS, toTS, 1, func(s engine.Sample) error {
-			rows = append(rows, sampleToQueryRow(s))
+		metric := matchedMetrics[0]
+		err := eng.QueryAggregateRange(ctx.Database, metric, fromTS, toTS, aggregateWindow, aggregateNames, func(bucket engine.AggregateBucket) error {
+			rows = append(rows, aggregateBucketToQueryRow(bucket))
 			return nil
 		})
 		if err != nil {
 			return err
 		}
+	} else {
+		for _, metric := range matchedMetrics {
+			if !useRange {
+				s, found, err := eng.QueryLast(ctx.Database, metric)
+				if err != nil {
+					return err
+				}
+				if !found {
+					continue
+				}
+				rows = append(rows, sampleToQueryRow(s))
+				continue
+			}
+			err := eng.QueryRange(ctx.Database, metric, fromTS, toTS, 1, func(s engine.Sample) error {
+				rows = append(rows, sampleToQueryRow(s))
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Metric == rows[j].Metric {
-			return rows[i].TimestampNS < rows[j].TimestampNS
+			if rows[i].Aggregate == rows[j].Aggregate {
+				return rows[i].TimestampNS < rows[j].TimestampNS
+			}
+			return rows[i].Aggregate < rows[j].Aggregate
 		}
 		return rows[i].Metric < rows[j].Metric
 	})
@@ -162,9 +211,11 @@ func runQuery(args []string) error {
 	}
 	if useRange {
 		from := int64(fromTS)
-		to := int64(toTS)
 		report.Start = &from
-		report.End = &to
+		if strings.TrimSpace(*endText) != "" {
+			to := int64(toTS)
+			report.End = &to
+		}
 	}
 
 	if outFormat == "json" {
@@ -174,15 +225,51 @@ func runQuery(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "METRIC\tTS_NS\tTS_UTC\tTYPE\tVALUE")
-	for _, row := range rows {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", row.Metric, row.TimestampNS, row.TimestampUTC, row.ValueType, row.Value)
+	if aggregateMode {
+		fmt.Fprintln(tw, "METRIC\tAGG\tWINDOW\tSTART_NS\tSTART_UTC\tEND_NS\tEND_UTC\tTYPE\tVALUE")
+		for _, row := range rows {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n", row.Metric, row.Aggregate, row.Window, row.StartNS, row.StartUTC, row.EndNS, row.EndUTC, row.ValueType, row.Value)
+		}
+	} else {
+		fmt.Fprintln(tw, "METRIC\tTS_NS\tTS_UTC\tTYPE\tVALUE")
+		for _, row := range rows {
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", row.Metric, row.TimestampNS, row.TimestampUTC, row.ValueType, row.Value)
+		}
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "rows=%d duration_ms=%d\n", report.RowCount, report.DurationMS)
 	return nil
+}
+
+func aggregateBucketToQueryRow(bucket engine.AggregateBucket) queryRow {
+	return queryRow{
+		Metric:       bucket.Metric,
+		Aggregate:    bucket.Aggregate,
+		Window:       bucket.Window.String(),
+		StartNS:      int64(bucket.StartTS),
+		StartUTC:     engine.FormatTimestamp(bucket.StartTS),
+		EndNS:        int64(bucket.EndTS),
+		EndUTC:       engine.FormatTimestamp(bucket.EndTS),
+		TimestampNS:  int64(bucket.EndTS),
+		TimestampUTC: engine.FormatTimestamp(bucket.EndTS),
+		ValueType:    "float32",
+		Value:        strconv.FormatFloat(float64(bucket.Value), 'f', -1, 32),
+	}
+}
+
+func splitCSVList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 func sampleToQueryRow(s engine.Sample) queryRow {

@@ -15,11 +15,11 @@
         <a href="/">Home</a>
         <a href="{{ .DashboardPath }}">Dashboard</a>
         <a href="{{ .EditorPath }}">Editor</a>
-        <a href="{{ .ExplorePath }}">Explore</a>
+        <a href="{{ .ExplorePath }}" aria-current="page">Explore</a>
         <a href="{{ .EnginePath }}">Engine</a>
       </nav>
       <h1>{{ .Title }}</h1>
-      <p class="sub">Lightweight live view for NanoTDB metrics</p>
+      <p class="sub">Lightweight live view for NanoTDB queries</p>
     </header>
 
     <section class="controls panel">
@@ -27,13 +27,21 @@
         Database
         <select id="dbSelect"></select>
       </label>
-      <label class="metric-picker-control">
-        Metric Picker
+      <label class="query-picker-control">
+        Query
         <div class="combo-row">
-          <input id="metricInput" list="metricsOptions" placeholder="Type metric name" />
+          <input id="queryInput" list="metricsOptions" placeholder="Type metric or DB/metric" />
           <datalist id="metricsOptions"></datalist>
-          <button type="button" id="addMetricBtn" class="secondary-btn">Add</button>
+          <button type="button" id="addQueryBtn" class="secondary-btn">Add</button>
         </div>
+      </label>
+      <label>
+        Aggregate
+        <input id="aggregateInput" type="text" placeholder="optional, e.g. avg" />
+      </label>
+      <label>
+        Bucket Window
+        <input id="bucketWindowInput" type="text" placeholder="required with aggregate, e.g. 5m" />
       </label>
       <label>
         Window
@@ -70,15 +78,15 @@
       <span id="status" aria-live="polite"></span>
 
       <div class="selected-row">
-        <span class="selected-label">Selected Metrics</span>
-        <div id="selectedMetrics" class="selected-metrics" aria-live="polite"></div>
+        <span class="selected-label">Selected Queries</span>
+        <div id="selectedQueries" class="selected-metrics" aria-live="polite"></div>
       </div>
     </section>
 
     <section class="panel metrics-panel">
       <header class="section-head">
         <h2>Last Values</h2>
-        <p>Latest sample per selected metric</p>
+        <p>Latest value per selected query</p>
       </header>
       <div id="cards" class="cards"></div>
     </section>
@@ -94,6 +102,7 @@
 
   <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>
   <script src="https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js" defer></script>
+  <script src="/assets/dashboard_utils.js" defer></script>
   <script src="{{ .AssetBase }}/app.js" defer></script>
 </body>
 </html>

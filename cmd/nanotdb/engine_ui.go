@@ -7,11 +7,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aymanhs/nanotdb/internal/engine"
 )
+
+var engineProcessStartedAt = time.Now()
 
 type serverDBContext struct {
 	RootDir         string
@@ -124,17 +128,74 @@ type engineWALRecord struct {
 	Value       interface{} `json:"value"`
 }
 
+type engineWALPreview struct {
+	Total int               `json:"total"`
+	First []engineWALRecord `json:"first,omitempty"`
+	Last  []engineWALRecord `json:"last,omitempty"`
+}
+
 type engineFilesReport struct {
-	Database string             `json:"database"`
-	Data     []engineDataFile   `json:"data"`
-	Metric   []engineMetricFile `json:"metric"`
-	WAL      []engineWALFile    `json:"wal"`
-	Records  []engineWALRecord  `json:"records"`
+	Database      string             `json:"database"`
+	Data          []engineDataFile   `json:"data"`
+	Metric        []engineMetricFile `json:"metric"`
+	WAL           []engineWALFile    `json:"wal"`
+	RecordPreview engineWALPreview   `json:"record_preview"`
 }
 
 type engineRuntimeReport struct {
-	Runtime engine.DBRuntimeInspect `json:"runtime"`
-	WAL     []engineWALRecord       `json:"wal"`
+	Runtime    engine.DBRuntimeInspect `json:"runtime"`
+	WALPreview engineWALPreview        `json:"wal_preview"`
+}
+
+type engineRuntimeProcess struct {
+	StartedAt    time.Time `json:"started_at"`
+	AgeSeconds   int64     `json:"age_seconds"`
+	RSSBytes     int64     `json:"rss_bytes"`
+	NumGoroutine int       `json:"num_goroutine"`
+	NumCPU       int       `json:"num_cpu"`
+}
+
+type engineRuntimeGoMem struct {
+	AllocBytes      uint64    `json:"alloc_bytes"`
+	TotalAllocBytes uint64    `json:"total_alloc_bytes"`
+	SysBytes        uint64    `json:"sys_bytes"`
+	HeapAllocBytes  uint64    `json:"heap_alloc_bytes"`
+	HeapSysBytes    uint64    `json:"heap_sys_bytes"`
+	HeapInuseBytes  uint64    `json:"heap_inuse_bytes"`
+	HeapIdleBytes   uint64    `json:"heap_idle_bytes"`
+	StackInuseBytes uint64    `json:"stack_inuse_bytes"`
+	StackSysBytes   uint64    `json:"stack_sys_bytes"`
+	NextGCBytes     uint64    `json:"next_gc_bytes"`
+	NumGC           uint32    `json:"num_gc"`
+	GCCPUFraction   float64   `json:"gc_cpu_fraction"`
+	LastGCAt        time.Time `json:"last_gc_at,omitempty"`
+}
+
+type engineRuntimeOpenPage struct {
+	Database     string `json:"database"`
+	Day          string `json:"day"`
+	Records      int    `json:"records"`
+	MetricSlots  int    `json:"metric_slots"`
+	UniqueMetric int    `json:"unique_metrics"`
+	ValueBytes   int    `json:"value_bytes"`
+	StartTS      int64  `json:"start_timestamp_ns"`
+	EndTS        int64  `json:"end_timestamp_ns"`
+	MaxRecords   int    `json:"max_records"`
+	MaxBytes     int    `json:"max_bytes"`
+	MaxAgeNS     int64  `json:"max_age_ns"`
+	AgeNS        int64  `json:"age_ns"`
+	WALSegmentID uint16 `json:"wal_segment_id"`
+	Full         bool   `json:"full"`
+	Persisted    bool   `json:"persisted"`
+}
+
+type engineRuntimeOverviewReport struct {
+	DatabaseCount       int                     `json:"database_count"`
+	ActiveDatabaseCount int                     `json:"active_database_count"`
+	MetricCount         int                     `json:"metric_count"`
+	Process             engineRuntimeProcess    `json:"process"`
+	GoMem               engineRuntimeGoMem      `json:"go_mem"`
+	OpenPages           []engineRuntimeOpenPage `json:"open_pages"`
 }
 
 type engineOverviewSettings struct {
@@ -312,7 +373,18 @@ func handleEngineRuntime(eng *engine.Engine) http.HandlerFunc {
 		}
 		database := strings.TrimSpace(r.URL.Query().Get("db"))
 		if database == "" {
-			writeVMError(w, http.StatusBadRequest, "bad_data", "missing db parameter")
+			report, err := buildEngineRuntimeOverview(eng)
+			if err != nil {
+				writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, vmResponse{
+				Status: "success",
+				Data: map[string]interface{}{
+					"resultType": "engine_runtime_overview",
+					"result":     report,
+				},
+			})
 			return
 		}
 		runtimeInspect, ok := eng.InspectDBRuntime(database)
@@ -335,9 +407,150 @@ func handleEngineRuntime(eng *engine.Engine) http.HandlerFunc {
 			Data: map[string]interface{}{
 				"resultType": "engine_runtime",
 				"result": engineRuntimeReport{
-					Runtime: runtimeInspect,
-					WAL:     convertRuntimeWALRecords(records),
+					Runtime:    runtimeInspect,
+					WALPreview: buildWALPreview(convertRuntimeWALRecords(records), 12),
 				},
+			},
+		})
+	}
+}
+
+func buildEngineRuntimeOverview(eng *engine.Engine) (engineRuntimeOverviewReport, error) {
+	names := eng.GetAllDatabaseNames()
+	memStats := goruntime.MemStats{}
+	goruntime.ReadMemStats(&memStats)
+	report := engineRuntimeOverviewReport{
+		DatabaseCount: len(names),
+		Process: engineRuntimeProcess{
+			StartedAt:    engineProcessStartedAt,
+			AgeSeconds:   int64(time.Since(engineProcessStartedAt).Seconds()),
+			RSSBytes:     readProcessRSSBytes(),
+			NumGoroutine: goruntime.NumGoroutine(),
+			NumCPU:       goruntime.NumCPU(),
+		},
+		GoMem: engineRuntimeGoMem{
+			AllocBytes:      memStats.Alloc,
+			TotalAllocBytes: memStats.TotalAlloc,
+			SysBytes:        memStats.Sys,
+			HeapAllocBytes:  memStats.HeapAlloc,
+			HeapSysBytes:    memStats.HeapSys,
+			HeapInuseBytes:  memStats.HeapInuse,
+			HeapIdleBytes:   memStats.HeapIdle,
+			StackInuseBytes: memStats.StackInuse,
+			StackSysBytes:   memStats.StackSys,
+			NextGCBytes:     memStats.NextGC,
+			NumGC:           memStats.NumGC,
+			GCCPUFraction:   memStats.GCCPUFraction,
+		},
+		OpenPages: make([]engineRuntimeOpenPage, 0),
+	}
+	if memStats.LastGC > 0 {
+		report.GoMem.LastGCAt = time.Unix(0, int64(memStats.LastGC)).UTC()
+	}
+	for _, name := range names {
+		if eng.IsDatabaseActive(name) {
+			report.ActiveDatabaseCount++
+		}
+		runtimeInspect, ok := eng.InspectDBRuntime(name)
+		if !ok {
+			continue
+		}
+		report.MetricCount += runtimeInspect.MetricCount
+		for _, page := range runtimeInspect.OpenPages {
+			report.OpenPages = append(report.OpenPages, engineRuntimeOpenPage{
+				Database:     name,
+				Day:          page.Day,
+				Records:      page.Records,
+				MetricSlots:  page.MetricSlots,
+				UniqueMetric: page.UniqueMetric,
+				ValueBytes:   page.ValueBytes,
+				StartTS:      int64(page.StartTS),
+				EndTS:        int64(page.EndTS),
+				MaxRecords:   page.MaxRecords,
+				MaxBytes:     page.MaxBytes,
+				MaxAgeNS:     int64(page.MaxAge),
+				AgeNS:        int64(page.Age),
+				WALSegmentID: page.WALSegmentID,
+				Full:         page.Full,
+				Persisted:    page.Persisted,
+			})
+		}
+	}
+	sort.Slice(report.OpenPages, func(i, j int) bool {
+		if report.OpenPages[i].Database != report.OpenPages[j].Database {
+			return report.OpenPages[i].Database < report.OpenPages[j].Database
+		}
+		if report.OpenPages[i].Day != report.OpenPages[j].Day {
+			return report.OpenPages[i].Day < report.OpenPages[j].Day
+		}
+		return report.OpenPages[i].StartTS < report.OpenPages[j].StartTS
+	})
+	return report, nil
+}
+
+func readProcessRSSBytes() int64 {
+	raw, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0
+		}
+		var kb int64
+		if _, err := fmt.Sscanf(fields[1], "%d", &kb); err != nil {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
+}
+
+func handleEngineCompactMetric(eng *engine.Engine) http.HandlerFunc {
+	type compactReq struct {
+		Database string `json:"db"`
+		Part     string `json:"part"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeVMError(w, http.StatusMethodNotAllowed, "bad_data", "method not allowed")
+			return
+		}
+
+		var req compactReq
+		if r.Body != nil {
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid JSON body: %v", err))
+				return
+			}
+		}
+
+		report, err := eng.CompactDataFileToMetricV2(strings.TrimSpace(req.Database), strings.TrimSpace(req.Part))
+		if err != nil {
+			switch {
+			case errors.Is(err, engine.ErrDataFileActive):
+				writeVMError(w, http.StatusConflict, "conflict", err.Error())
+			case errors.Is(err, os.ErrNotExist):
+				writeVMError(w, http.StatusNotFound, "not_found", err.Error())
+			case strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid partition key") || strings.Contains(err.Error(), "does not match database partitioning"):
+				writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+			default:
+				writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, vmResponse{
+			Status: "success",
+			Data: map[string]interface{}{
+				"resultType": "engine_compact_metric",
+				"result":     report,
 			},
 		})
 	}
@@ -455,6 +668,7 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 	}
 
 	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), Metric: make([]engineMetricFile, 0, len(ctx.MetricFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
+	allRecords := make([]engineWALRecord, 0)
 	for _, path := range ctx.DataFilePaths {
 		stats, err := engine.ScanDataFileStats(path)
 		part := dataFilePart(path)
@@ -520,15 +734,15 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 			continue
 		}
 		item := engineMetricFile{Path: path, Part: part, Bytes: st.Size()}
-		infos, err := engine.ReadMetricFilePageInfosV1(path)
+		summary, err := engine.ReadMetricFileSummary(path)
 		if err != nil {
 			item.ScanError = err.Error()
 			report.Metric = append(report.Metric, item)
 			continue
 		}
-		seenMetrics := make(map[engine.MetricID]struct{}, len(infos))
+		seenMetrics := make(map[engine.MetricID]struct{}, len(summary.MetricFrames))
 		var totalPayload int64
-		for _, info := range infos {
+		for _, info := range summary.MetricFrames {
 			item.Frames++
 			seenMetrics[info.MetricID] = struct{}{}
 			item.Points += int64(info.PointCount)
@@ -572,7 +786,7 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 			item.MaxUTC = engine.FormatTimestamp(stats.MaxTS)
 		}
 		for _, record := range records {
-			report.Records = append(report.Records, engineWALRecord{
+			allRecords = append(allRecords, engineWALRecord{
 				Index:       record.Index,
 				Offset:      record.Offset,
 				RecordBytes: record.RecordBytes,
@@ -587,13 +801,37 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 		report.WAL = append(report.WAL, item)
 	}
 
-	sort.Slice(report.Records, func(i, j int) bool {
-		if report.Records[i].TimestampNS != report.Records[j].TimestampNS {
-			return report.Records[i].TimestampNS < report.Records[j].TimestampNS
-		}
-		return report.Records[i].Index < report.Records[j].Index
-	})
+	sortEngineWALRecords(allRecords)
+	report.RecordPreview = buildWALPreview(allRecords, 12)
 	return report, nil
+}
+
+func sortEngineWALRecords(records []engineWALRecord) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].TimestampNS != records[j].TimestampNS {
+			return records[i].TimestampNS < records[j].TimestampNS
+		}
+		if records[i].SegmentID != records[j].SegmentID {
+			return records[i].SegmentID < records[j].SegmentID
+		}
+		return records[i].Index < records[j].Index
+	})
+}
+
+func buildWALPreview(records []engineWALRecord, limit int) engineWALPreview {
+	preview := engineWALPreview{Total: len(records)}
+	if len(records) == 0 || limit <= 0 {
+		return preview
+	}
+	if limit > len(records) {
+		limit = len(records)
+	}
+	preview.First = append([]engineWALRecord(nil), records[:limit]...)
+	if len(records) <= limit {
+		return preview
+	}
+	preview.Last = append([]engineWALRecord(nil), records[len(records)-limit:]...)
+	return preview
 }
 
 func dataFilePart(path string) string {

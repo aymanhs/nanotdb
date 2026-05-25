@@ -2,7 +2,7 @@ package engine
 
 import "testing"
 
-func TestRollupAggregatorRegistrySupportsBuiltins(t *testing.T) {
+func TestAggregatorRegistrySupportsBuiltins(t *testing.T) {
 	points := []float32{10, 20, 40}
 	start := Timestamp(0)
 	end := Timestamp(1)
@@ -19,7 +19,7 @@ func TestRollupAggregatorRegistrySupportsBuiltins(t *testing.T) {
 	}
 
 	for _, tt := range cases {
-		agg, ok := getRollupAggregator(tt.name)
+		agg, ok := getAggregator(tt.name)
 		if !ok {
 			t.Fatalf("expected aggregator %q to be registered", tt.name)
 		}
@@ -39,8 +39,8 @@ func TestRollupAggregatorRegistrySupportsBuiltins(t *testing.T) {
 	}
 }
 
-func TestRollupAggregatorRegistryRejectsUnknown(t *testing.T) {
-	if isSupportedRollupAggregate("median") {
+func TestAggregatorRegistryRejectsUnknown(t *testing.T) {
+	if isSupportedAggregate("median") {
 		t.Fatalf("did not expect unknown aggregate to be supported")
 	}
 }

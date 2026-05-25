@@ -42,24 +42,38 @@ body {
 
 .top-nav {
   display: flex;
-  gap: 8px;
+  gap: 0;
   flex-wrap: wrap;
-  margin: 0 0 10px;
+  margin: 0 0 12px;
+  padding: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
 }
 
 .top-nav a {
   text-decoration: none;
-  color: #c8d8ef;
-  border: 1px solid var(--border);
-  background: #1d2635;
-  border-radius: 999px;
-  padding: 5px 10px;
-  font-size: 0.82rem;
+  color: color-mix(in srgb, var(--muted) 88%, white);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  border-radius: 0;
+  padding: 8px 14px 10px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.1;
+  margin-bottom: -1px;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .top-nav a:hover {
-  border-color: var(--accent-2);
   color: #e8f2ff;
+  border-bottom-color: color-mix(in srgb, var(--accent-2) 52%, transparent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--card) 58%, transparent), transparent);
+}
+
+.top-nav a[aria-current="page"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--card) 72%, transparent), transparent);
 }
 
 .panel {

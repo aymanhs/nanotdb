@@ -6,18 +6,20 @@
   const overviewPane = document.getElementById("overviewPane");
   const databasePane = document.getElementById("databasePane");
   const filesPane = document.getElementById("filesPane");
+  const walPane = document.getElementById("walPane");
   const runtimePane = document.getElementById("runtimePane");
   const panes = {
     overview: overviewPane,
     database: databasePane,
     files: filesPane,
+    wal: walPane,
     runtime: runtimePane,
   };
   let activeTab = "overview";
   let refreshTimer = null;
   let selectedDataFileByDB = Object.create(null);
-  let fileActionStatusByDB = Object.create(null);
-  let showRuntimeWALByDB = Object.create(null);
+  let fileCompactStatusByKey = Object.create(null);
+  let fileCompactBusyByKey = Object.create(null);
 
   function apiURL(path) {
     const base = typeof cfg.apiBaseURL === "string" ? cfg.apiBaseURL.replace(/\/$/, "") : "";
@@ -64,6 +66,21 @@
     return Number(v).toLocaleString();
   }
 
+  function formatBytes(v) {
+    if (v == null || Number.isNaN(Number(v))) return "-";
+    const bytes = Number(v);
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = Math.abs(bytes);
+    let idx = 0;
+    while (value >= 1024 && idx < units.length - 1) {
+      value /= 1024;
+      idx += 1;
+    }
+    const signed = bytes < 0 ? -value : value;
+    const formatted = Math.abs(signed) >= 100 || idx === 0 ? signed.toFixed(0) : signed.toFixed(1);
+    return formatted + " " + units[idx];
+  }
+
   function decimal(v, digits) {
     if (v == null || Number.isNaN(Number(v))) return "-";
     return Number(v).toFixed(digits == null ? 2 : digits).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
@@ -81,6 +98,32 @@
     return hr.toFixed(1) + " h";
   }
 
+  function formatClock(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    if (date.getUTCFullYear() <= 1) return "never";
+    return date.toLocaleString();
+  }
+
+  function ageFromValue(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "-";
+    if (date.getUTCFullYear() <= 1) return "never";
+    let diffMs = Date.now() - date.getTime();
+    if (diffMs < 0) diffMs = 0;
+    if (diffMs < 1000) return "just now";
+    const sec = Math.floor(diffMs / 1000);
+    if (sec < 60) return sec + "s ago";
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + "m ago";
+    const hr = Math.floor(min / 60);
+    if (hr < 48) return hr + "h ago";
+    const day = Math.floor(hr / 24);
+    return day + "d ago";
+  }
+
   function renderTable(columns, rows) {
     if (!rows.length) {
       return '<div class="empty">No rows</div>';
@@ -92,6 +135,26 @@
 
   function renderSummaryCards(items) {
     return '<div class="summary-grid">' + items.map((item) => '<div class="summary-card"><div class="label">' + item.label + '</div><div class="value">' + item.value + '</div></div>').join("") + '</div>';
+  }
+
+  function renderWALPreviewTable(records) {
+    return renderTable([
+      { key: 'index', label: 'Idx' },
+      { key: 'metric', label: 'Metric' },
+      { key: 'timestamp', label: 'Timestamp' },
+      { key: 'type', label: 'Type' },
+      { key: 'value', label: 'Value' },
+    ], (records || []).map((record) => ({
+      index: number(record.index),
+      metric: '<span class="codeish">' + escapeHTML(record.metric_name || String(record.metric_id || '-')) + '</span>',
+      timestamp: record.timestamp || '-',
+      type: record.value_type || '-',
+      value: record.value == null ? '-' : escapeHTML(String(record.value)),
+    })));
+  }
+
+  function fileActionKey(db, part) {
+    return db + "|" + part;
   }
 
   function renderSelectableFilesTable(rows, selectedPath) {
@@ -107,10 +170,12 @@
         '<td>' + number(row.records) + '</td>' +
         '<td>' + (row.start || '-') + '</td>' +
         '<td>' + (row.end || '-') + '</td>' +
+        '<td>' + (row.action || '-') + '</td>' +
+        '<td>' + (row.status || '-') + '</td>' +
         '<td>' + (row.error || '-') + '</td>' +
         '</tr>';
     }).join('');
-    return '<div class="table-wrap"><table><thead><tr><th>Path</th><th>Bytes</th><th>Frames</th><th>Records</th><th>Start</th><th>End</th><th>Error</th></tr></thead><tbody>' + body + '</tbody></table></div>';
+      return '<div class="table-wrap"><table><thead><tr><th>Path</th><th>Bytes</th><th>Frames</th><th>Records</th><th>Start</th><th>End</th><th>Compact</th><th>Status</th><th>Error</th></tr></thead><tbody>' + body + '</tbody></table></div>';
   }
 
   function renderToggle(name, checked, label) {
@@ -304,15 +369,6 @@
     const result = payload.data && payload.data.result;
     const dataFiles = result.data || [];
     const metricFiles = result.metric || [];
-    const datRows = dataFiles.map((item) => ({
-      path: item.path,
-      bytes: item.bytes,
-      frames: item.frames,
-      records: item.records,
-      start: item.min_utc || '-',
-      end: item.max_utc || '-',
-      error: item.scan_error || '',
-    }));
     const metricRows = metricFiles.map((item) => ({
       path: '<span class="codeish">' + item.path + '</span>',
       bytes: number(item.bytes),
@@ -324,21 +380,6 @@
       end: item.max_utc || '-',
       error: item.scan_error || '',
     }));
-    const walRows = (result.wal || []).map((item) => ({
-      path: '<span class="codeish">' + item.path + '</span>',
-      bytes: number(item.bytes),
-      records: number(item.records),
-      tail: String(!!item.has_tail),
-      reason: item.stop_reason || '-',
-      error: item.scan_error || '',
-    }));
-    const recordRows = (result.records || []).map((item) => ({
-      index: number(item.index),
-      metric: '<span class="codeish">' + (item.metric_name || item.metric_id) + '</span>',
-      ts: item.timestamp,
-      type: item.value_type,
-      value: String(item.value),
-    }));
     if (!selectedPath || !dataFiles.some((item) => item.path === selectedPath)) {
       selectedPath = dataFiles.length ? dataFiles[0].path : '';
     }
@@ -346,13 +387,27 @@
       selectedDataFileByDB[db] = selectedPath;
     }
     const selectedFile = dataFiles.find((item) => item.path === selectedPath) || null;
-    const fileActionStatus = fileActionStatusByDB[db] || '';
-    const recompactDisabled = !selectedFile || !selectedFile.part || !!selectedFile.active || !!selectedFile.scan_error;
-    const recompactHelp = !selectedFile
-      ? 'No file selected.'
-      : selectedFile.active
-        ? 'This partition is still open in memory, so recompact is disabled.'
-        : 'Rewrite this sealed file using the current page size limits.';
+    const datRows = dataFiles.map((item) => {
+      const key = fileActionKey(db, item.part || item.path);
+      const disabled = !item.part || !!item.active || !!item.scan_error || !!fileCompactBusyByKey[key];
+      let title = 'Build a metric-v2 file for this sealed partition.';
+      if (item.active) {
+        title = 'This partition is still open in memory, so compact is disabled.';
+      } else if (item.scan_error) {
+        title = 'Compact is disabled until the source file can be scanned.';
+      }
+      return {
+        path: item.path,
+        bytes: item.bytes,
+        frames: item.frames,
+        records: item.records,
+        start: item.min_utc || '-',
+        end: item.max_utc || '-',
+        action: '<button type="button" class="action-button action-button--small data-file-compact-btn" data-part="' + escapeHTML(item.part || '') + '" data-path="' + escapeHTML(item.path) + '"' + (disabled ? ' disabled' : '') + ' title="' + escapeHTML(title) + '">Compact</button>',
+        status: fileCompactStatusByKey[key] ? escapeHTML(fileCompactStatusByKey[key]) : '-',
+        error: item.scan_error || '',
+      };
+    });
     const pagesTable = selectedFile && selectedFile.pages && selectedFile.pages.length ? renderTable([
       { key: 'index', label: 'Idx' },
       { key: 'offset', label: 'Offset' },
@@ -376,7 +431,7 @@
       start: page.start_utc,
       end: page.end_utc,
     }))) : '<div class="empty">' + (selectedFile ? 'Selected file has no page frames.' : 'No data files found.') + '</div>';
-    filesPane.innerHTML = '<div class="section-head"><h2>Files</h2><p>On-disk .dat/.wal inspection, plus decoded WAL records.</p></div>' +
+    filesPane.innerHTML = '<div class="section-head"><h2>Files</h2><p>On-disk data and metric partitions, plus selected page inspection.</p></div>' +
       '<div class="stack">' +
       '<div class="subpanel"><div class="section-head"><h3>Data Files</h3><p>Select a .dat file to inspect only its pages.</p></div>' + renderSelectableFilesTable(datRows, selectedPath) + '</div>' +
       '<div class="subpanel"><div class="section-head"><h3>Metric Files</h3><p>Trailer-only scan of query-optimized metric partitions.</p></div>' + renderTable([
@@ -390,22 +445,7 @@
         { key: 'end', label: 'End' },
         { key: 'error', label: 'Error' },
       ], metricRows) + '</div>' +
-      '<div class="subpanel"><div class="section-head"><h3>Pages</h3><p>' + (selectedFile ? '<span class="codeish">' + escapeHTML(selectedFile.path) + '</span>' : 'No file selected.') + '</p></div><div class="subpanel-controls"><div class="action-note">' + recompactHelp + '</div><button type="button" class="action-button" id="recompactSelectedFile"' + (recompactDisabled ? ' disabled' : '') + '>Recompact Selected File</button></div>' + (fileActionStatus ? '<div class="action-status">' + escapeHTML(fileActionStatus) + '</div>' : '') + pagesTable + '</div>' +
-      '<div class="subpanel"><div class="section-head"><h3>WAL Files</h3><p>Scan status and tail diagnostics.</p></div>' + renderTable([
-        { key: 'path', label: 'Path' },
-        { key: 'bytes', label: 'Bytes' },
-        { key: 'records', label: 'Records' },
-        { key: 'tail', label: 'Tail' },
-        { key: 'reason', label: 'Stop Reason' },
-        { key: 'error', label: 'Error' },
-      ], walRows) + '</div>' +
-      '<div class="subpanel"><div class="section-head"><h3>Decoded WAL Records</h3><p>Records found while scanning current .wal files.</p></div>' + renderTable([
-        { key: 'index', label: 'Idx' },
-        { key: 'metric', label: 'Metric' },
-        { key: 'ts', label: 'Timestamp' },
-        { key: 'type', label: 'Type' },
-        { key: 'value', label: 'Value' },
-      ], recordRows) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Pages</h3><p>' + (selectedFile ? '<span class="codeish">' + escapeHTML(selectedFile.path) + '</span>' : 'No file selected.') + '</p></div>' + pagesTable + '</div>' +
       '</div>';
     filesPane.querySelectorAll('.file-select').forEach((button) => {
       button.addEventListener('click', () => {
@@ -416,65 +456,177 @@
         });
       });
     });
-    const recompactBtn = document.getElementById('recompactSelectedFile');
-    if (recompactBtn) {
-      recompactBtn.addEventListener('click', async () => {
-        if (!selectedFile || !selectedFile.part || selectedFile.active) {
+    filesPane.querySelectorAll('.data-file-compact-btn').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const part = button.dataset.part || '';
+        const path = button.dataset.path || '';
+        if (!part) {
           return;
         }
-        if (!window.confirm('Recompact ' + selectedFile.path + ' using the current page limits?')) {
-          return;
-        }
-        recompactBtn.disabled = true;
-        fileActionStatusByDB[db] = 'Recompacting ' + selectedFile.part + '...';
-        setStatus('Recompacting ' + selectedFile.part + '...');
+        const key = fileActionKey(db, part);
+        selectedDataFileByDB[db] = path;
+        fileCompactBusyByKey[key] = true;
+        fileCompactStatusByKey[key] = 'Compacting to metric-v2...';
+        setStatus('Compacting ' + part + ' to metric-v2...');
         loadFiles().catch((err) => {
           console.error(err);
         });
         try {
-          const payload = await postJSON(apiURL('/api/engine/recompact'), { db: db, part: selectedFile.part });
+          const payload = await postJSON(apiURL('/api/engine/compact_metric'), { db: db, part: part });
           const resultPayload = payload.data && payload.data.result;
-          fileActionStatusByDB[db] = 'Recompacted ' + selectedFile.part + ': ' + number(resultPayload.old_frames) + ' -> ' + number(resultPayload.new_frames) + ' frames';
+          const savedText = formatBytes(resultPayload.saved_bytes);
+          const message = 'Compacted ' + part + ': ' + formatBytes(resultPayload.data_bytes) + ' raw -> ' + formatBytes(resultPayload.metric_bytes) + ' metric (' + savedText + ' saved)';
+          fileCompactStatusByKey[key] = message;
+          setStatus(message);
           await loadFiles();
-          setStatus('Recompacted ' + selectedFile.part + ': ' + number(resultPayload.old_frames) + ' -> ' + number(resultPayload.new_frames) + ' frames');
         } catch (err) {
           console.error(err);
-          fileActionStatusByDB[db] = err && err.message ? err.message : 'Recompact failed';
-          setStatus(err && err.message ? err.message : 'Recompact failed');
+          const message = err && err.message ? err.message : 'Metric compact failed';
+          fileCompactStatusByKey[key] = message;
+          setStatus(message);
           loadFiles().catch((loadErr) => {
             console.error(loadErr);
           });
+        } finally {
+          delete fileCompactBusyByKey[key];
         }
       });
+    });
+  }
+
+  async function loadWAL() {
+    const db = dbSelect.value;
+    if (!db) {
+      walPane.innerHTML = '<div class="empty">No database selected.</div>';
+      return;
     }
+    const [filesPayload, runtimePayload] = await Promise.all([
+      fetchJSON(apiURL('/api/engine/files?db=' + encodeURIComponent(db))),
+      fetchJSON(apiURL('/api/engine/runtime?db=' + encodeURIComponent(db))),
+    ]);
+    const filesResult = filesPayload.data && filesPayload.data.result;
+    const runtimeResult = runtimePayload.data && runtimePayload.data.result;
+    const walFiles = (filesResult && filesResult.wal) || [];
+    const scannedPreview = (filesResult && filesResult.record_preview) || { total: 0, first: [], last: [] };
+    const runtime = (runtimeResult && runtimeResult.runtime) || {};
+    const livePreview = (runtimeResult && runtimeResult.wal_preview) || { total: 0, first: [], last: [] };
+    const walStats = (runtime.stats && runtime.stats.WAL) || {};
+    const flushRows = ((walStats.RecentFlushes || []).slice().reverse()).map((item) => ({
+      at: formatClock(item.At),
+      age: ageFromValue(item.At),
+      bytes: number(item.Bytes),
+    }));
+    const walRows = walFiles.map((item) => ({
+      path: '<span class="codeish">' + escapeHTML(item.path) + '</span>',
+      bytes: number(item.bytes),
+      records: number(item.records),
+      decoded: number(item.decoded_bytes),
+      start: item.min_utc || '-',
+      end: item.max_utc || '-',
+      tail: item.has_tail ? 'yes' : 'no',
+      tailBytes: number(item.tail_bytes),
+      reason: item.stop_reason || '-',
+      error: item.scan_error || '-',
+    }));
+    const totalWALBytes = walFiles.reduce((sum, item) => sum + Number(item.bytes || 0), 0);
+    const totalFileRecords = walFiles.reduce((sum, item) => sum + Number(item.records || 0), 0);
+    walPane.innerHTML = '<div class="section-head"><h2>WAL</h2><p>Current WAL health, preview samples, and recent flush history.</p></div>' +
+      renderSummaryCards([
+        { label: 'WAL Files', value: number(walFiles.length) },
+        { label: 'WAL Bytes', value: number(totalWALBytes) },
+        { label: 'Scanned Records', value: number(totalFileRecords || scannedPreview.total) },
+        { label: 'Live Records', value: number(livePreview.total) },
+        { label: 'WAL Buffer', value: number(walStats.BufferBytes) },
+        { label: 'Flushes', value: number(walStats.FlushCount) },
+        { label: 'Last Append', value: ageFromValue(walStats.LastAppendAt) },
+        { label: 'Last Flush', value: ageFromValue(walStats.LastFlushAt) },
+      ]) +
+      '<div class="stack">' +
+      '<div class="subpanel"><div class="section-head"><h3>WAL Files</h3><p>Per-file scan status, record counts, tail state, and time range.</p></div>' + renderTable([
+        { key: 'path', label: 'Path' },
+        { key: 'bytes', label: 'Bytes' },
+        { key: 'records', label: 'Records' },
+        { key: 'decoded', label: 'Decoded Bytes' },
+        { key: 'start', label: 'Start' },
+        { key: 'end', label: 'End' },
+        { key: 'tail', label: 'Tail' },
+        { key: 'tailBytes', label: 'Tail Bytes' },
+        { key: 'reason', label: 'Stop Reason' },
+        { key: 'error', label: 'Error' },
+      ], walRows) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>WAL Preview</h3><p>' + number(livePreview.total) + ' decoded live records. Showing the first and last samples only.</p></div>' +
+      '<div class="stack">' +
+      '<div class="subpanel"><div class="section-head"><h3>First Records</h3><p>Earliest visible records in the active WAL.</p></div>' + renderWALPreviewTable(livePreview.first || []) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Last Records</h3><p>Newest visible records in the active WAL.</p></div>' + renderWALPreviewTable(livePreview.last || []) + '</div>' +
+      '</div></div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Recent Flushes</h3><p>Newest flush events recorded by the active WAL.</p></div>' + renderTable([
+        { key: 'at', label: 'At' },
+        { key: 'age', label: 'Age' },
+        { key: 'bytes', label: 'Bytes' },
+      ], flushRows) + '</div>' +
+      '</div>';
   }
 
   async function loadRuntime() {
-    const db = dbSelect.value;
-    if (!db) {
-      runtimePane.innerHTML = '<div class="empty">No database selected.</div>';
-      return;
-    }
-    const payload = await fetchJSON(apiURL("/api/engine/runtime?db=" + encodeURIComponent(db)));
+    const payload = await fetchJSON(apiURL("/api/engine/runtime"));
     const result = payload.data && payload.data.result;
-    const runtime = result.runtime || {};
-    const showLiveWAL = !!showRuntimeWALByDB[db];
-    const liveWALRows = (result.wal || []).map((record) => ({
-      index: number(record.index),
-      metric: '<span class="codeish">' + (record.metric_name || record.metric_id) + '</span>',
-      timestamp: record.timestamp,
-      type: record.value_type,
-      value: String(record.value),
-    }));
-    runtimePane.innerHTML = '<div class="section-head"><h2>Runtime</h2><p>Live open pages and current WAL contents for the loaded database.</p></div>' +
+    const process = result.process || {};
+    const goMem = result.go_mem || {};
+    const openPages = result.open_pages || [];
+    const totalRecords = openPages.reduce((sum, page) => sum + Number(page.records || 0), 0);
+    const totalMetrics = openPages.reduce((sum, page) => sum + Number(page.unique_metrics || 0), 0);
+    const totalBytes = openPages.reduce((sum, page) => sum + Number(page.value_bytes || 0), 0);
+    const oldestAgeNS = openPages.reduce((maxAge, page) => Math.max(maxAge, Number(page.age_ns || 0)), 0);
+    runtimePane.innerHTML = '<div class="section-head"><h2>Runtime</h2><p>Process-wide engine runtime, Go memory stats, and open pages across all databases.</p></div>' +
       renderSummaryCards([
-        { label: 'Open Pages', value: number((runtime.open_pages || []).length) },
-        { label: 'WAL Records', value: number((result.wal || []).length) },
-        { label: 'WAL Buffer', value: number(runtime.stats && runtime.stats.WAL && runtime.stats.WAL.BufferBytes) },
-        { label: 'Recent Flushes', value: number(runtime.stats && runtime.stats.WAL && runtime.stats.WAL.FlushCount) },
+        { label: 'Databases', value: number(result.database_count) },
+        { label: 'Active DBs', value: number(result.active_database_count) },
+        { label: 'Open Pages', value: number(openPages.length) },
+        { label: 'RSS', value: formatBytes(process.rss_bytes) },
+        { label: 'Heap Alloc', value: formatBytes(goMem.heap_alloc_bytes) },
+        { label: 'Go Sys', value: formatBytes(goMem.sys_bytes) },
+        { label: 'Goroutines', value: number(process.num_goroutine) },
+        { label: 'Proc Age', value: ageFromValue(process.started_at) },
+        { label: 'GC Cycles', value: number(goMem.num_gc) },
       ]) +
       '<div class="stack">' +
-      '<div class="subpanel"><div class="section-head"><h3>Open Pages</h3><p>In-memory page state before flush to .dat files.</p></div>' + renderTable([
+      '<div class="subpanel"><div class="section-head"><h3>Process</h3><p>OS process memory and Go runtime counters for the running server.</p></div>' + renderTable([
+        { key: 'name', label: 'Metric' },
+        { key: 'value', label: 'Value' },
+      ], [
+        { name: 'Started', value: formatClock(process.started_at) },
+        { name: 'Process age', value: ageFromValue(process.started_at) },
+        { name: 'RSS', value: formatBytes(process.rss_bytes) },
+        { name: 'Goroutines', value: number(process.num_goroutine) },
+        { name: 'CPU threads available', value: number(process.num_cpu) },
+        { name: 'Tracked databases', value: number(result.database_count) },
+        { name: 'Active databases', value: number(result.active_database_count) },
+        { name: 'Known metrics', value: number(result.metric_count) },
+        { name: 'Open page records', value: number(totalRecords) },
+        { name: 'Open page metric slots', value: number(totalMetrics) },
+        { name: 'Open page value bytes', value: formatBytes(totalBytes) },
+        { name: 'Oldest open page age', value: durationFromNs(oldestAgeNS) },
+      ]) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Go Memory</h3><p>Go runtime memstats snapshot from the running process.</p></div>' + renderTable([
+        { key: 'name', label: 'Stat' },
+        { key: 'value', label: 'Value' },
+      ], [
+        { name: 'Alloc', value: formatBytes(goMem.alloc_bytes) },
+        { name: 'TotalAlloc', value: formatBytes(goMem.total_alloc_bytes) },
+        { name: 'Sys', value: formatBytes(goMem.sys_bytes) },
+        { name: 'HeapAlloc', value: formatBytes(goMem.heap_alloc_bytes) },
+        { name: 'HeapSys', value: formatBytes(goMem.heap_sys_bytes) },
+        { name: 'HeapInuse', value: formatBytes(goMem.heap_inuse_bytes) },
+        { name: 'HeapIdle', value: formatBytes(goMem.heap_idle_bytes) },
+        { name: 'StackInuse', value: formatBytes(goMem.stack_inuse_bytes) },
+        { name: 'StackSys', value: formatBytes(goMem.stack_sys_bytes) },
+        { name: 'NextGC', value: formatBytes(goMem.next_gc_bytes) },
+        { name: 'GC count', value: number(goMem.num_gc) },
+        { name: 'GC CPU fraction', value: decimal(goMem.gc_cpu_fraction, 4) },
+        { name: 'Last GC', value: formatClock(goMem.last_gc_at) },
+      ]) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Open Pages</h3><p>In-memory page state before flush to .dat files across all databases.</p></div>' + renderTable([
+        { key: 'database', label: 'Database' },
         { key: 'day', label: 'Day' },
         { key: 'records', label: 'Records' },
         { key: 'metrics', label: 'Unique Metrics' },
@@ -483,36 +635,18 @@
         { key: 'end', label: 'End' },
         { key: 'age', label: 'Age' },
         { key: 'full', label: 'Full' },
-      ], (runtime.open_pages || []).map((page) => ({
+      ], openPages.map((page) => ({
+        database: '<span class="codeish">' + escapeHTML(page.database || '-') + '</span>',
         day: page.day,
         records: number(page.records),
         metrics: number(page.unique_metrics),
-        bytes: number(page.value_bytes),
+        bytes: formatBytes(page.value_bytes),
         start: page.start_timestamp_ns ? new Date(page.start_timestamp_ns / 1e6).toISOString() : '-',
         end: page.end_timestamp_ns ? new Date(page.end_timestamp_ns / 1e6).toISOString() : '-',
         age: durationFromNs(page.age_ns),
         full: String(!!page.full),
       }))) + '</div>' +
-      '<div class="subpanel"><div class="section-head"><h3>Live WAL Records</h3><p>Decoded records currently present in the active WAL.</p></div>' +
-      '<div class="subpanel-controls">' + renderToggle('show-runtime-wal', showLiveWAL, 'Display live WAL records') + '<span class="subtle-count">' + number(liveWALRows.length) + ' records available</span></div>' +
-      (showLiveWAL ? renderTable([
-        { key: 'index', label: 'Idx' },
-        { key: 'metric', label: 'Metric' },
-        { key: 'timestamp', label: 'Timestamp' },
-        { key: 'type', label: 'Type' },
-        { key: 'value', label: 'Value' },
-      ], liveWALRows) : '<div class="empty">Live WAL records are hidden by default. Enable the toggle to render them.</div>') + '</div>' +
       '</div>';
-    const toggle = runtimePane.querySelector('[data-toggle-name="show-runtime-wal"]');
-    if (toggle) {
-      toggle.addEventListener('change', () => {
-        showRuntimeWALByDB[db] = toggle.checked;
-        loadRuntime().catch((err) => {
-          console.error(err);
-          setStatus(err && err.message ? err.message : 'Runtime refresh failed');
-        });
-      });
-    }
   }
 
   async function refreshActiveTab() {
@@ -523,6 +657,8 @@
         await loadDatabase();
       } else if (activeTab === 'files') {
         await loadFiles();
+      } else if (activeTab === 'wal') {
+        await loadWAL();
       } else if (activeTab === 'runtime') {
         await loadRuntime();
       }
@@ -538,8 +674,10 @@
     Object.keys(panes).forEach((key) => {
       panes[key].hidden = key !== name;
     });
-    document.querySelectorAll('.tab').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.tab === name);
+    document.querySelectorAll('.engine-tab').forEach((btn) => {
+      const isActive = btn.dataset.tab === name;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
     });
     refreshActiveTab();
   }
@@ -557,7 +695,7 @@
 
   refreshBtn.addEventListener('click', refreshActiveTab);
   dbSelect.addEventListener('change', refreshActiveTab);
-  document.querySelectorAll('.tab').forEach((btn) => {
+  document.querySelectorAll('.engine-tab').forEach((btn) => {
     btn.addEventListener('click', () => activateTab(btn.dataset.tab));
   });
 

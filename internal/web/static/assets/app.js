@@ -1,5 +1,10 @@
 (function () {
   const cfg = window.NANOTDB_DASH_CONFIG || { basePath: "/dashboard", refreshSeconds: 10, apiBaseURL: "" };
+  const {
+    buildInstantQueryPath,
+    buildRangeQueryPath,
+    seriesUsesAggregateRange,
+  } = window.NANOTDB_UTILS || {};
 
   function apiURL(path) {
     const base = typeof cfg.apiBaseURL === "string" ? cfg.apiBaseURL.replace(/\/$/, "") : "";
@@ -7,10 +12,12 @@
   }
 
   const dbSelect = document.getElementById("dbSelect");
-  const metricInput = document.getElementById("metricInput");
+  const queryInput = document.getElementById("queryInput");
   const metricsOptions = document.getElementById("metricsOptions");
-  const addMetricBtn = document.getElementById("addMetricBtn");
-  const selectedMetricsEl = document.getElementById("selectedMetrics");
+  const addQueryBtn = document.getElementById("addQueryBtn");
+  const aggregateInput = document.getElementById("aggregateInput");
+  const bucketWindowInput = document.getElementById("bucketWindowInput");
+  const selectedQueriesEl = document.getElementById("selectedQueries");
   const windowSelect = document.getElementById("windowSelect");
   const stepSelect = document.getElementById("stepSelect");
   const autoRefreshBtn = document.getElementById("autoRefreshBtn");
@@ -26,10 +33,10 @@
   const chartGrid = css.getPropertyValue("--chart-grid").trim() || "#4c5a73";
   const chartText = css.getPropertyValue("--chart-text").trim() || "#b9c6d9";
   let metricCatalog = [];
-  let selectedMetricNames = [];
+  let selectedQueries = [];
   let chartInstance = null;
-  let lastSeriesByMetric = {};
-  let lastMetricOrder = [];
+  let lastSeriesByQuery = {};
+  let lastQueryOrder = [];
   let autoRefreshEnabled = true;
   let autoRefreshTimer = null;
   let refreshInFlight = false;
@@ -79,60 +86,101 @@
     return res.json();
   }
 
-  function selectedMetrics() {
-    return selectedMetricNames.slice();
+  function currentAggregate() {
+    return (aggregateInput.value || "").trim();
   }
 
-  function renderSelectedMetrics() {
-    selectedMetricsEl.innerHTML = "";
-    if (!selectedMetricNames.length) {
+  function currentBucketWindow() {
+    return (bucketWindowInput.value || "").trim();
+  }
+
+  function currentAggregateModeValid() {
+    const aggregate = currentAggregate();
+    const windowValue = currentBucketWindow();
+    return (!aggregate && !windowValue) || (aggregate && windowValue);
+  }
+
+  function activeQueryItem(item) {
+    return {
+      query: item && item.query ? item.query : "",
+      aggregate: currentAggregate(),
+      window: currentBucketWindow(),
+    };
+  }
+
+  function queryItemLabel(item) {
+    if (!item) {
+      return "";
+    }
+    const query = item.query || "";
+    const aggregate = item.aggregate || "";
+    const windowValue = item.window || "";
+    if (aggregate && windowValue) {
+      return query + " [" + aggregate + " " + windowValue + "]";
+    }
+    return query;
+  }
+
+  function selectedChipLabel(item) {
+    return item && item.query ? item.query : "";
+  }
+
+  function selectedQueryItems() {
+    return selectedQueries.slice();
+  }
+
+  function renderSelectedQueries() {
+    selectedQueriesEl.innerHTML = "";
+    if (!selectedQueries.length) {
       const empty = document.createElement("span");
       empty.className = "selected-empty";
-      empty.textContent = "No metrics selected";
-      selectedMetricsEl.appendChild(empty);
+      empty.textContent = "No queries selected";
+      selectedQueriesEl.appendChild(empty);
       return;
     }
 
-    selectedMetricNames.forEach((name) => {
+    selectedQueries.forEach((item) => {
+      const label = selectedChipLabel(item);
       const chip = document.createElement("span");
       chip.className = "metric-chip";
 
       const text = document.createElement("span");
-      text.textContent = name;
+      text.textContent = label;
 
       const removeBtn = document.createElement("button");
       removeBtn.type = "button";
       removeBtn.className = "chip-remove";
-      removeBtn.setAttribute("aria-label", "Remove " + name);
+      removeBtn.setAttribute("aria-label", "Remove " + label);
       removeBtn.textContent = "x";
       removeBtn.addEventListener("click", async () => {
-        selectedMetricNames = selectedMetricNames.filter((m) => m !== name);
-        renderSelectedMetrics();
+        selectedQueries = selectedQueries.filter((queryItem) => selectedChipLabel(queryItem) !== label);
+        renderSelectedQueries();
         await refreshAll();
       });
 
       chip.appendChild(text);
       chip.appendChild(removeBtn);
-      selectedMetricsEl.appendChild(chip);
+      selectedQueriesEl.appendChild(chip);
     });
   }
 
-  async function addMetric(name) {
-    const metric = (name || "").trim();
-    if (!metric) {
+  async function addQuery(rawQuery) {
+    const query = (rawQuery || "").trim();
+    if (!query) {
       return;
     }
-    if (!metricCatalog.includes(metric)) {
-      setStatus("Unknown metric: " + metric);
+    if (!currentAggregateModeValid()) {
+      setStatus("Aggregate and bucket window must be set together");
       return;
     }
-    if (selectedMetricNames.includes(metric)) {
-      metricInput.value = "";
+    const next = { query };
+    if (selectedQueries.some((item) => selectedChipLabel(item) === selectedChipLabel(next))) {
+      queryInput.value = "";
       return;
     }
-    selectedMetricNames.push(metric);
-    metricInput.value = "";
-    renderSelectedMetrics();
+    selectedQueries.push(next);
+    queryInput.value = "";
+    renderSelectedQueries();
     await refreshAll();
   }
 
@@ -163,36 +211,48 @@
     const items = (payload.data && payload.data.result) || [];
     metricCatalog = items.slice();
     metricsOptions.innerHTML = "";
-    items.forEach((m) => {
+    items.forEach((metric) => {
       const opt = document.createElement("option");
-      opt.value = m;
+      opt.value = metric;
       metricsOptions.appendChild(opt);
     });
 
-    selectedMetricNames = selectedMetricNames.filter((m) => metricCatalog.includes(m));
-    if (selectedMetricNames.length === 0) {
-      selectedMetricNames = metricCatalog.slice(0, 3);
+    selectedQueries = selectedQueries.filter((item) => item && item.query);
+    if (selectedQueries.length === 0) {
+      selectedQueries = metricCatalog.slice(0, 3).map((metric) => ({ query: metric }));
     }
-    renderSelectedMetrics();
+    renderSelectedQueries();
   }
 
-  async function renderLastValues(db, metrics) {
+  async function renderLastValues(db, queries, fromIso, toIso, step) {
     cards.innerHTML = "";
-    const jobs = metrics.map(async (metric) => {
-      const data = await fetchJSON(
-        apiURL("/api/v1/query?db=" + encodeURIComponent(db) + "&query=" + encodeURIComponent(metric))
-      );
-      const result = data.data && data.data.result && data.data.result[0];
+    const jobs = queries.map(async (item) => {
       const card = document.createElement("div");
       card.className = "card";
+      const activeItem = activeQueryItem(item);
+      const label = queryItemLabel(activeItem);
+      let result = null;
+      if (seriesUsesAggregateRange && seriesUsesAggregateRange(activeItem)) {
+        const points = await loadSeries(db, activeItem, fromIso, toIso, step);
+        const lastPoint = points[points.length - 1];
+        if (lastPoint) {
+          result = { value: [lastPoint.x, lastPoint.y] };
+        }
+      } else {
+        const instantPath = buildInstantQueryPath(item.db || db, activeItem);
+        if (instantPath) {
+          const data = await fetchJSON(apiURL(instantPath));
+          result = data.data && data.data.result && data.data.result[0];
+        }
+      }
       if (!result) {
         card.innerHTML =
-          '<div class="metric">' + metric + '</div><div class="value">-</div><div class="ts">no data</div>';
+          '<div class="metric">' + label + '</div><div class="value">-</div><div class="ts">no data</div>';
         return card;
       }
       const ts = Number(result.value[0]) * 1000;
       card.innerHTML =
-        '<div class="metric">' + metric + "</div>" +
+        '<div class="metric">' + label + "</div>" +
         '<div class="value">' + result.value[1] + "</div>" +
         '<div class="ts">' + new Date(ts).toLocaleString() + "</div>";
       return card;
@@ -201,20 +261,17 @@
     renderedCards.forEach((card) => cards.appendChild(card));
   }
 
-  async function loadSeries(db, metric, fromIso, toIso, step) {
-    const url = apiURL(
-      "/api/v1/query_range?db=" + encodeURIComponent(db) +
-        "&query=" + encodeURIComponent(metric) +
-        "&start=" + encodeURIComponent(fromIso) +
-        "&end=" + encodeURIComponent(toIso) +
-        "&step=" + encodeURIComponent(step)
-    );
-    const payload = await fetchJSON(url);
+  async function loadSeries(db, item, fromIso, toIso, step) {
+    const path = buildRangeQueryPath(item.db || db, item, fromIso, toIso, step);
+    if (!path) {
+      return [];
+    }
+    const payload = await fetchJSON(apiURL(path));
     const result = payload.data && payload.data.result && payload.data.result[0];
     if (!result || !result.values) {
       return [];
     }
-    return result.values.map((p) => ({ x: Number(p[0]), y: Number(p[1]) }));
+    return result.values.map((point) => ({ x: Number(point[0]), y: Number(point[1]) }));
   }
 
   function destroyChart() {
@@ -224,31 +281,31 @@
     }
   }
 
-  function buildUPlotData(seriesByMetric, metricOrder) {
+  function buildUPlotData(seriesByQuery, queryOrder) {
     const timeSet = new Set();
-    metricOrder.forEach((metric) => {
-      const points = seriesByMetric[metric] || [];
+    queryOrder.forEach((label) => {
+      const points = seriesByQuery[label] || [];
       points.forEach((point) => timeSet.add(point.x));
     });
 
     const x = Array.from(timeSet).sort((a, b) => a - b);
     const data = [x];
-    metricOrder.forEach((metric) => {
-      const byTs = new Map((seriesByMetric[metric] || []).map((point) => [point.x, point.y]));
+    queryOrder.forEach((label) => {
+      const byTs = new Map((seriesByQuery[label] || []).map((point) => [point.x, point.y]));
       data.push(x.map((ts) => (byTs.has(ts) ? byTs.get(ts) : null)));
     });
     return data;
   }
 
-  function drawChart(seriesByMetric, metricOrder) {
-    lastSeriesByMetric = seriesByMetric;
-    lastMetricOrder = Array.isArray(metricOrder) ? metricOrder.slice() : [];
+  function drawChart(seriesByQuery, queryOrder) {
+    lastSeriesByQuery = seriesByQuery;
+    lastQueryOrder = Array.isArray(queryOrder) ? queryOrder.slice() : [];
     if (typeof uPlot !== "function") {
       throw new Error("uPlot not loaded");
     }
 
-    const labels = lastMetricOrder.length ? lastMetricOrder.slice() : Object.keys(seriesByMetric);
-    const data = buildUPlotData(seriesByMetric, labels);
+    const labels = lastQueryOrder.length ? lastQueryOrder.slice() : Object.keys(seriesByQuery);
+    const data = buildUPlotData(seriesByQuery, labels);
     if (!data[0] || data[0].length === 0) {
       destroyChart();
       chartEl.innerHTML = '<div class="chart-empty">No data in selected range</div>';
@@ -295,11 +352,11 @@
       return;
     }
     const db = dbSelect.value;
-    const metrics = selectedMetrics();
-    if (!db || metrics.length === 0) {
+    const queries = selectedQueryItems();
+    if (!db || queries.length === 0) {
       cards.innerHTML = "";
-      lastSeriesByMetric = {};
-      lastMetricOrder = [];
+      lastSeriesByQuery = {};
+      lastQueryOrder = [];
       destroyChart();
       drawChart({}, []);
       syncRefreshControls(false);
@@ -310,8 +367,10 @@
     syncRefreshControls(false);
     setStatus("Refreshing...");
     try {
-      await renderLastValues(db, metrics);
-
+      if (!currentAggregateModeValid()) {
+        setStatus("Aggregate and bucket window must be set together");
+        return;
+      }
       const now = new Date();
       const windowSec = Number(windowSelect.value || "3600");
       const start = new Date(now.getTime() - windowSec * 1000);
@@ -319,12 +378,15 @@
       const toIso = now.toISOString();
       const step = stepSelect.value || "30s";
 
-      const seriesResults = await Promise.all(metrics.map((metric) => loadSeries(db, metric, fromIso, toIso, step)));
-      const seriesByMetric = {};
-      metrics.forEach((metric, idx) => {
-        seriesByMetric[metric] = seriesResults[idx];
+      await renderLastValues(db, queries, fromIso, toIso, step);
+
+      const activeQueries = queries.map((item) => activeQueryItem(item));
+      const seriesResults = await Promise.all(activeQueries.map((item) => loadSeries(db, item, fromIso, toIso, step)));
+      const seriesByQuery = {};
+      activeQueries.forEach((item, idx) => {
+        seriesByQuery[queryItemLabel(item)] = seriesResults[idx];
       });
-      drawChart(seriesByMetric, metrics);
+      drawChart(seriesByQuery, activeQueries.map(queryItemLabel));
       syncRefreshControls(true);
     } catch (err) {
       setStatus("Refresh failed: " + err.message);
@@ -339,15 +401,17 @@
     await loadMetrics();
     await refreshAll();
   });
-  addMetricBtn.addEventListener("click", async () => {
-    await addMetric(metricInput.value);
+  addQueryBtn.addEventListener("click", async () => {
+    await addQuery(queryInput.value);
   });
-  metricInput.addEventListener("keydown", async (ev) => {
+  queryInput.addEventListener("keydown", async (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
-      await addMetric(metricInput.value);
+      await addQuery(queryInput.value);
     }
   });
+  aggregateInput.addEventListener("change", refreshAll);
+  bucketWindowInput.addEventListener("change", refreshAll);
   windowSelect.addEventListener("change", refreshAll);
   stepSelect.addEventListener("change", refreshAll);
   autoRefreshBtn.addEventListener("click", () => {
@@ -362,7 +426,7 @@
   refreshBtn.addEventListener("click", refreshAll);
   window.addEventListener("resize", () => {
     if (chartInstance) {
-      drawChart(lastSeriesByMetric, lastMetricOrder);
+      drawChart(lastSeriesByQuery, lastQueryOrder);
     }
   });
 

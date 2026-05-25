@@ -510,6 +510,7 @@ func TestCaptureRuntimeStatsIncludesMetricTimeCacheMetrics(t *testing.T) {
 	defer e.Close()
 
 	before := metricTimeFrameCacheStatsSnapshotV2()
+	beforeIndex := metricFileIndexCacheStatsSnapshotV2()
 
 	base := Timestamp(time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC).UnixNano())
 	for i := 0; i < 4; i++ {
@@ -549,12 +550,19 @@ func TestCaptureRuntimeStatsIncludesMetricTimeCacheMetrics(t *testing.T) {
 
 	e.captureRuntimeStats()
 	after := metricTimeFrameCacheStatsSnapshotV2()
+	afterIndex := metricFileIndexCacheStatsSnapshotV2()
 	stats := e.stats.snapshot()
 	if after.Misses <= before.Misses {
 		t.Fatalf("expected cache misses to increase: before=%d after=%d", before.Misses, after.Misses)
 	}
 	if after.Hits <= before.Hits {
 		t.Fatalf("expected cache hits to increase: before=%d after=%d", before.Hits, after.Hits)
+	}
+	if afterIndex.Misses <= beforeIndex.Misses {
+		t.Fatalf("expected index cache misses to increase: before=%d after=%d", beforeIndex.Misses, afterIndex.Misses)
+	}
+	if afterIndex.Hits <= beforeIndex.Hits {
+		t.Fatalf("expected index cache hits to increase: before=%d after=%d", beforeIndex.Hits, afterIndex.Hits)
 	}
 	for _, key := range []string{
 		"metric_file/time_cache_entries",
@@ -563,6 +571,12 @@ func TestCaptureRuntimeStatsIncludesMetricTimeCacheMetrics(t *testing.T) {
 		"metric_file/time_cache_hits",
 		"metric_file/time_cache_misses",
 		"metric_file/time_cache_evictions",
+		"metric_file/index_cache_entries",
+		"metric_file/index_cache_bytes",
+		"metric_file/index_cache_max_entries",
+		"metric_file/index_cache_hits",
+		"metric_file/index_cache_misses",
+		"metric_file/index_cache_evictions",
 	} {
 		if _, ok := stats[key]; !ok {
 			t.Fatalf("expected runtime stats key %q", key)

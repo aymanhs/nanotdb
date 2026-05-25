@@ -25,6 +25,17 @@ type DataFileRecompactReport struct {
 	DurationMS int64  `json:"duration_ms"`
 }
 
+type DataFileMetricCompactReport struct {
+	Database    string `json:"database"`
+	Part        string `json:"part"`
+	DataPath    string `json:"data_path"`
+	MetricPath  string `json:"metric_path"`
+	DataBytes   int64  `json:"data_bytes"`
+	MetricBytes int64  `json:"metric_bytes"`
+	SavedBytes  int64  `json:"saved_bytes"`
+	DurationMS  int64  `json:"duration_ms"`
+}
+
 func (e *Engine) RecompactDataFile(database, part string) (DataFileRecompactReport, error) {
 	report := DataFileRecompactReport{
 		Database: strings.TrimSpace(database),
@@ -82,6 +93,59 @@ func (e *Engine) RecompactDataFile(database, part string) (DataFileRecompactRepo
 	report.NewFrames = newFrames
 	report.NewRecords = newStats.TotalRecords
 	report.NewBytes = newStats.FileBytes
+	report.DurationMS = time.Since(started).Milliseconds()
+	return report, nil
+}
+
+func (e *Engine) CompactDataFileToMetricV2(database, part string) (DataFileMetricCompactReport, error) {
+	report := DataFileMetricCompactReport{
+		Database: strings.TrimSpace(database),
+		Part:     strings.TrimSpace(part),
+	}
+	if report.Database == "" {
+		return report, fmt.Errorf("database is required")
+	}
+	if report.Part == "" {
+		return report, fmt.Errorf("part is required")
+	}
+
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+
+	started := time.Now()
+	db, rt, err := e.getOrCreateDB(report.Database)
+	if err != nil {
+		return report, err
+	}
+	if err := validatePartitionKeyForRuntime(rt, report.Part); err != nil {
+		return report, err
+	}
+	if p := rt.openDays[report.Part]; p != nil {
+		return report, fmt.Errorf("%w: %s/%s", ErrDataFileActive, report.Database, report.Part)
+	}
+	partitionKind, err := partitionModeToMetricPartitionKind(rt.info.Partition)
+	if err != nil {
+		return report, err
+	}
+	report.DataPath, err = resolveMetricRawPartitionPath(db.RootDataDir, report.Part)
+	if err != nil {
+		return report, err
+	}
+	dataStat, err := os.Stat(report.DataPath)
+	if err != nil {
+		return report, err
+	}
+	report.DataBytes = dataStat.Size()
+	report.MetricPath, err = e.buildMetricFileForPartitionV2(db, partitionKind, report.Part)
+	if err != nil {
+		return report, err
+	}
+	metricStat, err := os.Stat(report.MetricPath)
+	if err != nil {
+		return report, err
+	}
+	report.MetricBytes = metricStat.Size()
+	report.SavedBytes = report.DataBytes - report.MetricBytes
 	report.DurationMS = time.Since(started).Milliseconds()
 	return report, nil
 }

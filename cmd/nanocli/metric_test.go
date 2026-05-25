@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -81,5 +83,120 @@ func TestRunQueryRejectsInvalidMetricFilesOverride(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid --metric-files") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunQueryAggregateJSON(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	base := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: 10 * time.Second, value: 10},
+		{offset: 4 * time.Minute, value: 20},
+		{offset: 5*time.Minute + 10*time.Second, value: 30},
+	} {
+		if err := e.AddSample("prod", "temp.out_dry", engine.Timestamp(base.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runQuery([]string{
+			"--root", root,
+			"--db", "prod",
+			"--metric", "^temp\\.out_dry$",
+			"--start", strconv.FormatInt(base.UnixNano(), 10),
+			"--end", strconv.FormatInt(base.Add(10*time.Minute).UnixNano(), 10),
+			"--aggregate", "sum,count",
+			"--window", "5m",
+			"--json",
+		}); err != nil {
+			t.Fatalf("runQuery failed: %v", err)
+		}
+	})
+
+	var report queryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("Unmarshal failed: %v\noutput=%s", err, out)
+	}
+	if report.RowCount != 4 {
+		t.Fatalf("row count mismatch: got=%d want=4", report.RowCount)
+	}
+	if report.Rows[0].Aggregate != "count" && report.Rows[0].Aggregate != "sum" {
+		t.Fatalf("expected aggregate rows, got=%+v", report.Rows[0])
+	}
+	for _, row := range report.Rows {
+		if row.Window != "5m0s" {
+			t.Fatalf("window mismatch: got=%q want=5m0s", row.Window)
+		}
+		if row.EndNS == 0 {
+			t.Fatalf("expected aggregate end timestamp in row: %+v", row)
+		}
+	}
+}
+
+func TestRunQueryAggregateJSON_AllowsMissingEnd(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	base := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: 10 * time.Second, value: 10},
+		{offset: 4 * time.Minute, value: 20},
+		{offset: 5*time.Minute + 10*time.Second, value: 30},
+	} {
+		if err := e.AddSample("prod", "temp.out_dry", engine.Timestamp(base.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runQuery([]string{
+			"--root", root,
+			"--db", "prod",
+			"--metric", "^temp\\.out_dry$",
+			"--start", strconv.FormatInt(base.UnixNano(), 10),
+			"--aggregate", "sum,count",
+			"--window", "5m",
+			"--json",
+		}); err != nil {
+			t.Fatalf("runQuery failed: %v", err)
+		}
+	})
+
+	var report queryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("Unmarshal failed: %v\noutput=%s", err, out)
+	}
+	if report.RowCount != 4 {
+		t.Fatalf("row count mismatch: got=%d want=4", report.RowCount)
+	}
+	if report.End != nil {
+		t.Fatalf("expected omitted report end when --end is absent, got=%d", *report.End)
 	}
 }

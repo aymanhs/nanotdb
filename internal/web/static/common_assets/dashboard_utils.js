@@ -21,14 +21,86 @@
     return series.db || series.database || dashboardCfg.default_db || "";
   }
 
-  function seriesMetric(series) {
-    if (series.metric) {
+  function seriesQuery(series) {
+    if (series && typeof series.query === "string" && series.query.trim()) {
+      return series.query.trim();
+    }
+    if (series && series.metric) {
       return series.metric;
     }
-    if (series.measurement && series.field) {
+    if (series && series.measurement && series.field) {
       return series.measurement + "." + series.field;
     }
     return "";
+  }
+
+  function seriesMetric(series) {
+    return seriesQuery(series);
+  }
+
+  function seriesAggregate(series) {
+    return series && typeof series.aggregate === "string" ? series.aggregate.trim() : "";
+  }
+
+  function seriesWindow(series) {
+    return series && typeof series.window === "string" ? series.window.trim() : "";
+  }
+
+  function seriesUsesAggregateRange(series) {
+    return Boolean(seriesAggregate(series) && seriesWindow(series));
+  }
+
+  function effectiveSeriesLabel(series, idx) {
+    if (series && typeof series.label === "string" && series.label.trim()) {
+      return series.label.trim();
+    }
+    if (series && typeof series.role === "string" && series.role.trim()) {
+      const role = series.role.trim();
+      if (role === "avg") return "Avg";
+      if (role === "min") return "Min";
+      if (role === "max") return "Max";
+      return role;
+    }
+    const query = seriesQuery(series);
+    if (query) {
+      const aggregate = seriesAggregate(series);
+      const window = seriesWindow(series);
+      if (aggregate && window) {
+        return query + " [" + aggregate + " " + window + "]";
+      }
+      return query;
+    }
+    return "Series " + (idx + 1);
+  }
+
+  function buildInstantQueryPath(db, series) {
+    const query = seriesQuery(series);
+    if (!db || !query || seriesUsesAggregateRange(series)) {
+      return "";
+    }
+    return "/api/v1/query?db=" + encodeURIComponent(db) + "&query=" + encodeURIComponent(query);
+  }
+
+  function buildRangeQueryPath(db, series, startISO, endISO, step) {
+    const query = seriesQuery(series);
+    if (!db || !query || !startISO) {
+      return "";
+    }
+    let path = "/api/v1/query_range?db=" + encodeURIComponent(db) +
+      "&query=" + encodeURIComponent(query) +
+      "&start=" + encodeURIComponent(startISO);
+    if (endISO) {
+      path += "&end=" + encodeURIComponent(endISO);
+    }
+    if (seriesUsesAggregateRange(series)) {
+      path += "&aggregate=" + encodeURIComponent(seriesAggregate(series));
+      path += "&window=" + encodeURIComponent(seriesWindow(series));
+      return path;
+    }
+    if (step) {
+      path += "&step=" + encodeURIComponent(step);
+    }
+    return path;
   }
 
   function resolveDisplayConfig(target) {
@@ -145,7 +217,7 @@
       maxLen = Math.max(maxLen, String(label).length);
     });
     const isMobile = window.matchMedia("(max-width: 699px)").matches;
-    const minSize = isMobile ? 40 : 80;
+    const minSize = isMobile ? 36 : 64;
     const maxSize = isMobile ? 84 : 220;
     return Math.min(maxSize, Math.max(minSize, maxLen * 8 + 16));
   }
@@ -198,7 +270,14 @@
   window.NANOTDB_UTILS = {
     parseDurationSeconds,
     seriesDB,
+    seriesQuery,
     seriesMetric,
+    seriesAggregate,
+    seriesWindow,
+    seriesUsesAggregateRange,
+    effectiveSeriesLabel,
+    buildInstantQueryPath,
+    buildRangeQueryPath,
     resolveDisplayConfig,
     transformValue,
     trimTrailingZeros,

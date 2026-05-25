@@ -4,6 +4,8 @@
   const groupPanes = new Map();
   const groupTimers = new Map();
   const groupWidgetRefreshers = new Map();
+  let activeGroupId = "";
+  let dashboardRefreshPaused = false;
 
   function apiURL(path) {
     const base = typeof cfg.apiBaseURL === "string" ? cfg.apiBaseURL.replace(/\/$/, "") : "";
@@ -23,6 +25,11 @@
     parseDurationSeconds,
     seriesDB,
     seriesMetric,
+    seriesWindow,
+    effectiveSeriesLabel,
+    buildInstantQueryPath,
+    buildRangeQueryPath,
+    seriesAggregate,
     resolveDisplayConfig,
     transformValue,
     formatDurationFromSeconds,
@@ -37,12 +44,175 @@
     rebalanceSingleNumberRows
   } = window.NANOTDB_UTILS;
 
+  function widgetChartType(widget) {
+    if (!widget) {
+      return "";
+    }
+    if (widget.type === "aggregate_band") {
+      return "aggregate_band";
+    }
+    if (widget.type === "line_chart" && typeof widget.presentation === "string" && widget.presentation.trim() === "aggregate_band") {
+      return "aggregate_band";
+    }
+    return widget.type || "";
+  }
+
+  function seriesRole(series) {
+    if (series && typeof series.role === "string" && series.role.trim()) {
+      return series.role.trim();
+    }
+    const aggregate = seriesAggregate(series);
+    if (aggregate === "min" || aggregate === "max" || aggregate === "avg") {
+      return aggregate;
+    }
+    return "";
+  }
+
+  function chartSeriesStyle(item, idx, presentation) {
+    if (presentation !== "aggregate_band") {
+      return {
+        stroke: pickSeriesColor(idx),
+        width: 2,
+        dash: [],
+        points: { show: true, size: 5, width: 2 },
+      };
+    }
+    if (item && item.role === "avg") {
+      return {
+        stroke: "#2dd4bf",
+        width: 3,
+        dash: [],
+        points: { show: false },
+      };
+    }
+    if (item && item.role === "min") {
+      return {
+        stroke: "rgba(94, 234, 212, 0.72)",
+        width: 1.5,
+        dash: [6, 4],
+        points: { show: false },
+      };
+    }
+    if (item && item.role === "max") {
+      return {
+        stroke: "rgba(45, 212, 191, 0.9)",
+        width: 1.5,
+        dash: [6, 4],
+        points: { show: false },
+      };
+    }
+    return {
+      stroke: pickSeriesColor(idx),
+      width: 2,
+      dash: [],
+      points: { show: false },
+    };
+  }
+
+  function orderChartSeriesItems(items, presentation) {
+    if (presentation !== "aggregate_band") {
+      return items;
+    }
+    const used = new Set();
+    const ordered = [];
+    ["avg", "min", "max"].forEach((role) => {
+      const match = items.find((item) => item && item.role === role);
+      if (match) {
+        ordered.push(match);
+        used.add(match);
+      }
+    });
+    items.forEach((item) => {
+      if (!used.has(item)) {
+        ordered.push(item);
+      }
+    });
+    return ordered;
+  }
+
+  function aggregateBandShortcutSeries(series) {
+    if (!series) {
+      return [];
+    }
+    return ["avg", "min", "max"].map((role) => Object.assign({}, series, {
+      label: role === "avg" ? "Avg" : (role === "min" ? "Min" : "Max"),
+      aggregate: role,
+      role,
+    }));
+  }
+
+  function expandedChartSeries(widget) {
+    const series = Array.isArray(widget && widget.series) ? widget.series : [];
+    if (widgetChartType(widget) === "aggregate_band" && series.length === 1) {
+      const item = series[0];
+      if (item && item.window && !item.aggregate && !seriesRole(item)) {
+        return aggregateBandShortcutSeries(item);
+      }
+    }
+    return series;
+  }
+
+  function aggregateBandHooks(items) {
+    const minIndex = items.findIndex((item) => item && item.role === "min");
+    const maxIndex = items.findIndex((item) => item && item.role === "max");
+    if (minIndex < 0 || maxIndex < 0) {
+      return {};
+    }
+    return {
+      hooks: {
+        drawAxes: [
+          (u) => {
+            const xData = u.data[0] || [];
+            const minData = u.data[minIndex + 1] || [];
+            const maxData = u.data[maxIndex + 1] || [];
+            let started = false;
+            const ctx = u.ctx;
+            ctx.save();
+            ctx.beginPath();
+            for (let i = 0; i < xData.length; i += 1) {
+              const minValue = minData[i];
+              const maxValue = maxData[i];
+              if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+                continue;
+              }
+              const x = u.valToPos(xData[i], "x", true);
+              const y = u.valToPos(maxValue, "y", true);
+              if (!started) {
+                ctx.moveTo(x, y);
+                started = true;
+              } else {
+                ctx.lineTo(x, y);
+              }
+            }
+            if (started) {
+              for (let i = xData.length - 1; i >= 0; i -= 1) {
+                const minValue = minData[i];
+                const maxValue = maxData[i];
+                if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+                  continue;
+                }
+                const x = u.valToPos(xData[i], "x", true);
+                const y = u.valToPos(minValue, "y", true);
+                ctx.lineTo(x, y);
+              }
+              ctx.closePath();
+              ctx.fillStyle = "rgba(45, 212, 191, 0.24)";
+              ctx.fill();
+            }
+            ctx.restore();
+          },
+        ],
+      },
+    };
+  }
+
   function renderUPlotChart(plotEl, widget, seriesItems) {
     if (typeof uPlot !== "function") {
       throw new Error("uPlot not loaded");
     }
 
-    const items = Array.isArray(seriesItems) ? seriesItems : [];
+    const presentation = widgetChartType(widget);
+    const items = orderChartSeriesItems(Array.isArray(seriesItems) ? seriesItems : [], presentation);
     const data = buildUPlotData(items);
     if (!data[0] || data[0].length === 0) {
       const existing = chartState.get(widget.id);
@@ -56,12 +226,14 @@
 
     const seriesDefs = [{ label: "Time" }];
     items.forEach((item, idx) => {
+      const style = chartSeriesStyle(item, idx, presentation);
       seriesDefs.push({
         label: item && item.label ? item.label : ("Series " + (idx + 1)),
-        stroke: pickSeriesColor(idx),
-        width: 2,
+        stroke: style.stroke,
+        width: style.width,
+        dash: style.dash,
         spanGaps: true,
-        points: { show: true, size: 5, width: 2 },
+        points: style.points,
       });
     });
 
@@ -73,7 +245,7 @@
     const opts = {
       width,
       height,
-      padding: isMobile ? [4, 4, 2, 2] : [8, 8, 4, 4],
+      padding: isMobile ? [4, 4, 2, 0] : [8, 8, 4, 0],
       scales: { x: { time: true } },
       series: seriesDefs,
       axes: [
@@ -87,6 +259,9 @@
       ],
       legend: { show: true, live: true, isolate: false },
     };
+    if (presentation === "aggregate_band") {
+      Object.assign(opts, aggregateBandHooks(items));
+    }
     const existing = chartState.get(widget.id);
     if (existing) {
       existing.destroy();
@@ -98,8 +273,16 @@
     return true;
   }
 
-  async function fetchLast(db, metric) {
-  const payload = await fetchJSON(apiURL("/api/v1/query?db=" + encodeURIComponent(db) + "&query=" + encodeURIComponent(metric)));
+  async function fetchLast(db, series, lookbackSec) {
+    const instantPath = buildInstantQueryPath(db, series);
+    if (!instantPath) {
+      const points = await fetchRange(db, series, lookbackSec || parseDurationSeconds(seriesWindow(series), 300), "");
+      if (!points.length) {
+        return null;
+      }
+      return { ts: points[points.length - 1].x, value: points[points.length - 1].y };
+    }
+    const payload = await fetchJSON(apiURL(instantPath));
     const item = payload.data && payload.data.result && payload.data.result[0];
     if (!item) {
       return null;
@@ -107,20 +290,76 @@
     return { ts: Number(item.value[0]), value: Number(item.value[1]) };
   }
 
-  async function fetchRange(db, metric, lookbackSec, step) {
+  async function fetchRange(db, series, lookbackSec, step) {
     const end = new Date();
     const start = new Date(end.getTime() - lookbackSec * 1000);
-    const url = apiURL("/api/v1/query_range?db=" + encodeURIComponent(db) +
-      "&query=" + encodeURIComponent(metric) +
-      "&start=" + encodeURIComponent(start.toISOString()) +
-      "&end=" + encodeURIComponent(end.toISOString()) +
-      "&step=" + encodeURIComponent(step || "30s"));
+    const path = buildRangeQueryPath(db, series, start.toISOString(), end.toISOString(), step || "30s");
+    if (!path) {
+      return [];
+    }
+    const url = apiURL(path);
     const payload = await fetchJSON(url);
     const item = payload.data && payload.data.result && payload.data.result[0];
     if (!item || !item.values) {
       return [];
     }
     return item.values.map((v) => ({ x: Number(v[0]), y: Number(v[1]) })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  }
+
+  function resolveAggregateBandBatch(chartSeries, dashboardCfg) {
+    if (!Array.isArray(chartSeries) || chartSeries.length === 0) {
+      return null;
+    }
+    const first = chartSeries[0];
+    const db = seriesDB(first, dashboardCfg);
+    const query = seriesMetric(first);
+    const window = seriesWindow(first);
+    const aggregates = [];
+    if (!db || !query || !window) {
+      return null;
+    }
+    for (const series of chartSeries) {
+      if (seriesDB(series, dashboardCfg) !== db || seriesMetric(series) !== query || seriesWindow(series) !== window) {
+        return null;
+      }
+      const aggregate = seriesAggregate(series);
+      if (!aggregate) {
+        return null;
+      }
+      aggregates.push(aggregate);
+    }
+    return { db, query, window, aggregates };
+  }
+
+  async function fetchAggregateBandSeries(widget, chartSeries, lookbackSec, dashboardCfg) {
+    if (widgetChartType(widget) !== "aggregate_band") {
+      return null;
+    }
+    const batch = resolveAggregateBandBatch(chartSeries, dashboardCfg);
+    if (!batch) {
+      return null;
+    }
+    const end = new Date();
+    const start = new Date(end.getTime() - lookbackSec * 1000);
+    const path = "/api/v1/query_range?db=" + encodeURIComponent(batch.db) +
+      "&query=" + encodeURIComponent(batch.query) +
+      "&start=" + encodeURIComponent(start.toISOString()) +
+      "&end=" + encodeURIComponent(end.toISOString()) +
+      "&aggregate=" + encodeURIComponent(batch.aggregates.join(",")) +
+      "&window=" + encodeURIComponent(batch.window);
+    const payload = await fetchJSON(apiURL(path));
+    const result = payload.data && payload.data.result ? payload.data.result : [];
+    const valuesByAggregate = new Map();
+    result.forEach((item) => {
+      const aggregate = item && item.metric ? item.metric.aggregate : "";
+      const values = item && item.values ? item.values : [];
+      valuesByAggregate.set(aggregate, values.map((value) => ({ x: Number(value[0]), y: Number(value[1]) })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
+    });
+    return chartSeries.map((series, idx) => ({
+      label: effectiveSeriesLabel(series, idx),
+      role: seriesRole(series),
+      points: (valuesByAggregate.get(seriesAggregate(series)) || []).map((point) => ({ x: point.x, y: transformValue(series, point.y) })).filter((point) => Number.isFinite(point.y)),
+    }));
   }
 
   function widgetAutoRefreshEnabled(widget) {
@@ -232,19 +471,54 @@
 
     const refreshBtn = document.createElement("button");
     refreshBtn.type = "button";
-    refreshBtn.className = "widget-control-btn";
-    refreshBtn.textContent = "Refresh";
+    refreshBtn.className = "widget-control-btn widget-control-btn--icon";
+    refreshBtn.textContent = "↻";
+    refreshBtn.title = "Refresh widget";
+    refreshBtn.setAttribute("aria-label", "Refresh widget");
 
     const pauseBtn = document.createElement("button");
     pauseBtn.type = "button";
-    pauseBtn.className = "widget-control-btn";
-    pauseBtn.textContent = "Pause";
+    pauseBtn.className = "widget-control-btn widget-control-btn--icon";
+    pauseBtn.textContent = "⏸";
+    pauseBtn.title = "Pause widget auto refresh";
+    pauseBtn.setAttribute("aria-label", "Pause widget auto refresh");
 
     controls.appendChild(refreshBtn);
     controls.appendChild(pauseBtn);
     header.appendChild(title);
     header.appendChild(controls);
     return { header, controls, refreshBtn, pauseBtn };
+  }
+
+  function activeRefreshers() {
+    return groupWidgetRefreshers.get(activeGroupId) || [];
+  }
+
+  function syncDashboardRefreshControls() {
+    const pauseBtn = document.getElementById("dashboardAutoRefreshBtn");
+    const refreshBtn = document.getElementById("dashboardRefreshAllBtn");
+    if (pauseBtn) {
+      pauseBtn.textContent = dashboardRefreshPaused ? "▶" : "⏸";
+      pauseBtn.setAttribute("aria-pressed", dashboardRefreshPaused ? "true" : "false");
+      pauseBtn.title = dashboardRefreshPaused ? "Resume visible group auto refresh" : "Pause visible group auto refresh";
+      pauseBtn.setAttribute("aria-label", pauseBtn.title);
+    }
+    if (refreshBtn) {
+      refreshBtn.disabled = activeRefreshers().length === 0;
+      refreshBtn.title = "Refresh visible group";
+      refreshBtn.setAttribute("aria-label", "Refresh visible group");
+    }
+  }
+
+  function setDashboardRefreshPaused(nextPaused) {
+    dashboardRefreshPaused = Boolean(nextPaused);
+    activeRefreshers().forEach((refresher) => refresher.setPaused(dashboardRefreshPaused));
+    syncDashboardRefreshControls();
+  }
+
+  async function refreshActiveGroupNow() {
+    await Promise.all(activeRefreshers().map((refresher) => refresher.refreshNow()));
+    syncDashboardRefreshControls();
   }
 
   function chartLookbackChoices(currentLookback) {
@@ -344,7 +618,7 @@
 
   function createChartWidget(widget, containerEl, currentLookback) {
     const card = document.createElement("article");
-    card.className = "widget-chart";
+    card.className = "widget-chart" + (widgetChartType(widget) === "aggregate_band" ? " widget-chart--aggregate-band" : "");
     const header = createWidgetHeader(widget.title || widget.id, "chart-title");
     const lookbackSelect = document.createElement("select");
     lookbackSelect.className = "widget-control-select widget-lookback-select";
@@ -380,14 +654,14 @@
       const refresh = async () => {
         const series = (widget.series || [])[0];
         const db = series && seriesDB(series, dashboardCfg);
-        const metric = series && seriesMetric(series);
-        if (!db || !metric) {
+          const query = series && seriesMetric(series);
+          if (!db || !query) {
           els.value.textContent = "--";
-          els.foot.textContent = "missing db/metric";
+            els.foot.textContent = "missing db/query";
           applySeverityClass(els.card, "none");
           return;
         }
-        const point = await fetchLast(db, metric);
+          const point = await fetchLast(db, series, parseDurationSeconds(widget.lookback || series.window || "5m", 300));
         if (!point) {
           els.value.textContent = "--";
           els.foot.textContent = "no value";
@@ -415,13 +689,13 @@
         let validCount = 0;
         await Promise.all(els.items.map(async (item) => {
           const db = seriesDB(item.series, dashboardCfg);
-          const metric = seriesMetric(item.series);
+          const query = seriesMetric(item.series);
           item.row.classList.remove("value-normal", "value-warning", "value-critical");
-          if (!db || !metric) {
+          if (!db || !query) {
             item.value.textContent = "--";
             return;
           }
-          const point = await fetchLast(db, metric);
+          const point = await fetchLast(db, item.series, parseDurationSeconds(widget.lookback || item.series.window || "5m", 300));
           if (!point) {
             item.value.textContent = "--";
             return;
@@ -443,27 +717,37 @@
       });
     }
 
-    if (widget.type === "line_chart") {
+    if (widgetChartType(widget) === "line_chart" || widgetChartType(widget) === "aggregate_band") {
       let currentLookback = widget.lookback || "1h";
       const els = createChartWidget(widget, containerEl, currentLookback);
       const refresh = async () => {
         const lookbackSec = parseDurationSeconds(currentLookback, 3600);
         const step = widget.interval || "30s";
-        const seriesItems = new Array((widget.series || []).length);
-        await Promise.all((widget.series || []).map(async (series, idx) => {
-          const db = seriesDB(series, dashboardCfg);
-          const metric = seriesMetric(series);
-          if (!db || !metric) {
-            return;
-          }
-          const points = await fetchRange(db, metric, lookbackSec, step);
-          seriesItems[idx] = {
-            label: series.label || metric || ("Series " + (idx + 1)),
-            points: points.map((p) => ({ x: p.x, y: transformValue(series, p.y) })).filter((p) => Number.isFinite(p.y)),
-          };
-        }));
-        const hasData = renderUPlotChart(els.plot, widget, seriesItems.filter(Boolean));
-        els.foot.textContent = hasData ? "updated " + new Date().toLocaleTimeString() + " · " + currentLookback : "no points for " + currentLookback;
+        const chartSeries = expandedChartSeries(widget);
+        let filteredItems = await fetchAggregateBandSeries(widget, chartSeries, lookbackSec, dashboardCfg);
+        if (!filteredItems) {
+          const seriesItems = new Array(chartSeries.length);
+          await Promise.all(chartSeries.map(async (series, idx) => {
+            const db = seriesDB(series, dashboardCfg);
+            const query = seriesMetric(series);
+            if (!db || !query) {
+              return;
+            }
+            const points = await fetchRange(db, series, lookbackSec, step);
+            seriesItems[idx] = {
+              label: effectiveSeriesLabel(series, idx),
+              role: seriesRole(series),
+              points: points.map((p) => ({ x: p.x, y: transformValue(series, p.y) })).filter((p) => Number.isFinite(p.y)),
+            };
+          }));
+          filteredItems = seriesItems.filter(Boolean);
+        }
+        const hasData = renderUPlotChart(els.plot, widget, filteredItems);
+        if (widgetChartType(widget) === "aggregate_band") {
+          els.foot.textContent = "";
+        } else {
+          els.foot.textContent = hasData ? "updated " + new Date().toLocaleTimeString() + " · " + currentLookback : "no points for " + currentLookback;
+        }
       };
       const refresher = createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, {
         autoRefresh,
@@ -492,9 +776,16 @@
     document.querySelectorAll(".group-tab, .accordion-header").forEach((el) => {
       el.classList.toggle("active", el.dataset.groupId === groupId);
     });
+    activeGroupId = groupId;
     const refreshers = groupWidgetRefreshers.get(groupId) || [];
-    refreshers.forEach((refresher) => refresher.start());
+    refreshers.forEach((refresher) => {
+      refresher.setPaused(dashboardRefreshPaused);
+      if (!dashboardRefreshPaused) {
+        refresher.start();
+      }
+    });
     groupTimers.set(groupId, refreshers);
+    syncDashboardRefreshControls();
     const pane = groupPanes.get(groupId);
     if (pane) {
       void pane.offsetWidth;
@@ -514,6 +805,7 @@
     groupPanes.clear();
     groupTimers.clear();
     groupWidgetRefreshers.clear();
+    activeGroupId = "";
 
     const groups = dashboardCfg.groups || [];
     const widgetDefs = dashboardCfg.widgets || {};
@@ -571,6 +863,22 @@
     activateGroup(groups[0].id);
   }
 
+  function wireDashboardControls() {
+    const pauseBtn = document.getElementById("dashboardAutoRefreshBtn");
+    const refreshBtn = document.getElementById("dashboardRefreshAllBtn");
+    if (pauseBtn) {
+      pauseBtn.addEventListener("click", () => {
+        setDashboardRefreshPaused(!dashboardRefreshPaused);
+      });
+    }
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", () => {
+        void refreshActiveGroupNow();
+      });
+    }
+    syncDashboardRefreshControls();
+  }
+
   window.addEventListener("resize", () => {
     groupPanes.forEach((pane) => {
       if (!pane.hidden) {
@@ -578,6 +886,8 @@
       }
     });
   });
+
+  wireDashboardControls();
 
   loadDashboard().catch((err) => {
     const host = document.getElementById("widgets");

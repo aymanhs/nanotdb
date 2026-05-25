@@ -5,7 +5,7 @@
     {
       "id": "overview",
       "label": "Overview",
-      "widgets": ["system_snapshot", "load_history", "storage_snapshot"]
+      "widgets": ["system_snapshot", "cpu_busy_aggregate", "storage_snapshot"]
     },
     {
       "id": "temperatures",
@@ -48,24 +48,17 @@
         }
       ]
     },
-    "load_history": {
-      "type": "line_chart",
-      "title": "Load Average",
+    "cpu_busy_aggregate": {
+      "type": "aggregate_band",
+      "title": "CPU Busy",
       "refresh_sec": 15,
-      "lookback": "6h",
-      "interval": "1m",
+      "lookback": "24h",
+      "interval": "10m",
       "series": [
         {
-          "label": "Load 1m",
-          "metric": "sys.load1"
-        },
-        {
-          "label": "Load 5m",
-          "metric": "sys.load5"
-        },
-        {
-          "label": "Load 15m",
-          "metric": "sys.load15"
+          "metric": "cpu.busy_pct",
+          "window": "10m",
+          "transform": { "unit": "%", "decimals": 1 }
         }
       ]
     },

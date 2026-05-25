@@ -679,27 +679,10 @@ func collectMetricFromMetricPage(database, metric string, entry MetricEntry, pag
 		return fmt.Errorf("unsupported value type: %d", entry.ValueType)
 	}
 
-	for i, ts := range page.Times {
-		if ts < fromTS || ts > toTS {
-			continue
-		}
-		if *count%stride != 0 {
-			*count++
-			continue
-		}
-		*count++
-
-		s := Sample{Database: database, Metric: metric, TS: ts, ValueType: entry.ValueType}
-		if entry.ValueType == Int32Sample {
-			s.Int32 = page.Int32[i]
-		} else {
-			s.Float32 = page.Float32[i]
-		}
-		if err := fn(s); err != nil {
-			return err
-		}
+	if entry.ValueType == Int32Sample {
+		return collectInt32Samples(database, metric, page.Times, page.Int32, fromTS, toTS, stride, count, fn)
 	}
-	return nil
+	return collectFloat32Samples(database, metric, page.Times, page.Float32, fromTS, toTS, stride, count, fn)
 }
 
 func readOneMetricPageV1(f *os.File, fileSize int64, pi metricFileV1PageInfo) (MetricFilePage, error) {
@@ -836,38 +819,11 @@ func encodeMetricFrame(workspace *metricFrameEncodeWorkspace, codec BlockCompres
 	payloadRaw := &workspace.payloadRaw
 	payloadRaw.Reset()
 	payloadRaw.Grow(n * 12)
-	for _, ts := range in.Times {
-		var b [8]byte
-		binary.LittleEndian.PutUint64(b[:], uint64(ts))
-		if _, err := payloadRaw.Write(b[:]); err != nil {
-			return nil, metricFileV1PageInfo{}, err
-		}
+	if err := appendEncodedTimestamps(payloadRaw, in.Times); err != nil {
+		return nil, metricFileV1PageInfo{}, err
 	}
-	switch in.ValueType {
-	case Int32Sample:
-		if len(in.Int32) != n || len(in.Float32) != 0 {
-			return nil, metricFileV1PageInfo{}, fmt.Errorf("invalid int32 value vector for metric %d", in.MetricID)
-		}
-		for _, v := range in.Int32 {
-			var b [4]byte
-			binary.LittleEndian.PutUint32(b[:], uint32(v))
-			if _, err := payloadRaw.Write(b[:]); err != nil {
-				return nil, metricFileV1PageInfo{}, err
-			}
-		}
-	case Float32Sample:
-		if len(in.Float32) != n || len(in.Int32) != 0 {
-			return nil, metricFileV1PageInfo{}, fmt.Errorf("invalid float32 value vector for metric %d", in.MetricID)
-		}
-		for _, v := range in.Float32 {
-			var b [4]byte
-			binary.LittleEndian.PutUint32(b[:], math.Float32bits(v))
-			if _, err := payloadRaw.Write(b[:]); err != nil {
-				return nil, metricFileV1PageInfo{}, err
-			}
-		}
-	default:
-		return nil, metricFileV1PageInfo{}, fmt.Errorf("unsupported value type: %d", in.ValueType)
+	if err := appendEncodedMetricValues(payloadRaw, in.MetricID, in.ValueType, n, in.Int32, in.Float32, "value vector"); err != nil {
+		return nil, metricFileV1PageInfo{}, err
 	}
 
 	compressed, err := codec.Encode(payloadRaw.Bytes())
@@ -1062,82 +1018,6 @@ func compareMetricPartitionSamplesFromFile(c *Catalog, path string, expected map
 		}
 	}
 	return nil
-}
-
-func collectMetricPartitionSamples(pages []MetricFilePage) (map[MetricID][]partitionSamplePoint, error) {
-	out := make(map[MetricID][]partitionSamplePoint)
-	for _, p := range pages {
-		pts, err := samplePointsFromPage(p)
-		if err != nil {
-			return nil, err
-		}
-		out[p.MetricID] = append(out[p.MetricID], pts...)
-	}
-	return out, nil
-}
-
-func collectMetricPartitionSamplesFromFile(path string) (map[MetricID][]partitionSamplePoint, error) {
-	out := make(map[MetricID][]partitionSamplePoint)
-	err := WalkMetricFileV1(path, func(page MetricFilePage) error {
-		pts, err := samplePointsFromPage(page)
-		if err != nil {
-			return err
-		}
-		out[page.MetricID] = append(out[page.MetricID], pts...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func samplePointsFromInput(p MetricFilePageInput) ([]partitionSamplePoint, error) {
-	n := len(p.Times)
-	out := make([]partitionSamplePoint, 0, n)
-	switch p.ValueType {
-	case Int32Sample:
-		if len(p.Int32) != n || len(p.Float32) != 0 {
-			return nil, fmt.Errorf("invalid int32 page input for metric %d", p.MetricID)
-		}
-		for i := 0; i < n; i++ {
-			out = append(out, partitionSamplePoint{TS: p.Times[i], ValueType: p.ValueType, Raw: uint32(p.Int32[i])})
-		}
-	case Float32Sample:
-		if len(p.Float32) != n || len(p.Int32) != 0 {
-			return nil, fmt.Errorf("invalid float32 page input for metric %d", p.MetricID)
-		}
-		for i := 0; i < n; i++ {
-			out = append(out, partitionSamplePoint{TS: p.Times[i], ValueType: p.ValueType, Raw: math.Float32bits(p.Float32[i])})
-		}
-	default:
-		return nil, fmt.Errorf("unsupported value type: %d", p.ValueType)
-	}
-	return out, nil
-}
-
-func samplePointsFromPage(p MetricFilePage) ([]partitionSamplePoint, error) {
-	n := len(p.Times)
-	out := make([]partitionSamplePoint, 0, n)
-	switch p.ValueType {
-	case Int32Sample:
-		if len(p.Int32) != n || len(p.Float32) != 0 {
-			return nil, fmt.Errorf("invalid int32 page for metric %d", p.MetricID)
-		}
-		for i := 0; i < n; i++ {
-			out = append(out, partitionSamplePoint{TS: p.Times[i], ValueType: p.ValueType, Raw: uint32(p.Int32[i])})
-		}
-	case Float32Sample:
-		if len(p.Float32) != n || len(p.Int32) != 0 {
-			return nil, fmt.Errorf("invalid float32 page for metric %d", p.MetricID)
-		}
-		for i := 0; i < n; i++ {
-			out = append(out, partitionSamplePoint{TS: p.Times[i], ValueType: p.ValueType, Raw: math.Float32bits(p.Float32[i])})
-		}
-	default:
-		return nil, fmt.Errorf("unsupported value type: %d", p.ValueType)
-	}
-	return out, nil
 }
 
 func metricNameByID(c *Catalog, mid MetricID) string {

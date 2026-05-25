@@ -120,8 +120,7 @@ type metricMetricFramePlanV2 struct {
 }
 
 type metricFrameEncodeWorkspaceV2 struct {
-	payloadRaw bytes.Buffer
-	frame      bytes.Buffer
+	frame bytes.Buffer
 }
 
 type metricTimeFrameCacheKeyV2 struct {
@@ -149,9 +148,36 @@ type metricTimeFrameCacheV2 struct {
 	evictions  uint64
 }
 
+type metricFileIndexCacheKeyV2 struct {
+	Path        string
+	FileSize    int64
+	FileModUnix int64
+}
+
+type metricFileIndexCacheEntryV2 struct {
+	key           metricFileIndexCacheKeyV2
+	timeEntries   []metricTimeFrameIndexEntryV2
+	metricEntries []metricMetricFrameIndexEntryV2
+	bytes         int64
+	link          *list.Element
+}
+
+type metricFileIndexCacheV2 struct {
+	mu         sync.Mutex
+	entries    map[metricFileIndexCacheKeyV2]*metricFileIndexCacheEntryV2
+	order      *list.List
+	bytes      int64
+	maxEntries int
+	hits       uint64
+	misses     uint64
+	evictions  uint64
+}
+
 const (
 	metricTimeFrameCacheMaxEntriesV2 = 256
 	metricTimeFrameCacheMaxBytesV2   = 32 << 20
+	metricFileIndexCacheMaxEntriesV2 = 256
+	metricFileIndexCacheMaxBytesV2   = 32 << 20
 )
 
 var sharedMetricTimeFrameCacheV2 = metricTimeFrameCacheV2{
@@ -160,7 +186,22 @@ var sharedMetricTimeFrameCacheV2 = metricTimeFrameCacheV2{
 	maxEntries: metricTimeFrameCacheMaxEntriesV2,
 }
 
+var sharedMetricFileIndexCacheV2 = metricFileIndexCacheV2{
+	entries:    make(map[metricFileIndexCacheKeyV2]*metricFileIndexCacheEntryV2),
+	order:      list.New(),
+	maxEntries: metricFileIndexCacheMaxEntriesV2,
+}
+
 type metricTimeFrameCacheStatsV2 struct {
+	Entries    int
+	Bytes      int64
+	MaxEntries int
+	Hits       uint64
+	Misses     uint64
+	Evictions  uint64
+}
+
+type metricFileIndexCacheStatsV2 struct {
 	Entries    int
 	Bytes      int64
 	MaxEntries int
@@ -175,6 +216,10 @@ func configureMetricTimeFrameCacheSlotsV2(maxEntries int) {
 
 func metricTimeFrameCacheStatsSnapshotV2() metricTimeFrameCacheStatsV2 {
 	return sharedMetricTimeFrameCacheV2.snapshot()
+}
+
+func metricFileIndexCacheStatsSnapshotV2() metricFileIndexCacheStatsV2 {
+	return sharedMetricFileIndexCacheV2.snapshot()
 }
 
 func (h metricFileV2Header) EncodeBinary() [metricFileV2HeaderLen]byte {
@@ -474,7 +519,7 @@ func WriteMetricFileV2(path string, partitionKind uint8, codec BlockCompressionC
 	firstTS := true
 
 	for i := range timeFrames {
-		frame, hdr, err := encodeMetricTimeFrameV2(&workspace, codec, &timeFrames[i], curOffset)
+		frame, hdr, err := encodeMetricTimeFrameV2(&workspace, codec, &timeFrames[i])
 		if err != nil {
 			return err
 		}
@@ -508,7 +553,7 @@ func WriteMetricFileV2(path string, partitionKind uint8, codec BlockCompressionC
 	}
 
 	for i := range metricFrames {
-		frame, hdr, err := encodeMetricMetricFrameV2(&workspace, codec, &metricFrames[i], curOffset)
+		frame, hdr, err := encodeMetricMetricFrameV2(&workspace, codec, &metricFrames[i])
 		if err != nil {
 			return err
 		}
@@ -722,47 +767,38 @@ func metricDecodedValueLen(page MetricFilePageInput) (uint32, error) {
 func encodeMetricTimePayloadV2(times []Timestamp) []byte {
 	var payload bytes.Buffer
 	payload.Grow(len(times) * 8)
-	for _, ts := range times {
-		var b [8]byte
-		binary.LittleEndian.PutUint64(b[:], uint64(ts))
-		_, _ = payload.Write(b[:])
-	}
+	_ = appendEncodedTimestamps(&payload, times)
 	return payload.Bytes()
 }
 
 func encodeMetricValuePayloadV2(page metricMetricFramePlanV2) ([]byte, error) {
 	var payload bytes.Buffer
 	payload.Grow(int(page.DecodedLen))
-	switch page.ValueType {
-	case Int32Sample:
-		if len(page.Int32) != len(page.Times) || len(page.Float32) != 0 {
-			return nil, fmt.Errorf("invalid int32 payload for metric %d", page.MetricID)
-		}
-		for _, value := range page.Int32 {
-			var b [4]byte
-			binary.LittleEndian.PutUint32(b[:], uint32(value))
-			if _, err := payload.Write(b[:]); err != nil {
-				return nil, err
-			}
-		}
-	case Float32Sample:
-		if len(page.Float32) != len(page.Times) || len(page.Int32) != 0 {
-			return nil, fmt.Errorf("invalid float32 payload for metric %d", page.MetricID)
-		}
-		for _, value := range page.Float32 {
-			var b [4]byte
-			binary.LittleEndian.PutUint32(b[:], math.Float32bits(value))
-			if _, err := payload.Write(b[:]); err != nil {
-				return nil, err
-			}
-		}
-	default:
-		return nil, fmt.Errorf("unsupported value type: %d", page.ValueType)
+	if err := appendEncodedMetricValues(&payload, page.MetricID, page.ValueType, len(page.Times), page.Int32, page.Float32, "payload"); err != nil {
+		return nil, err
 	}
 	return payload.Bytes(), nil
 }
 
-func encodeMetricTimeFrameV2(workspace *metricFrameEncodeWorkspaceV2, codec BlockCompressionCodec, plan *metricTimeFramePlanV2, pageOffset uint64) ([]byte, metricTimeFrameHeaderV2, error) {
+func encodeCompressedMetricFrameV2(workspace *metricFrameEncodeWorkspaceV2, encodedHdr []byte, compressed []byte) ([]byte, error) {
+	frame := &workspace.frame
+	frame.Reset()
+	frame.Grow(len(encodedHdr) + len(compressed) + 4)
+	if _, err := frame.Write(encodedHdr); err != nil {
+		return nil, err
+	}
+	if _, err := frame.Write(compressed); err != nil {
+		return nil, err
+	}
+	var crcTail [4]byte
+	binary.LittleEndian.PutUint32(crcTail[:], crc32.ChecksumIEEE(compressed))
+	if _, err := frame.Write(crcTail[:]); err != nil {
+		return nil, err
+	}
+	return frame.Bytes(), nil
+}
+
+func encodeMetricTimeFrameV2(workspace *metricFrameEncodeWorkspaceV2, codec BlockCompressionCodec, plan *metricTimeFramePlanV2) ([]byte, metricTimeFrameHeaderV2, error) {
 	if workspace == nil {
 		workspace = &metricFrameEncodeWorkspaceV2{}
 	}
@@ -787,26 +823,15 @@ func encodeMetricTimeFrameV2(workspace *metricFrameEncodeWorkspaceV2, codec Bloc
 		PayloadLen:   uint32(len(compressed)),
 		DecodedLen:   uint32(len(payloadRaw)),
 	}
-	frame := &workspace.frame
-	frame.Reset()
 	encodedHdr := hdr.EncodeBinary()
-	frame.Grow(len(encodedHdr) + len(compressed) + 4)
-	if _, err := frame.Write(encodedHdr[:]); err != nil {
+	frame, err := encodeCompressedMetricFrameV2(workspace, encodedHdr[:], compressed)
+	if err != nil {
 		return nil, metricTimeFrameHeaderV2{}, err
 	}
-	if _, err := frame.Write(compressed); err != nil {
-		return nil, metricTimeFrameHeaderV2{}, err
-	}
-	var crcTail [4]byte
-	binary.LittleEndian.PutUint32(crcTail[:], crc32.ChecksumIEEE(compressed))
-	if _, err := frame.Write(crcTail[:]); err != nil {
-		return nil, metricTimeFrameHeaderV2{}, err
-	}
-	_ = pageOffset
-	return frame.Bytes(), hdr, nil
+	return frame, hdr, nil
 }
 
-func encodeMetricMetricFrameV2(workspace *metricFrameEncodeWorkspaceV2, codec BlockCompressionCodec, plan *metricMetricFramePlanV2, pageOffset uint64) ([]byte, metricMetricFrameHeaderV2, error) {
+func encodeMetricMetricFrameV2(workspace *metricFrameEncodeWorkspaceV2, codec BlockCompressionCodec, plan *metricMetricFramePlanV2) ([]byte, metricMetricFrameHeaderV2, error) {
 	if workspace == nil {
 		workspace = &metricFrameEncodeWorkspaceV2{}
 	}
@@ -832,23 +857,12 @@ func encodeMetricMetricFrameV2(workspace *metricFrameEncodeWorkspaceV2, codec Bl
 		PayloadLen:  uint32(len(compressed)),
 		DecodedLen:  uint32(len(payloadRaw)),
 	}
-	frame := &workspace.frame
-	frame.Reset()
 	encodedHdr := hdr.EncodeBinary()
-	frame.Grow(len(encodedHdr) + len(compressed) + 4)
-	if _, err := frame.Write(encodedHdr[:]); err != nil {
+	frame, err := encodeCompressedMetricFrameV2(workspace, encodedHdr[:], compressed)
+	if err != nil {
 		return nil, metricMetricFrameHeaderV2{}, err
 	}
-	if _, err := frame.Write(compressed); err != nil {
-		return nil, metricMetricFrameHeaderV2{}, err
-	}
-	var crcTail [4]byte
-	binary.LittleEndian.PutUint32(crcTail[:], crc32.ChecksumIEEE(compressed))
-	if _, err := frame.Write(crcTail[:]); err != nil {
-		return nil, metricMetricFrameHeaderV2{}, err
-	}
-	_ = pageOffset
-	return frame.Bytes(), hdr, nil
+	return frame, hdr, nil
 }
 
 func readMetricFileV2Header(path string) (metricFileV2Header, error) {
@@ -962,6 +976,31 @@ func metricTimeFrameCacheIdentityV2(path string, st os.FileInfo) metricTimeFrame
 	}
 }
 
+func metricFileIndexCacheIdentityV2(path string, st os.FileInfo) metricFileIndexCacheKeyV2 {
+	return metricFileIndexCacheKeyV2{
+		Path:        path,
+		FileSize:    st.Size(),
+		FileModUnix: st.ModTime().UnixNano(),
+	}
+}
+
+func resolveMetricFileIndexesV2(f *os.File, path string, st os.FileInfo, hdr metricFileV2Header) ([]metricTimeFrameIndexEntryV2, []metricMetricFrameIndexEntryV2, error) {
+	key := metricFileIndexCacheIdentityV2(path, st)
+	if timeEntries, metricEntries, ok := sharedMetricFileIndexCacheV2.get(key); ok {
+		return timeEntries, metricEntries, nil
+	}
+	timeEntries, err := readMetricTimeFrameIndexEntriesV2FromFile(f, hdr)
+	if err != nil {
+		return nil, nil, err
+	}
+	metricEntries, err := readMetricMetricFrameIndexEntriesV2FromFile(f, hdr)
+	if err != nil {
+		return nil, nil, err
+	}
+	sharedMetricFileIndexCacheV2.put(key, timeEntries, metricEntries)
+	return timeEntries, metricEntries, nil
+}
+
 func resolveMetricTimeFrameV2(f *os.File, identity metricTimeFrameCacheKeyV2, local map[uint16][]Timestamp, info metricTimeFrameIndexEntryV2) ([]Timestamp, error) {
 	if times, ok := local[info.TimeFrameID]; ok {
 		return times, nil
@@ -1049,6 +1088,73 @@ func (c *metricTimeFrameCacheV2) evictLocked() {
 			return
 		}
 		entry := back.Value.(*metricTimeFrameCacheEntryV2)
+		delete(c.entries, entry.key)
+		c.bytes -= entry.bytes
+		c.order.Remove(back)
+		c.evictions++
+	}
+}
+
+func (c *metricFileIndexCacheV2) get(key metricFileIndexCacheKeyV2) ([]metricTimeFrameIndexEntryV2, []metricMetricFrameIndexEntryV2, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		c.misses++
+		return nil, nil, false
+	}
+	c.hits++
+	c.order.MoveToFront(entry.link)
+	return entry.timeEntries, entry.metricEntries, true
+}
+
+func (c *metricFileIndexCacheV2) snapshot() metricFileIndexCacheStatsV2 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return metricFileIndexCacheStatsV2{
+		Entries:    len(c.entries),
+		Bytes:      c.bytes,
+		MaxEntries: c.maxEntries,
+		Hits:       c.hits,
+		Misses:     c.misses,
+		Evictions:  c.evictions,
+	}
+}
+
+func (c *metricFileIndexCacheV2) put(key metricFileIndexCacheKeyV2, timeEntries []metricTimeFrameIndexEntryV2, metricEntries []metricMetricFrameIndexEntryV2) {
+	clonedTimeEntries := append([]metricTimeFrameIndexEntryV2(nil), timeEntries...)
+	clonedMetricEntries := append([]metricMetricFrameIndexEntryV2(nil), metricEntries...)
+	bytesUsed := int64(len(clonedTimeEntries))*metricFileV2TimeIndexEntryLen + int64(len(clonedMetricEntries))*metricFileV2MetricIndexEntryLen
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.entries[key]; ok {
+		c.bytes -= existing.bytes
+		existing.timeEntries = clonedTimeEntries
+		existing.metricEntries = clonedMetricEntries
+		existing.bytes = bytesUsed
+		c.bytes += bytesUsed
+		c.order.MoveToFront(existing.link)
+		c.evictLocked()
+		return
+	}
+	entry := &metricFileIndexCacheEntryV2{key: key, timeEntries: clonedTimeEntries, metricEntries: clonedMetricEntries, bytes: bytesUsed}
+	entry.link = c.order.PushFront(entry)
+	c.entries[key] = entry
+	c.bytes += bytesUsed
+	c.evictLocked()
+}
+
+func (c *metricFileIndexCacheV2) evictLocked() {
+	maxEntries := c.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = metricFileIndexCacheMaxEntriesV2
+	}
+	for len(c.entries) > maxEntries || c.bytes > metricFileIndexCacheMaxBytesV2 {
+		back := c.order.Back()
+		if back == nil {
+			return
+		}
+		entry := back.Value.(*metricFileIndexCacheEntryV2)
 		delete(c.entries, entry.key)
 		c.bytes -= entry.bytes
 		c.order.Remove(back)
@@ -1198,26 +1304,10 @@ func collectMetricFromMetricFrameV2(database, metric string, entry MetricEntry, 
 	if len(times) != int(pointCount) {
 		return fmt.Errorf("metric frame time/value length mismatch")
 	}
-	for i, ts := range times {
-		if ts < fromTS || ts > toTS {
-			continue
-		}
-		if *count%stride != 0 {
-			*count++
-			continue
-		}
-		*count++
-		s := Sample{Database: database, Metric: metric, TS: ts, ValueType: entry.ValueType}
-		if entry.ValueType == Int32Sample {
-			s.Int32 = frame.Int32[i]
-		} else {
-			s.Float32 = frame.Float32[i]
-		}
-		if err := fn(s); err != nil {
-			return err
-		}
+	if entry.ValueType == Int32Sample {
+		return collectInt32Samples(database, metric, times, frame.Int32, fromTS, toTS, stride, count, fn)
 	}
-	return nil
+	return collectFloat32Samples(database, metric, times, frame.Float32, fromTS, toTS, stride, count, fn)
 }
 
 func readMetricFrameVersion(path string) (uint16, error) {
@@ -1257,11 +1347,7 @@ func collectMetricFromMetricFileV2(database, metric string, entry MetricEntry, p
 	if err != nil {
 		return err
 	}
-	timeEntries, err := readMetricTimeFrameIndexEntriesV2FromFile(f, hdr)
-	if err != nil {
-		return err
-	}
-	metricEntries, err := readMetricMetricFrameIndexEntriesV2FromFile(f, hdr)
+	timeEntries, metricEntries, err := resolveMetricFileIndexesV2(f, path, st, hdr)
 	if err != nil {
 		return err
 	}
@@ -1388,11 +1474,7 @@ func compareMetricPartitionSamplesFromFileV2(c *Catalog, path string, expected m
 	if _, err := readMetricFileV2FooterFromFile(f, st.Size()); err != nil {
 		return err
 	}
-	timeEntries, err := readMetricTimeFrameIndexEntriesV2FromFile(f, hdr)
-	if err != nil {
-		return err
-	}
-	metricEntries, err := readMetricMetricFrameIndexEntriesV2FromFile(f, hdr)
+	timeEntries, metricEntries, err := resolveMetricFileIndexesV2(f, path, st, hdr)
 	if err != nil {
 		return err
 	}
@@ -1498,7 +1580,7 @@ func readMetricFileSummaryV2(path string) (MetricFileSummary, error) {
 	if err != nil {
 		return MetricFileSummary{}, err
 	}
-	metricEntries, err := readMetricMetricFrameIndexEntriesV2FromFile(f, hdr)
+	_, metricEntries, err := resolveMetricFileIndexesV2(f, path, st, hdr)
 	if err != nil {
 		return MetricFileSummary{}, err
 	}
@@ -1547,11 +1629,7 @@ func walkMetricFileFramesV2(path string, fn func(MetricFileFrameInfo) error) err
 	if err != nil {
 		return err
 	}
-	timeEntries, err := readMetricTimeFrameIndexEntriesV2FromFile(f, hdr)
-	if err != nil {
-		return err
-	}
-	metricEntries, err := readMetricMetricFrameIndexEntriesV2FromFile(f, hdr)
+	timeEntries, metricEntries, err := resolveMetricFileIndexesV2(f, path, st, hdr)
 	if err != nil {
 		return err
 	}

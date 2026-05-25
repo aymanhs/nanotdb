@@ -770,7 +770,7 @@ func (e *Engine) GetMetricRollupDownstream(database, metric string, maxHops int)
 						continue
 					}
 					for _, aggRaw := range job.Aggregates {
-						if _, ok := getRollupAggregator(strings.TrimSpace(aggRaw)); ok {
+						if _, ok := getAggregator(strings.TrimSpace(aggRaw)); ok {
 							truncated = true
 							break
 						}
@@ -801,7 +801,7 @@ func (e *Engine) GetMetricRollupDownstream(database, metric string, maxHops int)
 
 			for _, aggRaw := range job.Aggregates {
 				agg := strings.TrimSpace(aggRaw)
-				aggFn, ok := getRollupAggregator(agg)
+				aggFn, ok := getAggregator(agg)
 				if !ok {
 					continue
 				}
@@ -1293,6 +1293,46 @@ func (e *Engine) InspectDBWAL(database string) ([]WALRecord, bool, error) {
 // SampleCallback is invoked for each sample in a range query.
 type SampleCallback func(Sample) error
 
+func collectInt32Samples(database, metric string, times []Timestamp, values []int32, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
+	sample := Sample{Database: database, Metric: metric, ValueType: Int32Sample}
+	for i, ts := range times {
+		if ts < fromTS || ts > toTS {
+			continue
+		}
+		if *count%stride != 0 {
+			*count++
+			continue
+		}
+		*count++
+		sample.TS = ts
+		sample.Int32 = values[i]
+		if err := fn(sample); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectFloat32Samples(database, metric string, times []Timestamp, values []float32, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
+	sample := Sample{Database: database, Metric: metric, ValueType: Float32Sample}
+	for i, ts := range times {
+		if ts < fromTS || ts > toTS {
+			continue
+		}
+		if *count%stride != 0 {
+			*count++
+			continue
+		}
+		*count++
+		sample.TS = ts
+		sample.Float32 = values[i]
+		if err := fn(sample); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // QueryRange scans samples for a metric within a time range.
 // Stride controls downsampling: stride=1 returns every sample, stride=N returns every Nth.
 // Each matching sample is passed to the callback; callback errors terminate early.
@@ -1590,6 +1630,35 @@ func collectMetricFromPage(database, metric string, entry MetricEntry, p *Page, 
 	}
 
 	values := p.Values.Bytes()
+	if entry.ValueType == Int32Sample {
+		sample := Sample{Database: database, Metric: metric, ValueType: Int32Sample}
+		for i := 0; i < len(p.Metrics); i++ {
+			if p.Metrics[i] != entry.MetricID {
+				continue
+			}
+			ts := p.Times[i]
+			if ts < fromTS || ts > toTS {
+				continue
+			}
+			off := i * 4
+			if off+4 > len(values) {
+				return fmt.Errorf("page corruption: value offset out of range")
+			}
+			if *count%stride != 0 {
+				*count++
+				continue
+			}
+			*count++
+			sample.TS = ts
+			sample.Int32 = int32(binary.LittleEndian.Uint32(values[off : off+4]))
+			if err := fn(sample); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	sample := Sample{Database: database, Metric: metric, ValueType: Float32Sample}
 	for i := 0; i < len(p.Metrics); i++ {
 		if p.Metrics[i] != entry.MetricID {
 			continue
@@ -1607,15 +1676,9 @@ func collectMetricFromPage(database, metric string, entry MetricEntry, p *Page, 
 			continue
 		}
 		*count++
-
-		raw := values[off : off+4]
-		s := Sample{Database: database, Metric: metric, TS: ts, ValueType: entry.ValueType}
-		if entry.ValueType == Int32Sample {
-			s.Int32 = int32(binary.LittleEndian.Uint32(raw))
-		} else {
-			s.Float32 = math.Float32frombits(binary.LittleEndian.Uint32(raw))
-		}
-		if err := fn(s); err != nil {
+		sample.TS = ts
+		sample.Float32 = math.Float32frombits(binary.LittleEndian.Uint32(values[off : off+4]))
+		if err := fn(sample); err != nil {
 			return err
 		}
 	}
@@ -1784,6 +1847,7 @@ func (e *Engine) captureRuntimeStats() {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	cacheStats := metricTimeFrameCacheStatsSnapshotV2()
+	indexCacheStats := metricFileIndexCacheStatsSnapshotV2()
 	e.stats.set("runtime/goroutines", float64(runtime.NumGoroutine()))
 	e.stats.set("runtime/heap_alloc_bytes", float64(mem.HeapAlloc))
 	e.stats.set("runtime/heap_inuse_bytes", float64(mem.HeapInuse))
@@ -1800,6 +1864,12 @@ func (e *Engine) captureRuntimeStats() {
 	e.stats.set("metric_file/time_cache_hits", float64(cacheStats.Hits))
 	e.stats.set("metric_file/time_cache_misses", float64(cacheStats.Misses))
 	e.stats.set("metric_file/time_cache_evictions", float64(cacheStats.Evictions))
+	e.stats.set("metric_file/index_cache_entries", float64(indexCacheStats.Entries))
+	e.stats.set("metric_file/index_cache_bytes", float64(indexCacheStats.Bytes))
+	e.stats.set("metric_file/index_cache_max_entries", float64(indexCacheStats.MaxEntries))
+	e.stats.set("metric_file/index_cache_hits", float64(indexCacheStats.Hits))
+	e.stats.set("metric_file/index_cache_misses", float64(indexCacheStats.Misses))
+	e.stats.set("metric_file/index_cache_evictions", float64(indexCacheStats.Evictions))
 	if mem.NumGC > 0 {
 		idx := (mem.NumGC - 1) % uint32(len(mem.PauseNs))
 		e.stats.set("runtime/last_gc_pause_ns", float64(mem.PauseNs[idx]))
@@ -2280,8 +2350,8 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 		}
 		for aggIdx, agg := range job.Aggregates {
 			agg = strings.TrimSpace(strings.ToLower(agg))
-			if !isSupportedRollupAggregate(agg) {
-				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].aggregates[%d]: %q (supported: %s)", idx, aggIdx, job.Aggregates[aggIdx], strings.Join(supportedRollupAggregates(), ","))
+			if !isSupportedAggregate(agg) {
+				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].aggregates[%d]: %q (supported: %s)", idx, aggIdx, job.Aggregates[aggIdx], strings.Join(supportedAggregates(), ","))
 			}
 			job.Aggregates[aggIdx] = agg
 		}

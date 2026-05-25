@@ -37,7 +37,7 @@ button:focus {
   gap: 8px;
 }
 
-.metric-picker-control {
+.query-picker-control {
   grid-column: span 2;
 }
 
@@ -250,7 +250,7 @@ h2 {
 
 @media (max-width: 700px) {
   .controls { grid-template-columns: 1fr 1fr; }
-  .metric-picker-control,
+  .query-picker-control,
   .refresh-control {
     grid-column: 1 / -1;
   }

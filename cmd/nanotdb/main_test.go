@@ -136,6 +136,182 @@ func TestLoadRuntimeConfig_WebOverrides(t *testing.T) {
 	}
 }
 
+func TestHandleQueryRangeAggregate(t *testing.T) {
+	eng, err := engine.OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	base := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: 10 * time.Second, value: 10},
+		{offset: 4 * time.Minute, value: 20},
+		{offset: 5*time.Minute + 10*time.Second, value: 30},
+	} {
+		if err := eng.AddSample("prod", "temp.out_dry", engine.Timestamp(base.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query_range?db=prod&query=temp.out_dry&start="+strconv.FormatInt(base.UnixNano(), 10)+"&end="+strconv.FormatInt(base.Add(10*time.Minute).UnixNano(), 10)+"&aggregate=sum,count&window=5m", nil)
+	rec := httptest.NewRecorder()
+	handleQueryRange(eng)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=%d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]string `json:"metric"`
+				Values [][]interface{}   `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if resp.Status != "success" || resp.Data.ResultType != "matrix" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if len(resp.Data.Result) != 2 {
+		t.Fatalf("result length mismatch: got=%d want=2", len(resp.Data.Result))
+	}
+	if resp.Data.Result[0].Metric["aggregate"] != "sum" || resp.Data.Result[1].Metric["aggregate"] != "count" {
+		t.Fatalf("unexpected aggregate labels: %+v", resp.Data.Result)
+	}
+	if len(resp.Data.Result[0].Values) != 2 || len(resp.Data.Result[1].Values) != 2 {
+		t.Fatalf("unexpected values lengths: %+v", resp.Data.Result)
+	}
+}
+
+func TestHandleQueryRangeAggregate_AllowsMissingEnd(t *testing.T) {
+	eng, err := engine.OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	base := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: 10 * time.Second, value: 10},
+		{offset: 4 * time.Minute, value: 20},
+		{offset: 5*time.Minute + 10*time.Second, value: 30},
+	} {
+		if err := eng.AddSample("prod", "temp.out_dry", engine.Timestamp(base.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query_range?db=prod&query=temp.out_dry&start="+strconv.FormatInt(base.UnixNano(), 10)+"&aggregate=sum&window=5m", nil)
+	rec := httptest.NewRecorder()
+	handleQueryRange(eng)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=%d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Values [][]interface{} `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if resp.Status != "success" || len(resp.Data.Result) != 1 || len(resp.Data.Result[0].Values) != 2 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestHandleQueryRangeStepUsesStableBuckets(t *testing.T) {
+	eng, err := engine.OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	base := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: 5 * time.Second, value: 1},
+		{offset: 20 * time.Second, value: 2},
+		{offset: 35 * time.Second, value: 3},
+		{offset: 50 * time.Second, value: 4},
+	} {
+		if err := eng.AddSample("prod", "temp.out_dry", engine.Timestamp(base.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+
+	makeReq := func(startOffset, endOffset time.Duration) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/api/v1/query_range?db=prod&query=temp.out_dry&start="+strconv.FormatInt(base.Add(startOffset).UnixNano(), 10)+
+				"&end="+strconv.FormatInt(base.Add(endOffset).UnixNano(), 10)+
+				"&step=30s",
+			nil,
+		)
+		rec := httptest.NewRecorder()
+		handleQueryRange(eng)(rec, req)
+		return rec
+	}
+
+	first := makeReq(0, 55*time.Second)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status mismatch: got=%d want=%d body=%s", first.Code, http.StatusOK, first.Body.String())
+	}
+	second := makeReq(10*time.Second, 65*time.Second)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status mismatch: got=%d want=%d body=%s", second.Code, http.StatusOK, second.Body.String())
+	}
+
+	var firstResp, secondResp struct {
+		Data struct {
+			Result []struct {
+				Values [][]interface{} `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("first unmarshal failed: %v", err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResp); err != nil {
+		t.Fatalf("second unmarshal failed: %v", err)
+	}
+	if len(firstResp.Data.Result) != 1 || len(secondResp.Data.Result) != 1 {
+		t.Fatalf("unexpected result counts: first=%+v second=%+v", firstResp.Data.Result, secondResp.Data.Result)
+	}
+	if len(firstResp.Data.Result[0].Values) != 2 || len(secondResp.Data.Result[0].Values) != 2 {
+		t.Fatalf("unexpected value counts: first=%d second=%d", len(firstResp.Data.Result[0].Values), len(secondResp.Data.Result[0].Values))
+	}
+	if got := firstResp.Data.Result[0].Values[0][1]; got != "2" {
+		t.Fatalf("unexpected first bucket value: got=%v want=2", got)
+	}
+	if got := firstResp.Data.Result[0].Values[1][1]; got != "4" {
+		t.Fatalf("unexpected second bucket value: got=%v want=4", got)
+	}
+	if got := secondResp.Data.Result[0].Values[0][1]; got != "2" {
+		t.Fatalf("unexpected shifted first bucket value: got=%v want=2", got)
+	}
+	if got := secondResp.Data.Result[0].Values[1][1]; got != "4" {
+		t.Fatalf("unexpected shifted second bucket value: got=%v want=4", got)
+	}
+}
+
 func TestInitConfigFile_CreatesDefaultConfig(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "engine.toml")
@@ -435,14 +611,25 @@ func TestHandleEngineOverviewAndRuntime(t *testing.T) {
 		Data   struct {
 			Result struct {
 				Runtime struct {
+					Stats struct {
+						WAL struct {
+							AppendCount  int64     `json:"AppendCount"`
+							FlushCount   int64     `json:"FlushCount"`
+							LastAppendAt time.Time `json:"LastAppendAt"`
+							LastFlushAt  time.Time `json:"LastFlushAt"`
+						} `json:"WAL"`
+					} `json:"stats"`
 					OpenPages []struct {
 						Day     string `json:"day"`
 						Records int    `json:"records"`
 					} `json:"open_pages"`
 				} `json:"runtime"`
-				WAL []struct {
-					MetricName string `json:"metric_name"`
-				} `json:"wal"`
+				WALPreview struct {
+					Total int `json:"total"`
+					First []struct {
+						MetricName string `json:"metric_name"`
+					} `json:"first"`
+				} `json:"wal_preview"`
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -455,8 +642,59 @@ func TestHandleEngineOverviewAndRuntime(t *testing.T) {
 	if len(runtimeResp.Data.Result.Runtime.OpenPages) == 0 {
 		t.Fatalf("expected open page in runtime payload")
 	}
-	if len(runtimeResp.Data.Result.WAL) == 0 || runtimeResp.Data.Result.WAL[0].MetricName != "temp.office" {
-		t.Fatalf("expected named WAL records in runtime payload: %+v", runtimeResp.Data.Result.WAL)
+	if runtimeResp.Data.Result.WALPreview.Total == 0 || len(runtimeResp.Data.Result.WALPreview.First) == 0 || runtimeResp.Data.Result.WALPreview.First[0].MetricName != "temp.office" {
+		t.Fatalf("expected named WAL preview records in runtime payload: %+v", runtimeResp.Data.Result.WALPreview)
+	}
+	if runtimeResp.Data.Result.Runtime.Stats.WAL.AppendCount == 0 {
+		t.Fatalf("expected WAL append count in runtime payload: %+v", runtimeResp.Data.Result.Runtime.Stats.WAL)
+	}
+	if runtimeResp.Data.Result.Runtime.Stats.WAL.LastAppendAt.IsZero() {
+		t.Fatalf("expected last WAL append time in runtime payload: %+v", runtimeResp.Data.Result.Runtime.Stats.WAL)
+	}
+
+	runtimeOverviewReq := httptest.NewRequest(http.MethodGet, "/api/engine/runtime", nil)
+	runtimeOverviewRec := httptest.NewRecorder()
+	handleEngineRuntime(eng)(runtimeOverviewRec, runtimeOverviewReq)
+	if runtimeOverviewRec.Code != http.StatusOK {
+		t.Fatalf("runtime overview status mismatch: got=%d want=200 body=%s", runtimeOverviewRec.Code, runtimeOverviewRec.Body.String())
+	}
+	var runtimeOverviewResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result struct {
+				DatabaseCount       int `json:"database_count"`
+				ActiveDatabaseCount int `json:"active_database_count"`
+				Process             struct {
+					StartedAt time.Time `json:"started_at"`
+					RSSBytes  int64     `json:"rss_bytes"`
+				} `json:"process"`
+				GoMem struct {
+					HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
+				} `json:"go_mem"`
+				OpenPages []struct {
+					Database string `json:"database"`
+					Day      string `json:"day"`
+				} `json:"open_pages"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(runtimeOverviewRec.Body).Decode(&runtimeOverviewResp); err != nil {
+		t.Fatalf("decode runtime overview failed: %v", err)
+	}
+	if runtimeOverviewResp.Status != "success" {
+		t.Fatalf("runtime overview payload mismatch: %+v", runtimeOverviewResp)
+	}
+	if runtimeOverviewResp.Data.Result.DatabaseCount == 0 || runtimeOverviewResp.Data.Result.ActiveDatabaseCount == 0 {
+		t.Fatalf("expected database counts in runtime overview: %+v", runtimeOverviewResp.Data.Result)
+	}
+	if runtimeOverviewResp.Data.Result.Process.StartedAt.IsZero() {
+		t.Fatalf("expected process start time in runtime overview: %+v", runtimeOverviewResp.Data.Result.Process)
+	}
+	if runtimeOverviewResp.Data.Result.GoMem.HeapAllocBytes == 0 {
+		t.Fatalf("expected Go memstats in runtime overview: %+v", runtimeOverviewResp.Data.Result.GoMem)
+	}
+	if len(runtimeOverviewResp.Data.Result.OpenPages) == 0 || runtimeOverviewResp.Data.Result.OpenPages[0].Database == "" {
+		t.Fatalf("expected database-tagged open pages in runtime overview: %+v", runtimeOverviewResp.Data.Result.OpenPages)
 	}
 }
 
@@ -650,6 +888,16 @@ func TestHandleEngineFiles(t *testing.T) {
 					Points          int64  `json:"points"`
 					AvgPayloadBytes int64  `json:"avg_payload_bytes"`
 				} `json:"metric"`
+				WAL []struct {
+					Path    string `json:"path"`
+					Records int    `json:"records"`
+				} `json:"wal"`
+				RecordPreview struct {
+					Total int `json:"total"`
+					First []struct {
+						MetricName string `json:"metric_name"`
+					} `json:"first"`
+				} `json:"record_preview"`
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -661,6 +909,12 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 	if len(filesResp.Data.Result.Data) < 2 || filesResp.Data.Result.Data[0].Frames == 0 {
 		t.Fatalf("expected scanned .dat frames in files payload: %+v", filesResp.Data.Result.Data)
+	}
+	if len(filesResp.Data.Result.WAL) == 0 {
+		t.Fatalf("expected WAL file summaries in files payload: %+v", filesResp.Data.Result)
+	}
+	if filesResp.Data.Result.RecordPreview.Total < 0 {
+		t.Fatalf("expected non-negative WAL preview total: %+v", filesResp.Data.Result.RecordPreview)
 	}
 	if len(filesResp.Data.Result.Metric) != 0 {
 		t.Fatalf("expected no metric summaries before metric files exist: %+v", filesResp.Data.Result.Metric)
@@ -692,8 +946,8 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 
 	part := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(selectedFile), "data-"), ".dat")
-	if _, err := eng.BuildMetricFileV1("prod", part); err != nil {
-		t.Fatalf("BuildMetricFileV1 failed: %v", err)
+	if _, err := eng.BuildMetricFileV2("prod", part); err != nil {
+		t.Fatalf("BuildMetricFileV2 failed: %v", err)
 	}
 	filesReq = httptest.NewRequest(http.MethodGet, "/api/engine/files?db=prod&data_file="+url.QueryEscape(selectedFile), nil)
 	filesRec = httptest.NewRecorder()
@@ -712,6 +966,67 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 	if filesResp.Data.Result.Metric[0].AvgPayloadBytes <= 0 {
 		t.Fatalf("expected positive metric avg payload bytes: %+v", filesResp.Data.Result.Metric[0])
+	}
+}
+
+func TestHandleEngineCompactMetric(t *testing.T) {
+	root := t.TempDir()
+	eng, err := engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	base := time.Date(2024, time.January, 3, 12, 0, 0, 0, time.UTC)
+	part := base.Format("2006-01-02")
+	if err := eng.AddLine("prod/temp.office 21.5 " + strconv.FormatInt(base.UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine first failed: %v", err)
+	}
+	if err := eng.AddLine("prod/temp.office 22.5 " + strconv.FormatInt(base.Add(5*time.Minute).UnixNano(), 10)); err != nil {
+		t.Fatalf("AddLine second failed: %v", err)
+	}
+	if err := eng.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	eng, err = engine.OpenEngine(root, 0)
+	if err != nil {
+		t.Fatalf("reopen engine failed: %v", err)
+	}
+	defer eng.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/engine/compact_metric", bytes.NewBufferString(`{"db":"prod","part":"`+part+`"}`))
+	rec := httptest.NewRecorder()
+	handleEngineCompactMetric(eng)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=200 body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result struct {
+				Database    string `json:"database"`
+				Part        string `json:"part"`
+				DataPath    string `json:"data_path"`
+				MetricPath  string `json:"metric_path"`
+				DataBytes   int64  `json:"data_bytes"`
+				MetricBytes int64  `json:"metric_bytes"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode compact metric failed: %v", err)
+	}
+	if resp.Status != "success" {
+		t.Fatalf("unexpected compact metric payload: %+v", resp)
+	}
+	if resp.Data.Result.Database != "prod" || resp.Data.Result.Part != part {
+		t.Fatalf("unexpected compact metric identity: %+v", resp.Data.Result)
+	}
+	if resp.Data.Result.DataBytes <= 0 || resp.Data.Result.MetricBytes <= 0 {
+		t.Fatalf("expected positive size info from compact metric response: %+v", resp.Data.Result)
+	}
+	if _, err := os.Stat(resp.Data.Result.MetricPath); err != nil {
+		t.Fatalf("expected metric file to exist after compact metric: %v", err)
 	}
 }
 

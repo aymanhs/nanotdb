@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -116,6 +117,7 @@ func main() {
 	mux.HandleFunc("/api/engine/overview", handleEngineOverview(eng, runtimeCfg))
 	mux.HandleFunc("/api/engine/database", handleEngineDatabase(eng))
 	mux.HandleFunc("/api/engine/files", handleEngineFiles(eng))
+	mux.HandleFunc("/api/engine/compact_metric", handleEngineCompactMetric(eng))
 	mux.HandleFunc("/api/engine/recompact", handleEngineRecompact(eng))
 	mux.HandleFunc("/api/engine/runtime", handleEngineRuntime(eng))
 	web.Register(mux, runtimeCfg.WebConfig, runtimeCfg.DataDir)
@@ -406,10 +408,13 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 			writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid start: %v", err))
 			return
 		}
-		end, err := parseTimeParam(r.URL.Query().Get("end"))
-		if err != nil {
-			writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid end: %v", err))
-			return
+		end := engine.Timestamp(math.MaxInt64)
+		if rawEnd := strings.TrimSpace(r.URL.Query().Get("end")); rawEnd != "" {
+			end, err = parseTimeParam(rawEnd)
+			if err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid end: %v", err))
+				return
+			}
 		}
 		if end < start {
 			writeVMError(w, http.StatusBadRequest, "bad_data", "end must be >= start")
@@ -422,19 +427,91 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 			return
 		}
 
+		aggregateText := strings.TrimSpace(r.URL.Query().Get("aggregate"))
+		windowText := strings.TrimSpace(r.URL.Query().Get("window"))
+		aggregateMode := aggregateText != "" || windowText != ""
+		if aggregateMode {
+			if aggregateText == "" || windowText == "" {
+				writeVMError(w, http.StatusBadRequest, "bad_data", "aggregate queries require both aggregate and window")
+				return
+			}
+			if stepNS > 0 {
+				writeVMError(w, http.StatusBadRequest, "bad_data", "step is not supported with aggregate queries")
+				return
+			}
+			window, err := time.ParseDuration(windowText)
+			if err != nil || window <= 0 {
+				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid window: %v", err))
+				return
+			}
+			aggregateNames := splitCSVList(aggregateText)
+			valuesByAggregate := make(map[string][][2]interface{}, len(aggregateNames))
+			orderedAggregates := make([]string, 0, len(aggregateNames))
+			err = eng.QueryAggregateRange(database, metric, start, end, window, aggregateNames, func(bucket engine.AggregateBucket) error {
+				if _, ok := valuesByAggregate[bucket.Aggregate]; !ok {
+					orderedAggregates = append(orderedAggregates, bucket.Aggregate)
+				}
+				valuesByAggregate[bucket.Aggregate] = append(valuesByAggregate[bucket.Aggregate], [2]interface{}{toUnixSeconds(bucket.EndTS), strconv.FormatFloat(float64(bucket.Value), 'f', -1, 32)})
+				return nil
+			})
+			if err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+				return
+			}
+
+			result := make([]vmMatrixItem, 0, len(orderedAggregates))
+			for _, aggregate := range orderedAggregates {
+				result = append(result, vmMatrixItem{
+					Metric: vmMetric{"__name__": metric, "db": database, "aggregate": aggregate, "window": window.String()},
+					Values: valuesByAggregate[aggregate],
+				})
+			}
+
+			writeJSON(w, http.StatusOK, vmResponse{
+				Status: "success",
+				Data: map[string]interface{}{
+					"resultType": "matrix",
+					"result":     result,
+				},
+			})
+			return
+		}
+
 		values := make([][2]interface{}, 0, 256)
-		lastEmitted := engine.Timestamp(0)
+		lastBucket := engine.Timestamp(math.MinInt64)
+		var pendingSample *engine.Sample
+		emitPending := func() {
+			if pendingSample == nil {
+				return
+			}
+			values = append(values, [2]interface{}{toUnixSeconds(pendingSample.TS), sampleValueString(*pendingSample)})
+			pendingSample = nil
+		}
 		err = eng.QueryRange(database, metric, start, end, 1, func(s engine.Sample) error {
-			if stepNS > 0 && lastEmitted != 0 && s.TS-lastEmitted < stepNS {
+			if stepNS > 0 {
+				bucket := alignTimestampToStep(s.TS, stepNS)
+				if pendingSample == nil {
+					pendingSample = &s
+					lastBucket = bucket
+					return nil
+				}
+				if bucket != lastBucket {
+					emitPending()
+					lastBucket = bucket
+				}
+				copySample := s
+				pendingSample = &copySample
 				return nil
 			}
-			lastEmitted = s.TS
 			values = append(values, [2]interface{}{toUnixSeconds(s.TS), sampleValueString(s)})
 			return nil
 		})
 		if err != nil {
 			writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
 			return
+		}
+		if stepNS > 0 {
+			emitPending()
 		}
 
 		result := make([]vmMatrixItem, 0, 1)
@@ -453,6 +530,19 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 			},
 		})
 	}
+}
+
+func splitCSVList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 func handleDatabases(eng *engine.Engine) http.HandlerFunc {
@@ -699,6 +789,13 @@ func parseTimeParam(v string) (engine.Timestamp, error) {
 		return 0, err
 	}
 	return ts, nil
+}
+
+func alignTimestampToStep(ts, step engine.Timestamp) engine.Timestamp {
+	if step <= 0 {
+		return ts
+	}
+	return engine.Timestamp((int64(ts) / int64(step)) * int64(step))
 }
 
 func parseStepParam(v string) (engine.Timestamp, error) {

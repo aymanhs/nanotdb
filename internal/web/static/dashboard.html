@@ -13,13 +13,21 @@
     <header class="page-header">
       <nav class="top-nav" aria-label="Navigation">
         <a href="/">Home</a>
-        <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .DashboardPath }}" aria-current="page">Dashboard</a>
         <a href="{{ .EditorPath }}">Editor</a>
         <a href="{{ .ExplorePath }}">Explore</a>
         <a href="{{ .EnginePath }}">Engine</a>
       </nav>
-      <h1 id="dashboard-title">{{ .Title }}</h1>
-      <nav id="group-nav" class="group-nav"></nav>
+      <div class="dashboard-toolbar">
+        <h1 id="dashboard-title">{{ .Title }}</h1>
+        <div class="dashboard-toolbar-controls">
+          <nav id="group-nav" class="group-nav"></nav>
+          <div class="dashboard-global-controls">
+            <button type="button" id="dashboardRefreshAllBtn" class="widget-control-btn widget-control-btn--icon" title="Refresh visible group" aria-label="Refresh visible group">↻</button>
+            <button type="button" id="dashboardAutoRefreshBtn" class="widget-control-btn widget-control-btn--icon" aria-pressed="false" title="Pause visible group auto refresh" aria-label="Pause visible group auto refresh">⏸</button>
+          </div>
+        </div>
+      </div>
     </header>
 
     <div id="widgets"></div>

@@ -547,7 +547,7 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 	}
 
 	for _, agg := range job.Aggregates {
-		aggFn, ok := getRollupAggregator(agg)
+		aggFn, ok := getAggregator(agg)
 		if !ok {
 			continue
 		}

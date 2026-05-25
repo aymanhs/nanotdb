@@ -27,22 +27,27 @@ type DashboardGroup struct {
 }
 
 type DashboardWidget struct {
-	Type        string            `json:"type"`
-	Title       string            `json:"title,omitempty"`
-	RefreshSec  int               `json:"refresh_sec,omitempty"`
-	AutoRefresh *bool             `json:"auto_refresh,omitempty"`
-	Lookback    string            `json:"lookback,omitempty"`
-	Interval    string            `json:"interval,omitempty"`
-	Series      []DashboardSeries `json:"series,omitempty"`
+	Type         string            `json:"type"`
+	Title        string            `json:"title,omitempty"`
+	RefreshSec   int               `json:"refresh_sec,omitempty"`
+	AutoRefresh  *bool             `json:"auto_refresh,omitempty"`
+	Lookback     string            `json:"lookback,omitempty"`
+	Interval     string            `json:"interval,omitempty"`
+	Presentation string            `json:"presentation,omitempty"`
+	Series       []DashboardSeries `json:"series,omitempty"`
 }
 
 type DashboardSeries struct {
 	Label       string               `json:"label,omitempty"`
+	Role        string               `json:"role,omitempty"`
 	DB          string               `json:"db,omitempty"`
 	Database    string               `json:"database,omitempty"`
+	Query       string               `json:"query,omitempty"`
 	Metric      string               `json:"metric,omitempty"`
 	Measurement string               `json:"measurement,omitempty"`
 	Field       string               `json:"field,omitempty"`
+	Aggregate   string               `json:"aggregate,omitempty"`
+	Window      string               `json:"window,omitempty"`
 	Transform   *DashboardTransform  `json:"transform,omitempty"`
 	Thresholds  *DashboardThresholds `json:"thresholds,omitempty"`
 	Scale       *float64             `json:"scale,omitempty"`
@@ -109,8 +114,24 @@ func normalizeDashboardConfig(cfg *DashboardConfigDocument) {
 		if widget.Series == nil {
 			widget.Series = []DashboardSeries{}
 		}
+		if effectiveDashboardWidgetType(widget) == "aggregate_band" && isValidDashboardDuration(widget.Interval) {
+			for idx, series := range widget.Series {
+				if strings.TrimSpace(series.Window) == "" {
+					series.Window = strings.TrimSpace(widget.Interval)
+					widget.Series[idx] = series
+				}
+			}
+		}
 		cfg.Widgets[id] = widget
 	}
+}
+
+func effectiveDashboardWidgetType(widget DashboardWidget) string {
+	widgetType := strings.TrimSpace(widget.Type)
+	if widgetType == "line_chart" && strings.TrimSpace(widget.Presentation) == "aggregate_band" {
+		return "aggregate_band"
+	}
+	return widgetType
 }
 
 func validateDashboardConfig(cfg DashboardConfigDocument) []string {
@@ -148,14 +169,18 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 		}
 		widget := cfg.Widgets[widgetID]
 		lineChartLabels := make(map[string]int)
-		switch widget.Type {
+		widgetType := effectiveDashboardWidgetType(widget)
+		switch widgetType {
 		case "number", "numbers":
 			if len(widget.Series) == 0 {
 				errs = append(errs, fmt.Sprintf("widget %q must define at least one series", widgetID))
 			}
-		case "line_chart":
+		case "line_chart", "aggregate_band":
 			if len(widget.Series) == 0 {
 				errs = append(errs, fmt.Sprintf("widget %q must define at least one series", widgetID))
+			}
+			if widgetType == "line_chart" && strings.TrimSpace(widget.Presentation) != "" && strings.TrimSpace(widget.Presentation) != "aggregate_band" {
+				errs = append(errs, fmt.Sprintf("widget %q has unsupported presentation %q", widgetID, strings.TrimSpace(widget.Presentation)))
 			}
 			if !isValidDashboardDuration(widget.Lookback) {
 				errs = append(errs, fmt.Sprintf("widget %q has invalid lookback %q", widgetID, widget.Lookback))
@@ -169,14 +194,26 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 		if widget.RefreshSec < 0 {
 			errs = append(errs, fmt.Sprintf("widget %q has invalid refresh_sec %d", widgetID, widget.RefreshSec))
 		}
+		aggregateBandRoles := make(map[string]int)
+		aggregateBandKey := ""
+		aggregateBandShortcut := usesAggregateBandShortcut(widget)
 		for idx, series := range widget.Series {
+			query := strings.TrimSpace(series.Query)
 			metric := strings.TrimSpace(series.Metric)
 			measurement := strings.TrimSpace(series.Measurement)
 			field := strings.TrimSpace(series.Field)
-			if metric == "" && (measurement == "" || field == "") {
-				errs = append(errs, fmt.Sprintf("widget %q series[%d] must define metric or measurement+field", widgetID, idx))
+			aggregate := strings.TrimSpace(series.Aggregate)
+			window := strings.TrimSpace(series.Window)
+			if query == "" && metric == "" && (measurement == "" || field == "") {
+				errs = append(errs, fmt.Sprintf("widget %q series[%d] must define query, metric, or measurement+field", widgetID, idx))
 			}
-			if widget.Type == "line_chart" {
+			if (aggregate == "") != (window == "") && !(aggregateBandShortcut && idx == 0 && aggregate == "" && window != "") {
+				errs = append(errs, fmt.Sprintf("widget %q series[%d] aggregate and window must be set together", widgetID, idx))
+			}
+			if window != "" && !isValidDashboardDuration(window) {
+				errs = append(errs, fmt.Sprintf("widget %q series[%d] has invalid window %q", widgetID, idx, window))
+			}
+			if widgetType == "line_chart" || widgetType == "aggregate_band" {
 				label := effectiveDashboardSeriesLabel(series, idx)
 				if prevIdx, exists := lineChartLabels[label]; exists {
 					errs = append(errs, fmt.Sprintf("widget %q has duplicate line chart label %q at series[%d] and series[%d]", widgetID, label, prevIdx, idx))
@@ -190,6 +227,46 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 				hasCritical := series.Thresholds.Critical != nil
 				if (hasWarning || hasCritical) && direction != "above" && direction != "below" {
 					errs = append(errs, fmt.Sprintf("widget %q series[%d] thresholds.direction must be above or below", widgetID, idx))
+				}
+			}
+			if widgetType == "aggregate_band" {
+				if aggregateBandShortcut {
+					if idx == 0 {
+						aggregateBandKey = effectiveDashboardSeriesSourceKey(cfg.DefaultDB, series)
+					}
+					continue
+				}
+				role := effectiveDashboardSeriesRole(series)
+				if role == "" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] must define role min, max, or avg for aggregate_band presentation", widgetID, idx))
+					continue
+				}
+				if role != "min" && role != "max" && role != "avg" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] has unsupported aggregate_band role %q", widgetID, idx, role))
+				}
+				if prevIdx, exists := aggregateBandRoles[role]; exists {
+					errs = append(errs, fmt.Sprintf("widget %q has duplicate aggregate_band role %q at series[%d] and series[%d]", widgetID, role, prevIdx, idx))
+				} else {
+					aggregateBandRoles[role] = idx
+				}
+				key := effectiveDashboardSeriesSourceKey(cfg.DefaultDB, series)
+				if aggregateBandKey == "" {
+					aggregateBandKey = key
+				} else if key != aggregateBandKey {
+					errs = append(errs, fmt.Sprintf("widget %q aggregate_band series[%d] must use the same source query, database, and window as the other band series", widgetID, idx))
+				}
+			}
+		}
+		if widgetType == "aggregate_band" {
+			if aggregateBandShortcut {
+				if strings.TrimSpace(widget.Series[0].Window) == "" {
+					errs = append(errs, fmt.Sprintf("widget %q aggregate_band shortcut series[0] requires window", widgetID))
+				}
+			} else {
+				for _, role := range []string{"min", "max", "avg"} {
+					if _, exists := aggregateBandRoles[role]; !exists {
+						errs = append(errs, fmt.Sprintf("widget %q aggregate_band presentation requires a %s series", widgetID, role))
+					}
 				}
 			}
 		}
@@ -210,6 +287,21 @@ func effectiveDashboardSeriesLabel(series DashboardSeries, idx int) string {
 	if label := strings.TrimSpace(series.Label); label != "" {
 		return label
 	}
+	if role := effectiveDashboardSeriesRole(series); role != "" {
+		switch role {
+		case "avg":
+			return "Avg"
+		case "min":
+			return "Min"
+		case "max":
+			return "Max"
+		default:
+			return role
+		}
+	}
+	if query := strings.TrimSpace(series.Query); query != "" {
+		return query
+	}
 	if metric := strings.TrimSpace(series.Metric); metric != "" {
 		return metric
 	}
@@ -219,6 +311,51 @@ func effectiveDashboardSeriesLabel(series DashboardSeries, idx int) string {
 		return measurement + "." + field
 	}
 	return fmt.Sprintf("Series %d", idx+1)
+}
+
+func effectiveDashboardSeriesQuery(series DashboardSeries) string {
+	if query := strings.TrimSpace(series.Query); query != "" {
+		return query
+	}
+	if metric := strings.TrimSpace(series.Metric); metric != "" {
+		return metric
+	}
+	measurement := strings.TrimSpace(series.Measurement)
+	field := strings.TrimSpace(series.Field)
+	if measurement != "" && field != "" {
+		return measurement + "." + field
+	}
+	return ""
+}
+
+func effectiveDashboardSeriesRole(series DashboardSeries) string {
+	if role := strings.TrimSpace(series.Role); role != "" {
+		return role
+	}
+	aggregate := strings.ToLower(strings.TrimSpace(series.Aggregate))
+	if aggregate == "min" || aggregate == "max" || aggregate == "avg" {
+		return aggregate
+	}
+	return ""
+}
+
+func effectiveDashboardSeriesSourceKey(defaultDB string, series DashboardSeries) string {
+	db := strings.TrimSpace(series.DB)
+	if db == "" {
+		db = strings.TrimSpace(series.Database)
+	}
+	if db == "" {
+		db = strings.TrimSpace(defaultDB)
+	}
+	return db + "|" + effectiveDashboardSeriesQuery(series) + "|" + strings.TrimSpace(series.Window)
+}
+
+func usesAggregateBandShortcut(widget DashboardWidget) bool {
+	if effectiveDashboardWidgetType(widget) != "aggregate_band" || len(widget.Series) != 1 {
+		return false
+	}
+	series := widget.Series[0]
+	return strings.TrimSpace(series.Window) != "" && strings.TrimSpace(series.Aggregate) == "" && effectiveDashboardSeriesRole(series) == ""
 }
 
 func isValidDashboardDuration(value string) bool {
