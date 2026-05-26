@@ -1,3 +1,9 @@
+# Things to do
+- add median and trimmed average aggregate and use them for sd latency
+- think about adding events or annotations, use those to put events for things like sd read > 500ms.
+- analyze existing sd latency data to see good numbers for trimming,  5%, 1%?
+
+
 # NanoTDB TODO (Design Follow-ups)
 
 These items are intentionally deferred from the current design lock.
