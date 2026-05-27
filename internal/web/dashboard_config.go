@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/aymanhs/nanotdb/internal/engine"
 )
 
 type DashboardConfigDocument struct {
@@ -114,13 +116,9 @@ func normalizeDashboardConfig(cfg *DashboardConfigDocument) {
 		if widget.Series == nil {
 			widget.Series = []DashboardSeries{}
 		}
-		if effectiveDashboardWidgetType(widget) == "aggregate_band" && isValidDashboardDuration(widget.Interval) {
-			for idx, series := range widget.Series {
-				if strings.TrimSpace(series.Window) == "" {
-					series.Window = strings.TrimSpace(widget.Interval)
-					widget.Series[idx] = series
-				}
-			}
+		for idx, series := range widget.Series {
+			series.Window = effectiveDashboardSeriesAggregateWindow(widget, series)
+			widget.Series[idx] = series
 		}
 		cfg.Widgets[id] = widget
 	}
@@ -203,12 +201,15 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			measurement := strings.TrimSpace(series.Measurement)
 			field := strings.TrimSpace(series.Field)
 			aggregate := strings.TrimSpace(series.Aggregate)
-			window := strings.TrimSpace(series.Window)
+			window := effectiveDashboardSeriesAggregateWindow(widget, series)
 			if query == "" && metric == "" && (measurement == "" || field == "") {
 				errs = append(errs, fmt.Sprintf("widget %q series[%d] must define query, metric, or measurement+field", widgetID, idx))
 			}
 			if (aggregate == "") != (window == "") && !(aggregateBandShortcut && idx == 0 && aggregate == "" && window != "") {
 				errs = append(errs, fmt.Sprintf("widget %q series[%d] aggregate and window must be set together", widgetID, idx))
+			}
+			if aggregate != "" && !isSupportedDashboardAggregate(aggregate) && !(widgetType == "aggregate_band" && aggregateBandShortcut && idx == 0) {
+				errs = append(errs, fmt.Sprintf("widget %q series[%d] has unsupported aggregate %q", widgetID, idx, aggregate))
 			}
 			if window != "" && !isValidDashboardDuration(window) {
 				errs = append(errs, fmt.Sprintf("widget %q series[%d] has invalid window %q", widgetID, idx, window))
@@ -232,7 +233,7 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			if widgetType == "aggregate_band" {
 				if aggregateBandShortcut {
 					if idx == 0 {
-						aggregateBandKey = effectiveDashboardSeriesSourceKey(cfg.DefaultDB, series)
+						aggregateBandKey = effectiveDashboardSeriesSourceKey(cfg.DefaultDB, widget, series)
 					}
 					continue
 				}
@@ -249,7 +250,7 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 				} else {
 					aggregateBandRoles[role] = idx
 				}
-				key := effectiveDashboardSeriesSourceKey(cfg.DefaultDB, series)
+				key := effectiveDashboardSeriesSourceKey(cfg.DefaultDB, widget, series)
 				if aggregateBandKey == "" {
 					aggregateBandKey = key
 				} else if key != aggregateBandKey {
@@ -259,7 +260,7 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 		}
 		if widgetType == "aggregate_band" {
 			if aggregateBandShortcut {
-				if strings.TrimSpace(widget.Series[0].Window) == "" {
+				if strings.TrimSpace(widget.Interval) == "" {
 					errs = append(errs, fmt.Sprintf("widget %q aggregate_band shortcut series[0] requires window", widgetID))
 				}
 			} else {
@@ -339,7 +340,7 @@ func effectiveDashboardSeriesRole(series DashboardSeries) string {
 	return ""
 }
 
-func effectiveDashboardSeriesSourceKey(defaultDB string, series DashboardSeries) string {
+func effectiveDashboardSeriesSourceKey(defaultDB string, widget DashboardWidget, series DashboardSeries) string {
 	db := strings.TrimSpace(series.DB)
 	if db == "" {
 		db = strings.TrimSpace(series.Database)
@@ -347,7 +348,7 @@ func effectiveDashboardSeriesSourceKey(defaultDB string, series DashboardSeries)
 	if db == "" {
 		db = strings.TrimSpace(defaultDB)
 	}
-	return db + "|" + effectiveDashboardSeriesQuery(series) + "|" + strings.TrimSpace(series.Window)
+	return db + "|" + effectiveDashboardSeriesQuery(series) + "|" + effectiveDashboardSeriesAggregateWindow(widget, series)
 }
 
 func usesAggregateBandShortcut(widget DashboardWidget) bool {
@@ -355,7 +356,38 @@ func usesAggregateBandShortcut(widget DashboardWidget) bool {
 		return false
 	}
 	series := widget.Series[0]
-	return strings.TrimSpace(series.Window) != "" && strings.TrimSpace(series.Aggregate) == "" && effectiveDashboardSeriesRole(series) == ""
+	return strings.TrimSpace(series.Aggregate) == "" && effectiveDashboardSeriesRole(series) == ""
+}
+
+func effectiveDashboardSeriesAggregateWindow(widget DashboardWidget, series DashboardSeries) string {
+	widgetType := effectiveDashboardWidgetType(widget)
+	interval := strings.TrimSpace(widget.Interval)
+	if widgetType == "aggregate_band" {
+		if interval != "" {
+			return interval
+		}
+		return strings.TrimSpace(series.Window)
+	}
+	if widgetType == "line_chart" && strings.TrimSpace(series.Aggregate) != "" {
+		if interval != "" {
+			return interval
+		}
+		return strings.TrimSpace(series.Window)
+	}
+	return strings.TrimSpace(series.Window)
+}
+
+func isSupportedDashboardAggregate(value string) bool {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return false
+	}
+	for _, aggregate := range engine.SupportedAggregates() {
+		if aggregate == name {
+			return true
+		}
+	}
+	return false
 }
 
 func isValidDashboardDuration(value string) bool {

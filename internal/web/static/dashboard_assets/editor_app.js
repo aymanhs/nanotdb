@@ -37,7 +37,9 @@
   const titleInput = document.getElementById("dashboardTitleInput");
   const defaultDbSelect = document.getElementById("defaultDbSelect");
   const metricOptions = document.getElementById("metricOptions");
+  const aggregateOptions = document.getElementById("aggregateOptions");
   const existingWidgetSelect = document.getElementById("existingWidgetSelect");
+  let aggregateCatalog = { result: [], default: "avg" };
 
   function apiURL(path) {
     const base = typeof cfg.apiBaseURL === "string" ? cfg.apiBaseURL.replace(/\/$/, "") : "";
@@ -187,17 +189,21 @@
     };
   }
 
-  function syncAggregateBandSeries(widget) {
-    if (widgetChartType(widget) !== "aggregate_band") {
+  function syncChartSeries(widget) {
+    const widgetType = widgetChartType(widget);
+    if ((widgetType !== "line_chart" && widgetType !== "aggregate_band") || !Array.isArray(widget.series)) {
       return;
     }
     const interval = typeof widget.interval === "string" ? widget.interval.trim() : "";
-    if (!interval || !Array.isArray(widget.series)) {
-      return;
-    }
     widget.series.forEach((series) => {
-      if (series && !series.window) {
+      if (!series) {
+        return;
+      }
+      const usesAggregateWindow = widgetType === "aggregate_band" || Boolean(series.aggregate && String(series.aggregate).trim());
+      if (usesAggregateWindow && interval) {
         series.window = interval;
+      } else {
+        delete series.window;
       }
     });
   }
@@ -239,6 +245,23 @@
     });
     const values = Array.from(all).sort();
     metricOptions.innerHTML = values.map((metric) => '<option value="' + escapeHTML(metric) + '"></option>').join("");
+  }
+
+  function populateAggregateDatalist() {
+  if (!aggregateOptions) {
+    return;
+  }
+  aggregateOptions.innerHTML = (aggregateCatalog.result || []).map((aggregate) => '<option value="' + escapeHTML(aggregate) + '"></option>').join("");
+  }
+
+  async function loadAggregates() {
+  const payload = await fetchJSON(apiURL("/api/v1/aggregates"));
+  const data = payload && payload.data ? payload.data : {};
+  aggregateCatalog = {
+    result: Array.isArray(data.result) ? data.result.slice() : [],
+    default: typeof data.default === "string" && data.default.trim() ? data.default.trim() : "avg",
+  };
+  populateAggregateDatalist();
   }
 
   async function loadMetricsForDB(db) {
@@ -543,7 +566,7 @@
     widgetUsageBadgeEl.innerHTML = usage.length > 1 ? '<span class="usage-pill">Used in ' + usage.length + ' groups</span>' : '<span class="pill">Used in 1 group</span>';
     widgetEditorEl.className = "";
 
-    syncAggregateBandSeries(widget);
+    syncChartSeries(widget);
 
     const widgetType = widget.type || "numbers";
     const effectiveWidgetType = widgetChartType(widget);
@@ -584,13 +607,22 @@
               (isAggregateBand ? '' : '<label>Label<input type="text" data-field="label" value="' + escapeHTML(item.label || "") + '" /></label>') +
               (isAggregateBand && !usesAggregateBandShortcut ? '<label>Aggregate<input type="text" data-field="aggregate" placeholder="e.g. avg" value="' + escapeHTML(item.aggregate || "") + '" /></label>' : '') +
             '</div>' +
+            (!isAggregateBand ?
+            '<div class="series-grid-secondary">' +
+              '<label>Aggregate<input type="text" list="aggregateOptions" data-field="aggregate" placeholder="e.g. ' + escapeHTML(aggregateCatalog.default || 'avg') + '" value="' + escapeHTML(item.aggregate || "") + '" /></label>' +
+              '<label>Factor<input type="number" step="any" data-field="transform.factor" value="' + escapeHTML(transform.factor == null ? "" : transform.factor) + '" /></label>' +
+              '<label>Offset<input type="number" step="any" data-field="transform.offset" value="' + escapeHTML(transform.offset == null ? "" : transform.offset) + '" /></label>' +
+              '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
+              '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
+              '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /><span class="field-hint">Use <code>{duration}</code> for durations/uptime.</span></label>' +
+            '</div>' :
             '<div class="series-grid-secondary">' +
               '<label>Factor<input type="number" step="any" data-field="transform.factor" value="' + escapeHTML(transform.factor == null ? "" : transform.factor) + '" /></label>' +
               '<label>Offset<input type="number" step="any" data-field="transform.offset" value="' + escapeHTML(transform.offset == null ? "" : transform.offset) + '" /></label>' +
               '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
               '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
               '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /><span class="field-hint">Use <code>{duration}</code> for durations/uptime.</span></label>' +
-            '</div>' +
+            '</div>') +
             (isLineChart ? '' :
             '<div class="series-grid-thresholds">' +
               '<label>Threshold<select data-field="thresholds.direction">' +
@@ -628,6 +660,7 @@
             '</div>' :
             '') +
           (isAggregateBand ? '<p class="editor-note">Aggregate band charts use widget interval as the band window. With one series, just choose the metric. Add more series only if you want manual min/avg/max aggregate control.</p>' : '') +
+          (effectiveWidgetType === "line_chart" ? '<p class="editor-note">Line-chart aggregate buckets use widget interval for every series. Per-series windows are not used.</p>' : '') +
           (isSingleNumber ? '<p class="editor-note">Single number widgets use only the first series.</p>' : '') +
         '</section>' +
         '<section class="editor-section">' +
@@ -665,8 +698,8 @@
       if (!Array.isArray(widget.series) || widget.series.length === 0) {
         widget.series = [defaultSeries(0)];
       }
-      if (widget.type === "aggregate_band") {
-        syncAggregateBandSeries(widget);
+      if (widget.type === "line_chart" || widget.type === "aggregate_band") {
+        syncChartSeries(widget);
       }
       if (widget.type === "number" && widget.series.length > 1) {
         widget.series = [widget.series[0]];
@@ -695,7 +728,7 @@
       });
       widgetEditorEl.querySelector("#widgetIntervalInput").addEventListener("change", (event) => {
         widget.interval = event.target.value;
-        syncAggregateBandSeries(widget);
+        syncChartSeries(widget);
         schedulePreview();
         markDirty();
       });
@@ -708,7 +741,7 @@
         widget.series.push(defaultSeries(widget.series.length));
         state.expandedSeries = new Set([widgetId + ':' + (widget.series.length - 1)]);
       }
-      syncAggregateBandSeries(widget);
+      syncChartSeries(widget);
       renderWidgetEditor();
       schedulePreview();
       markDirty();
@@ -794,7 +827,7 @@
             else delete seriesItem.role;
           }
           if (field === "window") seriesItem.window = value;
-          syncAggregateBandSeries(widget);
+          syncChartSeries(widget);
           if (field === "transform.factor") {
             seriesItem.transform = seriesItem.transform || {};
             const next = optionalNumber(value);
@@ -1264,7 +1297,7 @@
         foot.textContent = "missing db/query";
         return;
       }
-      const point = await fetchLast(db, series, parseDurationSeconds(widget.lookback || series.window || "5m", 300));
+      const point = await fetchLast(db, series, parseDurationSeconds(widget.lookback || "5m", 300));
       if (!point) {
         foot.textContent = "no value";
         return;
@@ -1307,7 +1340,7 @@
         if (!db || !query) {
           return;
         }
-        const point = await fetchLast(db, series, parseDurationSeconds(widget.lookback || series.window || "5m", 300));
+        const point = await fetchLast(db, series, parseDurationSeconds(widget.lookback || "5m", 300));
         if (!point) {
           return;
         }
@@ -1528,6 +1561,7 @@
 
   async function init() {
     try {
+      await loadAggregates();
       const dashboardConfig = normalizeConfig(await fetchJSON(apiURL("/api/dashboard-config")));
       state.originalConfig = deepClone(dashboardConfig);
       state.draftConfig = deepClone(dashboardConfig);

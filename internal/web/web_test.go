@@ -182,7 +182,7 @@ func TestRegister_ValidatesDashboardQueryConfig(t *testing.T) {
       "title": "Sample",
       "lookback": "6h",
       "interval": "1m",
-      "series": [{"query": "temp.cpu", "aggregate": "avg", "window": "5m"}]
+			"series": [{"query": "temp.cpu", "aggregate": "p95"}]
     }
   }
 }`)
@@ -195,6 +195,37 @@ func TestRegister_ValidatesDashboardQueryConfig(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"ok":true`) {
 		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_RejectsUnsupportedDashboardQueryAggregate(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Edited Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["sample"]}],
+  "widgets": {
+    "sample": {
+      "type": "line_chart",
+      "title": "Sample",
+      "lookback": "6h",
+      "interval": "1m",
+			"series": [{"query": "temp.cpu", "aggregate": "bogus"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("validate status mismatch: got=%d want=400 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `unsupported aggregate \"bogus\"`) {
+		t.Fatalf("expected unsupported aggregate error, got %q", rec.Body.String())
 	}
 }
 
@@ -249,7 +280,7 @@ func TestRegister_ValidatesDashboardAggregateBandShortcutConfig(t *testing.T) {
       "lookback": "24h",
       "interval": "10m",
       "series": [
-        {"query": "cpu.busy_pct", "window": "10m"}
+		{"query": "cpu.busy_pct"}
       ]
     }
   }

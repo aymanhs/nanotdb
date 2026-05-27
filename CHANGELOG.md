@@ -10,18 +10,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Added
 - Dynamic aggregate range queries with shared aggregate execution in one scan, plus dashboard/editor/explore support for aggregate-backed charts and query-driven widgets.
 - A first-class `aggregate_band` dashboard widget with shorthand config expansion, interval-as-window behavior, batched aggregate fetching, and simplified editor support for min/avg/max band charts.
+- Built-in aggregate discovery and query surfaces, including `/api/v1/aggregates`, `nanocli query --aggregate ... --window ...`, and new aggregate options beyond the original min/max/sum/avg/count set: `median`, `p50`, `p95`, `p99`, `trimmed_avg`, and the `trimmed_average` alias.
 - Engine inspector WAL and runtime surfaces for live file/state inspection, including WAL previews, recent flush history, process RSS, Go runtime memory stats, process age, and cross-database open-page visibility.
 - Per-file engine inspector compaction actions to build query-optimized metric `v2` files from sealed raw partitions with status and size reporting.
 
 ### Changed
 - Shared raw-partition metric-file preparation helpers were moved into a neutral engine file and renamed away from `v1`-specific terminology, clarifying that both legacy `v1` and default `v2` metric builds use the same partition scan/coalesce path.
-- Dashboard, editor, explore, and engine web surfaces now use a cleaner tabbed navigation/header treatment, simpler refresh controls, and more consistent query/chart ergonomics.
+- Dashboard, editor, explore, and engine web surfaces now use a cleaner tabbed navigation/header treatment, simpler refresh controls, and more consistent aggregate-window query/chart ergonomics.
+- Query-range `step`/UI resolution selection now maps to aggregate buckets using the server default aggregate (`avg` by default), and dashboard line-chart aggregate series now use widget interval as their shared bucket window instead of per-series windows.
 - Engine runtime inspection now reports process-wide state instead of one selected database, while the Files and WAL tabs split disk inspection from live WAL diagnostics.
+- The `trimmed_avg` aggregate now trims one low/high outlier for small sample sets and uses a lighter 5% per-tail trim for larger windows instead of the previous fixed 10% rule.
+- README, getting-started, and metric-file docs were refreshed around aggregate-backed queries/widgets, built-in inspector compaction actions, and the updated dashboard/editor/explore workflow.
 
 ### Fixed
 - Default `v2` metric-file builds now tolerate sealed raw partitions whose per-metric samples appear out of timestamp order in raw page append order by normalizing each metric stream during build and verification.
 - Query APIs and web consumers now treat `end` as optional, stabilize aggregate range stepping, and collapse duplicate aggregate-band backend requests into shared multi-aggregate fetches.
 - Engine WAL UI now avoids redundant scanned/live preview sections, renders unset flush timestamps as `never`, and the CodeQL dismiss workflow YAML no longer fails parsing because of an unquoted colon-containing comment string.
+- Trimmed-average aggregate coverage now locks in the small-sample minimum trim and the 50-point 5% per-tail behavior through focused engine tests.
 
 ## [1.3.0] - 2026-05-24
 

@@ -282,7 +282,8 @@ func TestHandleQueryRangeStepUsesStableBuckets(t *testing.T) {
 	var firstResp, secondResp struct {
 		Data struct {
 			Result []struct {
-				Values [][]interface{} `json:"values"`
+				Metric map[string]string `json:"metric"`
+				Values [][]interface{}   `json:"values"`
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -298,17 +299,60 @@ func TestHandleQueryRangeStepUsesStableBuckets(t *testing.T) {
 	if len(firstResp.Data.Result[0].Values) != 2 || len(secondResp.Data.Result[0].Values) != 2 {
 		t.Fatalf("unexpected value counts: first=%d second=%d", len(firstResp.Data.Result[0].Values), len(secondResp.Data.Result[0].Values))
 	}
-	if got := firstResp.Data.Result[0].Values[0][1]; got != "2" {
-		t.Fatalf("unexpected first bucket value: got=%v want=2", got)
+	if got := firstResp.Data.Result[0].Values[0][1]; got != "1.5" {
+		t.Fatalf("unexpected first bucket avg: got=%v want=1.5", got)
 	}
-	if got := firstResp.Data.Result[0].Values[1][1]; got != "4" {
-		t.Fatalf("unexpected second bucket value: got=%v want=4", got)
+	if got := firstResp.Data.Result[0].Values[1][1]; got != "3.5" {
+		t.Fatalf("unexpected second bucket avg: got=%v want=3.5", got)
 	}
 	if got := secondResp.Data.Result[0].Values[0][1]; got != "2" {
-		t.Fatalf("unexpected shifted first bucket value: got=%v want=2", got)
+		t.Fatalf("unexpected shifted first bucket avg: got=%v want=2", got)
 	}
-	if got := secondResp.Data.Result[0].Values[1][1]; got != "4" {
-		t.Fatalf("unexpected shifted second bucket value: got=%v want=4", got)
+	if got := secondResp.Data.Result[0].Values[1][1]; got != "3.5" {
+		t.Fatalf("unexpected shifted second bucket avg: got=%v want=3.5", got)
+	}
+	if got := firstResp.Data.Result[0].Metric["aggregate"]; got != "avg" {
+		t.Fatalf("unexpected aggregate label: got=%q want=avg", got)
+	}
+	if got := firstResp.Data.Result[0].Metric["window"]; got != "30s" {
+		t.Fatalf("unexpected window label: got=%q want=30s", got)
+	}
+}
+
+func TestHandleAggregatesReturnsEngineRegistry(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/aggregates", nil)
+	rec := httptest.NewRecorder()
+	handleAggregates()(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status mismatch: got=%d want=%d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result  []string `json:"result"`
+			Default string   `json:"default"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if resp.Status != "success" {
+		t.Fatalf("unexpected status: %+v", resp)
+	}
+	if len(resp.Data.Result) == 0 {
+		t.Fatal("expected aggregates in response")
+	}
+	if resp.Data.Default != engine.DefaultStepAggregate() {
+		t.Fatalf("default aggregate mismatch: got=%q want=%q", resp.Data.Default, engine.DefaultStepAggregate())
+	}
+	want := engine.SupportedAggregates()
+	if len(resp.Data.Result) != len(want) {
+		t.Fatalf("aggregate count mismatch: got=%d want=%d", len(resp.Data.Result), len(want))
+	}
+	for i := range want {
+		if resp.Data.Result[i] != want[i] {
+			t.Fatalf("aggregates mismatch at %d: got=%v want=%v", i, resp.Data.Result, want)
+		}
 	}
 }
 

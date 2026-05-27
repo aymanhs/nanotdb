@@ -37,7 +37,8 @@
       </label>
       <label>
         Aggregate
-        <input id="aggregateInput" type="text" placeholder="optional, e.g. avg" />
+        <input id="aggregateInput" list="aggregateOptions" type="text" placeholder="optional" />
+        <datalist id="aggregateOptions"></datalist>
       </label>
       <label>
         Bucket Window
@@ -53,7 +54,7 @@
         </select>
       </label>
       <label>
-        Step
+        Resolution
         <select id="stepSelect">
           <option value="10s">10s</option>
           <option value="30s" selected>30s</option>

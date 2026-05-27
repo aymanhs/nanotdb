@@ -16,6 +16,7 @@
   const metricsOptions = document.getElementById("metricsOptions");
   const addQueryBtn = document.getElementById("addQueryBtn");
   const aggregateInput = document.getElementById("aggregateInput");
+  const aggregateOptions = document.getElementById("aggregateOptions");
   const bucketWindowInput = document.getElementById("bucketWindowInput");
   const selectedQueriesEl = document.getElementById("selectedQueries");
   const windowSelect = document.getElementById("windowSelect");
@@ -40,6 +41,7 @@
   let autoRefreshEnabled = true;
   let autoRefreshTimer = null;
   let refreshInFlight = false;
+  let aggregateCatalog = { result: [], default: "avg" };
 
   const initialRefreshSeconds = Math.max(2, Number(cfg.refreshSeconds || 10));
 
@@ -79,11 +81,39 @@
   }
 
   async function fetchJSON(url) {
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
       throw new Error("HTTP " + res.status + " for " + url);
     }
     return res.json();
+  }
+
+  function renderAggregateOptions() {
+    if (!aggregateOptions) {
+      return;
+    }
+    aggregateOptions.innerHTML = "";
+    (aggregateCatalog.result || []).forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      aggregateOptions.appendChild(opt);
+    });
+    if (aggregateInput && !aggregateInput.value && aggregateCatalog.default) {
+      aggregateInput.placeholder = "optional, e.g. " + aggregateCatalog.default;
+    }
+    if (stepSelect && aggregateCatalog.default) {
+      stepSelect.title = "Blank aggregate uses server default " + aggregateCatalog.default + " buckets";
+    }
+  }
+
+  async function loadAggregates() {
+    const payload = await fetchJSON(apiURL("/api/v1/aggregates"));
+    const data = payload && payload.data ? payload.data : {};
+    aggregateCatalog = {
+      result: Array.isArray(data.result) ? data.result.slice() : [],
+      default: typeof data.default === "string" && data.default.trim() ? data.default.trim() : "avg",
+    };
+    renderAggregateOptions();
   }
 
   function currentAggregate() {
@@ -434,6 +464,7 @@
     try {
       refreshIntervalSelect.value = String(initialRefreshSeconds);
       syncRefreshControls(true);
+      await loadAggregates();
       await loadDatabases();
       await refreshAll();
       restartAutoRefreshTimer();

@@ -112,6 +112,7 @@ func main() {
 	mux.HandleFunc("/api/v1/rollup/backfill", handleRollupBackfill(eng))
 	mux.HandleFunc("/api/v1/query", handleQuery(eng))
 	mux.HandleFunc("/api/v1/query_range", handleQueryRange(eng))
+	mux.HandleFunc("/api/v1/aggregates", handleAggregates())
 	mux.HandleFunc("/api/v1/databases", handleDatabases(eng))
 	mux.HandleFunc("/api/v1/metrics", handleMetrics(eng))
 	mux.HandleFunc("/api/engine/overview", handleEngineOverview(eng, runtimeCfg))
@@ -429,14 +430,14 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 
 		aggregateText := strings.TrimSpace(r.URL.Query().Get("aggregate"))
 		windowText := strings.TrimSpace(r.URL.Query().Get("window"))
+		if aggregateText == "" && windowText == "" && stepNS > 0 {
+			aggregateText = engine.DefaultStepAggregate()
+			windowText = time.Duration(stepNS).String()
+		}
 		aggregateMode := aggregateText != "" || windowText != ""
 		if aggregateMode {
 			if aggregateText == "" || windowText == "" {
 				writeVMError(w, http.StatusBadRequest, "bad_data", "aggregate queries require both aggregate and window")
-				return
-			}
-			if stepNS > 0 {
-				writeVMError(w, http.StatusBadRequest, "bad_data", "step is not supported with aggregate queries")
 				return
 			}
 			window, err := time.ParseDuration(windowText)
@@ -527,6 +528,23 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 			Data: map[string]interface{}{
 				"resultType": "matrix",
 				"result":     result,
+			},
+		})
+	}
+}
+
+func handleAggregates() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeVMError(w, http.StatusMethodNotAllowed, "bad_data", "method not allowed")
+			return
+		}
+		writeJSON(w, http.StatusOK, vmResponse{
+			Status: "success",
+			Data: map[string]interface{}{
+				"resultType": "aggregates",
+				"result":     engine.SupportedAggregates(),
+				"default":    engine.DefaultStepAggregate(),
 			},
 		})
 	}

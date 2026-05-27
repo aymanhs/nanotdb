@@ -96,7 +96,7 @@ func TestEngineQueryAggregateRangeSupportsBuiltins(t *testing.T) {
 	defer e.Close()
 
 	base := Timestamp(time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC).UnixNano())
-	values := []float32{10, 20, 40}
+	values := []float32{10, 20, 40, 50, 100}
 	for i, value := range values {
 		if err := e.AddSample("prod", "temp.out_dry", base+Timestamp(time.Duration(i)*time.Minute), value); err != nil {
 			t.Fatalf("AddSample failed: %v", err)
@@ -104,7 +104,7 @@ func TestEngineQueryAggregateRangeSupportsBuiltins(t *testing.T) {
 	}
 
 	got := make(map[string]AggregateBucket)
-	err = e.QueryAggregateRange("prod", "temp.out_dry", base, base+Timestamp(5*time.Minute), 5*time.Minute, []string{"min", "max", "sum", "avg", "count"}, func(bucket AggregateBucket) error {
+	err = e.QueryAggregateRange("prod", "temp.out_dry", base, base+Timestamp(5*time.Minute), 5*time.Minute, []string{"min", "max", "sum", "avg", "count", "p50", "median", "p95", "p99"}, func(bucket AggregateBucket) error {
 		got[bucket.Aggregate] = bucket
 		return nil
 	})
@@ -112,10 +112,40 @@ func TestEngineQueryAggregateRangeSupportsBuiltins(t *testing.T) {
 		t.Fatalf("QueryAggregateRange failed: %v", err)
 	}
 	assertAggregateBucket(t, got["min"], "min", base, base+Timestamp(5*time.Minute), 10)
-	assertAggregateBucket(t, got["max"], "max", base, base+Timestamp(5*time.Minute), 40)
-	assertAggregateBucket(t, got["sum"], "sum", base, base+Timestamp(5*time.Minute), 70)
-	assertAggregateBucket(t, got["avg"], "avg", base, base+Timestamp(5*time.Minute), float32(70.0/3.0))
-	assertAggregateBucket(t, got["count"], "count", base, base+Timestamp(5*time.Minute), 3)
+	assertAggregateBucket(t, got["max"], "max", base, base+Timestamp(5*time.Minute), 100)
+	assertAggregateBucket(t, got["sum"], "sum", base, base+Timestamp(5*time.Minute), 220)
+	assertAggregateBucket(t, got["avg"], "avg", base, base+Timestamp(5*time.Minute), 44)
+	assertAggregateBucket(t, got["count"], "count", base, base+Timestamp(5*time.Minute), 5)
+	assertAggregateBucket(t, got["p50"], "p50", base, base+Timestamp(5*time.Minute), 40)
+	assertAggregateBucket(t, got["median"], "median", base, base+Timestamp(5*time.Minute), 40)
+	assertAggregateBucket(t, got["p95"], "p95", base, base+Timestamp(5*time.Minute), 90)
+	assertAggregateBucket(t, got["p99"], "p99", base, base+Timestamp(5*time.Minute), 98)
+}
+
+func TestEngineQueryAggregateRangeSupportsTrimmedAverage(t *testing.T) {
+	e, err := OpenEngine(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	base := Timestamp(time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC).UnixNano())
+	values := []float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1000}
+	for i, value := range values {
+		if err := e.AddSample("prod", "temp.out_dry", base+Timestamp(time.Duration(i)*time.Second), value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+
+	var got AggregateBucket
+	err = e.QueryAggregateRange("prod", "temp.out_dry", base, base+Timestamp(11*time.Second), 11*time.Second, []string{"trimmed_avg"}, func(bucket AggregateBucket) error {
+		got = bucket
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("QueryAggregateRange failed: %v", err)
+	}
+	assertAggregateBucket(t, got, "trimmed_avg", base, base+Timestamp(11*time.Second), 6)
 }
 
 func assertAggregateBucket(t *testing.T, got AggregateBucket, wantAgg string, wantStart, wantEnd Timestamp, wantValue float32) {
