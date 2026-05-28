@@ -33,8 +33,6 @@ and wider desktop-style layouts.
 
 > Caption: In-browser editor for groups, widgets, series, preview, validation, and save.
 
-In-browser editor for groups, widgets, series, preview, validation, and save.
-
 ## Pages
 
 - `/` and `/dashboard` serve the configurable dashboard.
@@ -167,29 +165,41 @@ In the live dashboard, line-chart widgets also expose a local lookback picker in
 the widget header so users can temporarily widen or narrow the visible time
 window without editing `dashboard.json`.
 
+Aggregate-backed charts are also supported. A widget can either stay a normal
+`line_chart` and set per-series `aggregate` + `window`, or use the first-class
+`aggregate_band` widget type for min/avg/max band charts backed by one shared
+source query.
+
 Config shape summary:
 
 - `title` is required.
 - `default_db` sets the database used when a series does not override it.
 - `groups[]` defines dashboard tabs/sections in display order.
 - `groups[].widgets[]` references widget ids from the top-level `widgets` map.
-- `widgets.<id>.type` currently supports `number`, `numbers`, and `line_chart`.
+- `widgets.<id>.type` currently supports `number`, `numbers`, `line_chart`, and `aggregate_band`.
 - Each widget must define at least one series.
 - A series must define either `metric` or `measurement` + `field`.
-- `line_chart` widgets require valid duration strings for `lookback` and `interval`.
-- `line_chart` widgets must not contain duplicate effective labels. A duplicate
+- `line_chart` and `aggregate_band` widgets require valid duration strings for `lookback` and `interval`.
+- `line_chart` and `aggregate_band` widgets must not contain duplicate effective labels. A duplicate
   label is any repeated explicit `label`, or repeated fallback label derived
   from `metric` or `measurement.field`.
+- Aggregate series must set `aggregate` and `window` together.
+- Supported aggregate names come from `GET /api/v1/aggregates` and currently include
+  `avg`, `count`, `max`, `median`, `min`, `p50`, `p95`, `p99`, `sum`, `trimmed_avg`,
+  and `trimmed_average`.
+- `aggregate_band` widgets either define explicit `min`/`avg`/`max` series roles,
+  or use the single-series shortcut that expands into those three roles automatically.
 
 Series support:
 
 - `db` or `database` overrides `default_db` for a single series.
+- `aggregate` and `window` let chart series query bucketed aggregates instead of raw points.
 - `transform.factor`, `transform.offset`, `transform.unit`,
   `transform.decimals`, and `transform.format` are display-only changes applied
   in the browser.
 - `thresholds.direction` must be `above` or `below` when warning or critical
   thresholds are set.
-- Thresholds only affect number and numbers widgets. Line charts render the
+- Thresholds only affect number and numbers widgets. Chart widgets render the
   transformed values but do not apply severity coloring.
 
 ## Editor
@@ -232,11 +242,12 @@ Widget editor details:
   unique when renamed or created.
 - New widgets default to type `numbers`, inherit the global refresh cadence, and
   start with one series.
-- Line-chart widgets expose `lookback` and `interval` fields in the editor.
+- Line-chart and aggregate-band widgets expose `lookback` and `interval` fields in the editor.
 - Series rows can be reordered, duplicated, and deleted.
 - Series can point at a metric directly or use `measurement` + `field`.
-- The editor loads the live database list and metric catalog from the NanoTDB
-  API to populate database selects and metric suggestions.
+- The editor loads the live database list, metric catalog, and supported
+  aggregate names from the NanoTDB API to populate database selects, metric
+  suggestions, and aggregate pickers.
 - Empty transform and threshold objects are removed before save, so the emitted
   JSON stays compact.
 
@@ -298,6 +309,7 @@ so the browser pages call the NanoTDB API at the correct origin.
 - `GET /api/dashboard-config`
 - `POST /api/dashboard-config/validate`
 - `PUT /api/dashboard-config`
+- `GET /api/v1/aggregates`
 - `GET /api/v1/databases`
 - `GET /api/v1/metrics?db=<name>`
 - `GET /api/v1/query`
@@ -305,7 +317,7 @@ so the browser pages call the NanoTDB API at the correct origin.
 - `GET /api/engine/overview`
 - `GET /api/engine/database?db=<name>`
 - `GET /api/engine/files?db=<name>`
-- `GET /api/engine/runtime?db=<name>`
+- `GET /api/engine/runtime`
 
 ## Browser Smoke Test
 

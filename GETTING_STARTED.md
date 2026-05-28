@@ -215,7 +215,19 @@ Returns data in JSON format.
 curl "http://localhost:8428/api/v1/query_range?query=sensors/room.temp&start=2024-05-01T00:00:00Z&end=2024-05-02T00:00:00Z&step=60s"
 ```
 
-### 3. Discover databases and metrics
+### 3. Discover supported aggregates
+
+```bash
+curl "http://localhost:8428/api/v1/aggregates"
+```
+
+### 4. Query aggregate windows
+
+```bash
+curl "http://localhost:8428/api/v1/query_range?query=sensors/room.temp&start=2024-05-01T00:00:00Z&end=2024-05-01T06:00:00Z&step=5m&aggregate=avg"
+```
+
+### 5. Discover databases and metrics
 
 List user databases:
 

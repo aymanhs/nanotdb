@@ -532,6 +532,7 @@ API quick reference:
 - `POST /api/v1/import/prometheus` - Prometheus-compatible import endpoint
 - `GET /api/v1/query` - instant query (latest point)
 - `GET /api/v1/query_range` - range query
+- `GET /api/v1/aggregates` - supported aggregate names for UI and query tooling
 
 Also exposes discovery endpoints:
 
@@ -567,7 +568,7 @@ or Unix timestamps (seconds or nanoseconds).
 
 Aggregate query notes:
 
-- supported aggregates are `min`, `max`, `sum`, `avg`, and `count`
+- supported aggregates are `avg`, `count`, `max`, `median`, `min`, `p50`, `p95`, `p99`, `sum`, `trimmed_avg`, and `trimmed_average`
 - aggregate queries require both `--aggregate` and `--window`
 - aggregate queries require `--start`; `--end` is optional and defaults to `now`
 - aggregate queries must match exactly one metric after regex expansion

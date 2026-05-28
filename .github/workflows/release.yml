@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and publish (for example v1.4.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -53,6 +58,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -115,6 +122,7 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: |
             dist/*
           generate_release_notes: true

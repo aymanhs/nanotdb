@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-28
+
 ### Added
 - Dynamic aggregate range queries with shared aggregate execution in one scan, plus dashboard/editor/explore support for aggregate-backed charts and query-driven widgets.
 - A first-class `aggregate_band` dashboard widget with shorthand config expansion, interval-as-window behavior, batched aggregate fetching, and simplified editor support for min/avg/max band charts.
@@ -131,7 +133,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   https://github.com/aymanhs/nanotdb/releases
 - Detailed project history: this file (`CHANGELOG.md`)
 
-[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/aymanhs/nanotdb/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/aymanhs/nanotdb/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/aymanhs/nanotdb/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/aymanhs/nanotdb/releases/tag/v1.2.0
 [1.1.2]: https://github.com/aymanhs/nanotdb/releases/tag/v1.1.2

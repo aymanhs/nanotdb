@@ -16,13 +16,13 @@ Tags:
 ## Current Release Policy
 
 Current release lines:
-- `release/1.2`: safe maintenance line for the `1.2.x` series.
-- `release/2.0.0`: stabilization line for the upcoming `2.0.0` release once scope is frozen.
+- `release/1.3`: safe maintenance line for the `1.3.x` series.
+- `main`: active integration branch for the next planned minor release.
 
 Branch intent:
-- `release/1.2` accepts only low-risk fixes, docs fixes, packaging fixes, and critical regressions.
+- `release/1.3` accepts only low-risk fixes, docs fixes, packaging fixes, and critical regressions.
 - `main` is the active integration branch for the next release until feature scope is frozen.
-- `release/2.0.0` is not the day-to-day merge target; it is where `2.0.0` is stabilized before release.
+- When the next minor release is frozen, cut a `release/X.Y` branch from `main` and allow only stabilization work there.
 - New feature work should go to `main` or a `feature/...` branch and then be included in the release branch when that branch is refreshed or cut from `main`.
 
 ## Rules
@@ -37,25 +37,25 @@ Branch intent:
 
 ### Patch release from a stable line
 
-Example: `1.2.1`
+Example: `1.3.1`
 
-1. Branch or work on `release/1.2`.
+1. Branch or work on `release/1.3`.
 2. Apply only the targeted fix set.
 3. Validate the release branch.
-4. Tag the release: `v1.2.1`.
+4. Tag the release: `v1.3.1`.
 5. Cherry-pick important fixes forward into `main` and any newer release branch.
 
 ### Major or minor release
 
-Example: `2.0.0`
+Example: `1.4.0`
 
 1. Merge finished feature branches into `main`.
 2. Run integration and regression testing primarily on `main` while feature work is still settling.
-3. When scope is frozen, cut or fast-forward `release/2.0.0` from `main`.
+3. When scope is frozen, cut or fast-forward `release/1.4` from `main`.
 4. Allow only bug fixes, docs, packaging, and release preparation on that branch.
-5. Optionally tag one or more release candidates such as `v2.0.0-rc1`.
-6. Tag the final release from `release/2.0.0` as `v2.0.0`.
-7. Keep the release branch for `2.0.x` follow-up fixes if needed.
+5. Optionally tag one or more release candidates such as `v1.4.0-rc1`.
+6. Tag the final release from `release/1.4` as `v1.4.0`.
+7. Keep the release branch for `1.4.x` follow-up fixes if needed.
 
 ## Cherry-Pick Policy
 
@@ -74,8 +74,8 @@ To keep a release line safe:
 
 ## Notes For This Repo
 
-For the current transition:
-- `v1.2.0` remains the immutable anchor for the pre-metrics release line
-- `release/1.2` is the safe line for any `1.2.x` follow-up fixes
-- `main` is the active merge and regression line for metrics, dashboard, and related `2.0` integration work
-- `release/2.0.0` is kept ready for final freeze, release-candidate work, and `2.0.x` stabilization
+For the current release cycle:
+- `v1.3.0` is the latest shipped minor release anchor
+- `release/1.3` is the safe line for any `1.3.x` follow-up fixes
+- `main` is the active merge and regression line for the next minor release
+- cut `release/1.4` from `main` when feature scope is frozen and move to stabilization there
