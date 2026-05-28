@@ -420,6 +420,22 @@ Partition options in `[retention]`:
 - `partition = "year"`: `data-YYYY.dat`
 - `partition = "forever"`: `data-forever.dat`
 
+Retention cleanup action in `[retention]`:
+- `retention_action = "keep"` (default): leave expired sealed partition files in place.
+- `retention_action = "delete"`: remove expired partition families.
+- `retention_action = "archive"`: append expired partition families into tar archive buckets, then remove originals.
+
+Retention acts on the whole expired partition family, not only raw data pages. If these files exist for the same expired partition, they are processed together:
+- `data-<partition>.dat`
+- `raw-<partition>.dat`
+- `metric-<partition>.dat`
+
+Archive bucket names are derived from the database partition mode:
+- `partition = "day"` -> `archive-YYYY-MM.tar`
+- `partition = "month"` -> `archive-YYYY.tar`
+- `partition = "year"` -> `archive-forever.tar`
+- `partition = "forever"` does not support `retention_action = "archive"`
+
 ### Rollups (`manifest.toml`)
 
 Rollup jobs are defined in the **source** database manifest under `[rollups]`.
@@ -530,6 +546,7 @@ Operates directly on the data directory without a running server.
 ```
 nanocli inspect db  --root <dir> --db <name> [--verbose] [--json]  — database overview + optional detailed DAT/WAL tables
 nanocli inspect dat --root <dir> --db <name> [--verbose] [--json]  — .dat file/page inspection tables
+nanocli inspect catalog --root <dir> --db <name> [--json]        — catalog.json metric registry listing
 nanocli inspect wal --root <dir> --db <name> [--verbose] [--json]  — WAL inspection tables + optional tail diagnostics
 
 nanocli import --root <dir> --in <file.lp>  [--json]     — bulk import line-protocol file
@@ -537,8 +554,8 @@ nanocli rollup --root <dir> [--db <source-db>] [--json]  — reset and recompute
 nanocli export --root <dir> --db <name> [--out <file.lp>] — export database to line protocol (stdout when --out is omitted)
 nanocli build metric --root <dir> --db <name> [--part <partition>] [--format <v2|v1>] [--codec <name>] [--raw-ingest-action <keep|rename|delete>] [--verify] [--json]
 
-nanocli query  --root <dir> --db <name> --metric <regex>
-               [--start <time>] [--end <time>] [--aggregate <list> --window <duration>]
+nanocli query  --root <dir> --db <name> [--metric <regex>]
+               [--start <time|duration>] [--end <time>] [--aggregate <list> --window <duration>]
                [--metric-files <config|on|off>] [--format table|json]
 ```
 
@@ -552,14 +569,18 @@ Aggregate query notes:
 
 - supported aggregates are `min`, `max`, `sum`, `avg`, and `count`
 - aggregate queries require both `--aggregate` and `--window`
-- aggregate queries require `--start`; `--end` is optional and defaults to open-ended
+- aggregate queries require `--start`; `--end` is optional and defaults to `now`
 - aggregate queries must match exactly one metric after regex expansion
 - aggregate rows are emitted at bucket end timestamps; the first and last bucket are clipped to the requested range
+
+When `--metric` is omitted, `nanocli query` matches all metrics in the database. When `--start` is a duration such as `2m`, it means `now-2m`.
 
 Examples:
 
 ```bash
 nanocli build metric --root ~/nanotdb-data --db sensors --verify
+
+nanocli inspect catalog --root ~/nanotdb-data --db sensors
 
 nanocli query --root ~/nanotdb-data --db sensors --metric '^temp\.out_dry$' \
   --start 2026-05-24T12:00:00Z --end 2026-05-24T13:00:00Z \
@@ -567,6 +588,8 @@ nanocli query --root ~/nanotdb-data --db sensors --metric '^temp\.out_dry$' \
 
 nanocli query --root ~/nanotdb-data --db sensors --metric '^temp\.out_dry$' \
   --start 2026-05-24T12:00:00Z --aggregate sum,count --window 5m --json
+
+nanocli query --root ~/nanotdb-data --db sensors --start 2m --format table
 ```
 
 ### `drip` — metrics collector

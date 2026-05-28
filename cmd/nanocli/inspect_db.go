@@ -80,6 +80,8 @@ func runInspect(args []string) error {
 	switch sub {
 	case "db":
 		return runInspectDB(subArgs)
+	case "catalog":
+		return runInspectCatalog(subArgs)
 	case "dat":
 		return runInspectDat(subArgs)
 	case "metric":
@@ -136,7 +138,7 @@ func runInspectDB(args []string) error {
 		}
 		if report.Manifest.Config != nil {
 			cfg := report.Manifest.Config
-			fmt.Fprintf(w, "  retention: grace=%s retention_days=%d max_active_days=%d\n", cfg.Retention.Grace, cfg.Retention.RetentionDays, cfg.Retention.MaxActiveDays)
+			fmt.Fprintf(w, "  retention: grace=%s retention_days=%d retention_action=%s max_active_days=%d\n", cfg.Retention.Grace, cfg.Retention.RetentionDays, cfg.Retention.RetentionAction, cfg.Retention.MaxActiveDays)
 			fmt.Fprintf(w, "  wal: enabled=%t skip_before=%s\n", cfg.WAL.Enabled, cfg.WAL.SkipBefore)
 			fmt.Fprintf(w, "  page: max_records=%d max_bytes=%d max_age=%s\n", cfg.Page.MaxRecords, cfg.Page.MaxBytes, cfg.Page.MaxAge)
 		}

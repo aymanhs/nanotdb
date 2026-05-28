@@ -544,6 +544,21 @@ func collectMetricFromMetricFile(database, metric string, entry MetricEntry, pat
 	}
 }
 
+func collectMetricSetFromMetricFile(database string, targets map[MetricID]*rangeQueryTarget, path string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	version, err := readMetricFrameVersion(path)
+	if err != nil {
+		return err
+	}
+	switch version {
+	case metricFileV1Version:
+		return collectMetricSetFromMetricFileV1(database, targets, path, fromTS, toTS, stride, fn)
+	case metricFileV2Version:
+		return collectMetricSetFromMetricFileV2(database, targets, path, fromTS, toTS, stride, fn)
+	default:
+		return fmt.Errorf("unsupported metric file version: %d", version)
+	}
+}
+
 func collectMetricFromMetricFileV1(database, metric string, entry MetricEntry, path string, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -577,6 +592,46 @@ func collectMetricFromMetricFileV1(database, metric string, entry MetricEntry, p
 			return err
 		}
 		if err := collectMetricFromMetricPage(database, metric, entry, page, fromTS, toTS, stride, count, fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectMetricSetFromMetricFileV1(database string, targets map[MetricID]*rangeQueryTarget, path string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() < metricFileV1HeaderLen+metricFileV1FooterLen {
+		return fmt.Errorf("file too small")
+	}
+
+	infos, err := readMetricFilePageInfosV1(f, st.Size())
+	if err != nil {
+		return err
+	}
+
+	for _, pi := range infos {
+		target := targets[pi.MetricID]
+		if target == nil {
+			continue
+		}
+		if pi.MetricMaxTS < fromTS || pi.MetricMinTS > toTS {
+			continue
+		}
+
+		page, err := readOneMetricPageV1(f, st.Size(), pi)
+		if err != nil {
+			return err
+		}
+		if err := collectMetricFromMetricPage(database, target.name, target.entry, page, fromTS, toTS, stride, &target.count, fn); err != nil {
 			return err
 		}
 	}

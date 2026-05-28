@@ -107,6 +107,18 @@ databases = []
 grace = "5m"
 # Number of full days of data to keep in on-disk data-YYYY-MM-DD.dat files.
 retention_days = 30
+# What to do with expired sealed partition files after they age past the retention cutoff.
+# Applies to any existing data-<partition>.dat, raw-<partition>.dat, and metric-<partition>.dat siblings.
+# Valid values:
+# - "keep": leave expired files in place (default)
+# - "delete": remove expired partition files
+# - "archive": append expired partition files into a tar archive bucket, then remove originals
+# Archive buckets are hardcoded by partition mode:
+# - day -> archive-YYYY-MM.tar
+# - month -> archive-YYYY.tar
+# - year -> archive-forever.tar
+# - forever does not support archive retention because there is no partition boundary to roll out
+retention_action = "keep"
 # Max distinct open day-buckets kept active in memory during ingest/replay.
 # Higher values support broader out-of-order arrival windows at higher memory cost.
 max_active_days = 2

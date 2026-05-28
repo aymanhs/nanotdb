@@ -14,6 +14,7 @@ import (
 )
 
 const defaultRollupCheckpointFile = "rollup.checkpoints.log"
+const rollupCheckpointCompactBytes = 100 * 1024
 
 type RollupBackfillReport struct {
 	RequestedSources       []string `json:"requested_sources"`
@@ -742,13 +743,64 @@ func appendRollupCheckpoint(rootDir, fileName, jobID string, completed Timestamp
 	if err := os.MkdirAll(rootDir, 0755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(rootDir, fileName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	path := filepath.Join(rootDir, fileName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	if _, err := fmt.Fprintf(f, "%s,%d\n", jobID, completed); err != nil {
+		f.Close()
 		return err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() <= rollupCheckpointCompactBytes {
+		return nil
+	}
+	return compactRollupCheckpointFile(rootDir, fileName)
+}
+
+func compactRollupCheckpointFile(rootDir, fileName string) error {
+	checkpoints, err := loadRollupCheckpoints(rootDir, fileName)
+	if err != nil {
+		return err
+	}
+	jobIDs := make([]string, 0, len(checkpoints))
+	for jobID := range checkpoints {
+		jobIDs = append(jobIDs, jobID)
+	}
+	sort.Strings(jobIDs)
+
+	path := filepath.Join(rootDir, fileName)
+	tmpPath := path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	for _, jobID := range jobIDs {
+		if _, err := fmt.Fprintf(f, "%s,%d\n", jobID, checkpoints[jobID]); err != nil {
+			f.Close()
+			os.Remove(tmpPath)
+			return err
+		}
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

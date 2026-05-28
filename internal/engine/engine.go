@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	_ "embed"
@@ -24,16 +25,17 @@ import (
 )
 
 type DBInfo struct {
-	Grace          string            `json:"grace" toml:"grace"`
-	RetentionDays  int               `json:"retention_days" toml:"retention_days"`
-	MaxActiveDays  int               `json:"max_active_days" toml:"max_active_days"`
-	Partition      string            `json:"partition" toml:"partition"`
-	WALEnabled     bool              `json:"wal_enabled" toml:"wal_enabled"`
-	WALSkipBefore  string            `json:"wal_skip_before" toml:"wal_skip_before"`
-	PageMaxRecords int               `json:"page_max_records" toml:"page_max_records"`
-	PageMaxBytes   int               `json:"page_max_bytes" toml:"page_max_bytes"`
-	PageMaxAge     string            `json:"page_max_age" toml:"page_max_age"`
-	Rollups        DBManifestRollups `json:"rollups" toml:"rollups"`
+	Grace           string            `json:"grace" toml:"grace"`
+	RetentionDays   int               `json:"retention_days" toml:"retention_days"`
+	RetentionAction string            `json:"retention_action" toml:"retention_action"`
+	MaxActiveDays   int               `json:"max_active_days" toml:"max_active_days"`
+	Partition       string            `json:"partition" toml:"partition"`
+	WALEnabled      bool              `json:"wal_enabled" toml:"wal_enabled"`
+	WALSkipBefore   string            `json:"wal_skip_before" toml:"wal_skip_before"`
+	PageMaxRecords  int               `json:"page_max_records" toml:"page_max_records"`
+	PageMaxBytes    int               `json:"page_max_bytes" toml:"page_max_bytes"`
+	PageMaxAge      string            `json:"page_max_age" toml:"page_max_age"`
+	Rollups         DBManifestRollups `json:"rollups" toml:"rollups"`
 }
 type OpenPageStats struct {
 	Day          string        `json:"day"`
@@ -76,10 +78,11 @@ type DBManifestTOML struct {
 }
 
 type DBManifestRetention struct {
-	Grace         string `toml:"grace"`
-	RetentionDays int    `toml:"retention_days"`
-	MaxActiveDays int    `toml:"max_active_days"`
-	Partition     string `toml:"partition"`
+	Grace           string `toml:"grace"`
+	RetentionDays   int    `toml:"retention_days"`
+	RetentionAction string `toml:"retention_action"`
+	MaxActiveDays   int    `toml:"max_active_days"`
+	Partition       string `toml:"partition"`
 }
 
 type DBManifestWAL struct {
@@ -180,6 +183,12 @@ const (
 )
 
 const (
+	RetentionActionKeep    = "keep"
+	RetentionActionDelete  = "delete"
+	RetentionActionArchive = "archive"
+)
+
+const (
 	DurabilityProfileStrict     = "strict"
 	DurabilityProfileBalanced   = "balanced"
 	DurabilityProfileThroughput = "throughput"
@@ -250,15 +259,16 @@ var pageCompressedBufferPool = sync.Pool{
 
 func defaultDBInfo() DBInfo {
 	return DBInfo{
-		Grace:          "5m",
-		RetentionDays:  30,
-		MaxActiveDays:  2,
-		Partition:      "day",
-		WALEnabled:     true,
-		WALSkipBefore:  "1h",
-		PageMaxRecords: PageMaxRecords,
-		PageMaxBytes:   PageMaxBytes,
-		PageMaxAge:     PageMaxAge.String(),
+		Grace:           "5m",
+		RetentionDays:   30,
+		RetentionAction: RetentionActionKeep,
+		MaxActiveDays:   2,
+		Partition:       "day",
+		WALEnabled:      true,
+		WALSkipBefore:   "1h",
+		PageMaxRecords:  PageMaxRecords,
+		PageMaxBytes:    PageMaxBytes,
+		PageMaxAge:      PageMaxAge.String(),
 		Rollups: DBManifestRollups{
 			Enabled:               false,
 			CheckpointFile:        defaultRollupCheckpointFile,
@@ -1340,6 +1350,18 @@ func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, str
 	return e.queryRange(database, metric, fromTS, toTS, stride, fn, false)
 }
 
+// QueryRangeMany scans samples for multiple metrics within a time range.
+// It reuses each persisted partition scan across all requested metrics.
+func (e *Engine) QueryRangeMany(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	return e.queryRangeMany(database, metrics, fromTS, toTS, stride, fn, false)
+}
+
+type rangeQueryTarget struct {
+	name  string
+	entry MetricEntry
+	count int
+}
+
 func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
 	if toTS < fromTS {
 		return fmt.Errorf("invalid range: toTS < fromTS")
@@ -1416,6 +1438,88 @@ func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, str
 	return nil
 }
 
+func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
+	if toTS < fromTS {
+		return fmt.Errorf("invalid range: toTS < fromTS")
+	}
+	if stride < 1 {
+		stride = 1
+	}
+
+	db, rt, err := e.getOrCreateDB(database)
+	if err != nil {
+		return err
+	}
+
+	targets := make(map[MetricID]*rangeQueryTarget, len(metrics))
+	for _, metric := range metrics {
+		entry, ok := db.catalog.GetMetricEntry(metric)
+		if !ok {
+			continue
+		}
+		targets[entry.MetricID] = &rangeQueryTarget{name: metric, entry: entry}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	lastPath := ""
+	for d := dayStartUTC(fromTS); !d.After(dayStartUTC(toTS)); d = d.Add(24 * time.Hour) {
+		part := partitionKey(rt, Timestamp(d.UnixNano()))
+		path := metricRawPartitionPath(db.RootDataDir, part)
+		if path == lastPath {
+			continue
+		}
+		lastPath = path
+		if e.PreferMetricFiles {
+			metricPath := filepath.Join(db.RootDataDir, "metric-"+part+".dat")
+			if err := collectMetricSetFromMetricFile(database, targets, metricPath, fromTS, toTS, stride, fn); err == nil {
+				// metric frames processed, skip raw file to avoid double counting
+			} else if os.IsNotExist(err) {
+				rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
+				if rawErr == nil {
+					if err := collectMetricSetFromFile(database, targets, rawPath, fromTS, toTS, stride, fn); err == nil {
+						// persisted raw frames processed
+					} else if os.IsNotExist(err) {
+						// no persisted file for this partition
+					} else {
+						return fmt.Errorf("read %s: %w", rawPath, err)
+					}
+				} else if os.IsNotExist(rawErr) {
+					// no persisted file for this partition
+				} else {
+					return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
+				}
+			} else {
+				return fmt.Errorf("read %s: %w", metricPath, err)
+			}
+		} else {
+			rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
+			if rawErr == nil {
+				if err := collectMetricSetFromFile(database, targets, rawPath, fromTS, toTS, stride, fn); err == nil {
+					// persisted raw frames processed
+				} else if os.IsNotExist(err) {
+					// no persisted file for this partition
+				} else {
+					return fmt.Errorf("read %s: %w", rawPath, err)
+				}
+			} else if os.IsNotExist(rawErr) {
+				// no persisted file for this partition
+			} else {
+				return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
+			}
+		}
+
+		if p := e.snapshotOpenPage(rt, part, writeLockHeld); p != nil {
+			if err := collectMetricSetFromPage(database, targets, p, fromTS, toTS, stride, fn); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 type openDaySnapshot struct {
 	day  string
 	page *Page
@@ -1484,6 +1588,40 @@ func collectMetricFromFile(database, metric string, entry MetricEntry, path stri
 			return fmt.Errorf("decode page: %w", err)
 		}
 		if err := collectMetricFromPage(database, metric, entry, &p, fromTS, toTS, stride, count, fn); err != nil {
+			return err
+		}
+	}
+}
+
+func collectMetricSetFromFile(database string, targets map[MetricID]*rangeQueryTarget, path string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	r := bufio.NewReaderSize(f, 64*1024)
+	compressedBuf := pageCompressedBufferPool.Get().(*[]byte)
+	defer pageCompressedBufferPool.Put(compressedBuf)
+
+	var p Page
+	for {
+		header, compressed, crc, err := readCompressedPageFrame(r, compressedBuf)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		if header.EndTime < fromTS || header.StartTime > toTS {
+			continue
+		}
+
+		if err := p.DecodeCompressedFrame(header, compressed, crc); err != nil {
+			return fmt.Errorf("decode page: %w", err)
+		}
+		if err := collectMetricSetFromPage(database, targets, &p, fromTS, toTS, stride, fn); err != nil {
 			return err
 		}
 	}
@@ -1678,6 +1816,46 @@ func collectMetricFromPage(database, metric string, entry MetricEntry, p *Page, 
 		*count++
 		sample.TS = ts
 		sample.Float32 = math.Float32frombits(binary.LittleEndian.Uint32(values[off : off+4]))
+		if err := fn(sample); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectMetricSetFromPage(database string, targets map[MetricID]*rangeQueryTarget, p *Page, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	if len(p.Metrics) != len(p.Times) {
+		return fmt.Errorf("page corruption: metrics/times length mismatch")
+	}
+	if len(p.Values.Bytes()) < len(p.Metrics)*4 {
+		return fmt.Errorf("page corruption: values blob too short")
+	}
+
+	values := p.Values.Bytes()
+	for i := 0; i < len(p.Metrics); i++ {
+		target := targets[p.Metrics[i]]
+		if target == nil {
+			continue
+		}
+		ts := p.Times[i]
+		if ts < fromTS || ts > toTS {
+			continue
+		}
+		off := i * 4
+		if off+4 > len(values) {
+			return fmt.Errorf("page corruption: value offset out of range")
+		}
+		if target.count%stride != 0 {
+			target.count++
+			continue
+		}
+		target.count++
+		sample := Sample{Database: database, Metric: target.name, TS: ts, ValueType: target.entry.ValueType}
+		if target.entry.ValueType == Int32Sample {
+			sample.Int32 = int32(binary.LittleEndian.Uint32(values[off : off+4]))
+		} else {
+			sample.Float32 = math.Float32frombits(binary.LittleEndian.Uint32(values[off : off+4]))
+		}
 		if err := fn(sample); err != nil {
 			return err
 		}
@@ -2014,7 +2192,7 @@ func sealDay(e *Engine, db *Database, rt *dbRuntime, dbName, day string, nowTS T
 		}
 	}
 	rt.sealedDays[day] = struct{}{}
-	cleanupRetention(db, rt.info.RetentionDays, nowTS)
+	e.cleanupRetention(db, rt, nowTS)
 	return nil
 }
 
@@ -2123,29 +2301,221 @@ func writePageWithOptions(db *Database, day string, page *Page, syncDataFile boo
 	return st, nil
 }
 
-func cleanupRetention(db *Database, retentionDays int, nowTS Timestamp) {
-	if retentionDays <= 0 {
+func (e *Engine) cleanupRetention(db *Database, rt *dbRuntime, nowTS Timestamp) {
+	if db == nil || rt == nil {
+		return
+	}
+	if rt.info.RetentionDays <= 0 {
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(rt.info.RetentionAction))
+	if action == "" {
+		action = RetentionActionKeep
+	}
+	if action == RetentionActionKeep {
 		return
 	}
 	entries, err := os.ReadDir(db.RootDataDir)
 	if err != nil {
 		return
 	}
-	cutoff := dayStartUTC(nowTS).AddDate(0, 0, -retentionDays)
+	cutoff := dayStartUTC(nowTS).AddDate(0, 0, -rt.info.RetentionDays)
+	partitions := make(map[string][]string)
 	for _, ent := range entries {
 		name := ent.Name()
-		if ent.IsDir() || !strings.HasPrefix(name, "data-") || !strings.HasSuffix(name, ".dat") {
+		if ent.IsDir() || !strings.HasSuffix(name, ".dat") {
 			continue
 		}
-		part := strings.TrimSuffix(strings.TrimPrefix(name, "data-"), ".dat")
+		var part string
+		switch {
+		case strings.HasPrefix(name, "data-"):
+			part = strings.TrimSuffix(strings.TrimPrefix(name, "data-"), ".dat")
+		case strings.HasPrefix(name, "raw-"):
+			part = strings.TrimSuffix(strings.TrimPrefix(name, "raw-"), ".dat")
+		case strings.HasPrefix(name, "metric-"):
+			part = strings.TrimSuffix(strings.TrimPrefix(name, "metric-"), ".dat")
+		default:
+			continue
+		}
 		t, err := parsePartitionStart(part)
 		if err != nil {
 			continue
 		}
 		if t.Before(cutoff) {
-			_ = os.Remove(filepath.Join(db.RootDataDir, name))
+			partitions[part] = append(partitions[part], filepath.Join(db.RootDataDir, name))
 		}
 	}
+	parts := make([]string, 0, len(partitions))
+	for part := range partitions {
+		parts = append(parts, part)
+	}
+	sort.Strings(parts)
+	for _, part := range parts {
+		paths := partitions[part]
+		sort.Strings(paths)
+		switch action {
+		case RetentionActionDelete:
+			for _, filePath := range paths {
+				if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+					e.logInfo("retention delete failed", "database", db.Name, "partition", part, "path", filePath, "error", err)
+				}
+			}
+		case RetentionActionArchive:
+			archivePath, err := retentionArchivePath(db.RootDataDir, rt.info.Partition, part)
+			if err != nil {
+				e.logInfo("retention archive skipped", "database", db.Name, "partition", part, "error", err)
+				return
+			}
+			if err := appendRetentionPartitionToArchive(archivePath, paths); err != nil {
+				e.logInfo("retention archive failed", "database", db.Name, "partition", part, "archive", archivePath, "error", err)
+				return
+			}
+			for _, filePath := range paths {
+				if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+					e.logInfo("retention archive cleanup failed", "database", db.Name, "partition", part, "path", filePath, "archive", archivePath, "error", err)
+				}
+			}
+		}
+	}
+}
+
+func isValidRetentionAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case RetentionActionKeep, RetentionActionDelete, RetentionActionArchive:
+		return true
+	default:
+		return false
+	}
+}
+
+func retentionArchivePath(rootDir, partitionMode, part string) (string, error) {
+	partitionMode = strings.ToLower(strings.TrimSpace(partitionMode))
+	start, err := parsePartitionStart(part)
+	if err != nil {
+		return "", err
+	}
+	switch partitionMode {
+	case "day":
+		return filepath.Join(rootDir, "archive-"+start.Format("2006-01")+".tar"), nil
+	case "month":
+		return filepath.Join(rootDir, "archive-"+start.Format("2006")+".tar"), nil
+	case "year":
+		return filepath.Join(rootDir, "archive-forever.tar"), nil
+	default:
+		return "", fmt.Errorf("archive retention unsupported for partition mode %q", partitionMode)
+	}
+}
+
+func appendRetentionPartitionToArchive(archivePath string, filePaths []string) error {
+	existingEntries, err := tarArchiveEntryNames(archivePath)
+	if err != nil {
+		return err
+	}
+	pending := make([]string, 0, len(filePaths))
+	for _, filePath := range filePaths {
+		if !existingEntries[filepath.Base(filePath)] {
+			pending = append(pending, filePath)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	f, err := os.OpenFile(archivePath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := prepareTarArchiveForAppend(f); err != nil {
+		return err
+	}
+	tw := tar.NewWriter(f)
+	for _, filePath := range pending {
+		info, err := os.Stat(filePath)
+		if err != nil {
+			_ = tw.Close()
+			return err
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			_ = tw.Close()
+			return err
+		}
+		hdr.Name = filepath.Base(filePath)
+		hdr.ModTime = info.ModTime().UTC()
+		if err := tw.WriteHeader(hdr); err != nil {
+			_ = tw.Close()
+			return err
+		}
+		src, err := os.Open(filePath)
+		if err != nil {
+			_ = tw.Close()
+			return err
+		}
+		if _, err := io.Copy(tw, src); err != nil {
+			src.Close()
+			_ = tw.Close()
+			return err
+		}
+		if err := src.Close(); err != nil {
+			_ = tw.Close()
+			return err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+func tarArchiveEntryNames(path string) (map[string]bool, error) {
+	entries := make(map[string]bool)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return entries, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return entries, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		entries[hdr.Name] = true
+	}
+}
+
+func prepareTarArchiveForAppend(f *os.File) error {
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() == 0 {
+		_, err = f.Seek(0, io.SeekStart)
+		return err
+	}
+	if st.Size() < 1024 {
+		return fmt.Errorf("invalid tar archive: %s", f.Name())
+	}
+	footer := make([]byte, 1024)
+	if _, err := f.ReadAt(footer, st.Size()-1024); err != nil {
+		return err
+	}
+	for _, b := range footer {
+		if b != 0 {
+			return fmt.Errorf("invalid tar footer: %s", f.Name())
+		}
+	}
+	if err := f.Truncate(st.Size() - 1024); err != nil {
+		return err
+	}
+	_, err = f.Seek(st.Size()-1024, io.SeekStart)
+	return err
 }
 
 func dayStartUTC(ts Timestamp) time.Time {
@@ -2202,6 +2572,9 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	if info.RetentionDays <= 0 {
 		info.RetentionDays = def.RetentionDays
 	}
+	if strings.TrimSpace(info.RetentionAction) == "" {
+		info.RetentionAction = def.RetentionAction
+	}
 	if strings.TrimSpace(info.Grace) == "" {
 		info.Grace = def.Grace
 	}
@@ -2257,6 +2630,16 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	}
 	if info.Partition != "day" && info.Partition != "month" && info.Partition != "year" && info.Partition != "forever" {
 		return DBInfo{}, fmt.Errorf("invalid partition: %q (expected day|month|year|forever)", info.Partition)
+	}
+	info.RetentionAction = strings.ToLower(strings.TrimSpace(info.RetentionAction))
+	if info.RetentionAction == "" {
+		info.RetentionAction = RetentionActionKeep
+	}
+	if !isValidRetentionAction(info.RetentionAction) {
+		return DBInfo{}, fmt.Errorf("invalid retention_action: %q (expected keep|delete|archive)", info.RetentionAction)
+	}
+	if info.Partition == "forever" && info.RetentionAction == RetentionActionArchive {
+		return DBInfo{}, fmt.Errorf("invalid retention_action: %q unsupported when partition=forever", info.RetentionAction)
 	}
 	if !info.Rollups.Enabled {
 		info.Rollups.Jobs = nil
@@ -2362,10 +2745,11 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 func dbManifestFromInfo(info DBInfo) DBManifestTOML {
 	return DBManifestTOML{
 		Retention: DBManifestRetention{
-			Grace:         info.Grace,
-			RetentionDays: info.RetentionDays,
-			MaxActiveDays: info.MaxActiveDays,
-			Partition:     info.Partition,
+			Grace:           info.Grace,
+			RetentionDays:   info.RetentionDays,
+			RetentionAction: info.RetentionAction,
+			MaxActiveDays:   info.MaxActiveDays,
+			Partition:       info.Partition,
 		},
 		WAL: DBManifestWAL{
 			Enabled:    info.WALEnabled,
@@ -2382,16 +2766,17 @@ func dbManifestFromInfo(info DBInfo) DBManifestTOML {
 
 func dbInfoFromManifest(man DBManifestTOML) DBInfo {
 	return DBInfo{
-		Grace:          man.Retention.Grace,
-		RetentionDays:  man.Retention.RetentionDays,
-		MaxActiveDays:  man.Retention.MaxActiveDays,
-		Partition:      man.Retention.Partition,
-		WALEnabled:     man.WAL.Enabled,
-		WALSkipBefore:  man.WAL.SkipBefore,
-		PageMaxRecords: man.Page.MaxRecords,
-		PageMaxBytes:   man.Page.MaxBytes,
-		PageMaxAge:     man.Page.MaxAge,
-		Rollups:        man.Rollups,
+		Grace:           man.Retention.Grace,
+		RetentionDays:   man.Retention.RetentionDays,
+		RetentionAction: man.Retention.RetentionAction,
+		MaxActiveDays:   man.Retention.MaxActiveDays,
+		Partition:       man.Retention.Partition,
+		WALEnabled:      man.WAL.Enabled,
+		WALSkipBefore:   man.WAL.SkipBefore,
+		PageMaxRecords:  man.Page.MaxRecords,
+		PageMaxBytes:    man.Page.MaxBytes,
+		PageMaxAge:      man.Page.MaxAge,
+		Rollups:         man.Rollups,
 	}
 }
 

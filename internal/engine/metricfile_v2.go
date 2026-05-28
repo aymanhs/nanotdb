@@ -1392,6 +1392,73 @@ func collectMetricFromMetricFileV2(database, metric string, entry MetricEntry, p
 	return nil
 }
 
+func collectMetricSetFromMetricFileV2(database string, targets map[MetricID]*rangeQueryTarget, path string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() < metricFileV2HeaderLen+metricFileV2FooterLen {
+		return fmt.Errorf("file too small")
+	}
+	if _, err := readMetricFileV2FooterFromFile(f, st.Size()); err != nil {
+		return err
+	}
+	hdr, err := readMetricFileV2HeaderFromFile(f)
+	if err != nil {
+		return err
+	}
+	timeEntries, metricEntries, err := resolveMetricFileIndexesV2(f, path, st, hdr)
+	if err != nil {
+		return err
+	}
+	timeByID := make(map[uint16]metricTimeFrameIndexEntryV2, len(timeEntries))
+	for _, entry := range timeEntries {
+		timeByID[entry.TimeFrameID] = entry
+	}
+	localTimeCache := make(map[uint16][]Timestamp, len(timeEntries))
+	cacheIdentity := metricTimeFrameCacheIdentityV2(path, st)
+
+	for _, info := range metricEntries {
+		target := targets[info.MetricID]
+		if target == nil {
+			continue
+		}
+		if info.EndTS < fromTS || info.StartTS > toTS {
+			continue
+		}
+		timeInfo, ok := timeByID[info.TimeFrameID]
+		if !ok {
+			return fmt.Errorf("missing time frame %d for metric %d", info.TimeFrameID, info.MetricID)
+		}
+		times, err := resolveMetricTimeFrameV2(f, cacheIdentity, localTimeCache, timeInfo)
+		if err != nil {
+			return err
+		}
+		frame, err := readOneMetricMetricFrameV2(f, st.Size(), info)
+		if err != nil {
+			return err
+		}
+		pointCount, err := metricValuePointCountFromDecodedLen(frame.ValueType, frame.DecodedLen)
+		if err != nil {
+			return err
+		}
+		endOffset := int(info.TimeOffset + pointCount)
+		if endOffset > len(times) {
+			return fmt.Errorf("metric time slice out of bounds: offset=%d points=%d len=%d", info.TimeOffset, pointCount, len(times))
+		}
+		if err := collectMetricFromMetricFrameV2(database, target.name, target.entry, frame, times[info.TimeOffset:endOffset], fromTS, toTS, stride, &target.count, fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BuildMetricFileV2 creates metric-<partition>.dat from data-<partition>.dat for one database.
 // It does not delete or modify the source data file until the configured raw-ingest action is applied after a successful write.
 func (e *Engine) BuildMetricFileV2(database, partition string) (string, error) {

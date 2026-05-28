@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"bytes"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -234,6 +236,69 @@ func TestTriggerRollupsForSourceAppendsCheckpoint(t *testing.T) {
 	}
 	if checkpointTS < periodStart.Add(time.Hour).UnixNano() {
 		t.Fatalf("expected checkpoint to advance at least one interval, got=%d", checkpointTS)
+	}
+}
+
+func TestAppendRollupCheckpointCompactsOversizedFile(t *testing.T) {
+	root := t.TempDir()
+	checkpointPath := filepath.Join(root, defaultRollupCheckpointFile)
+
+	var raw bytes.Buffer
+	for i := 0; raw.Len() <= rollupCheckpointCompactBytes; i++ {
+		fmt.Fprintf(&raw, "job-alpha,%d\n", i)
+		fmt.Fprintf(&raw, "job-beta,%d\n", i)
+	}
+	if err := os.WriteFile(checkpointPath, raw.Bytes(), 0644); err != nil {
+		t.Fatalf("WriteFile checkpoint failed: %v", err)
+	}
+
+	before, err := os.Stat(checkpointPath)
+	if err != nil {
+		t.Fatalf("Stat before failed: %v", err)
+	}
+	if before.Size() <= rollupCheckpointCompactBytes {
+		t.Fatalf("expected oversized checkpoint file, got=%d", before.Size())
+	}
+
+	if err := appendRollupCheckpoint(root, defaultRollupCheckpointFile, "job-beta", 999999); err != nil {
+		t.Fatalf("appendRollupCheckpoint failed: %v", err)
+	}
+
+	after, err := os.Stat(checkpointPath)
+	if err != nil {
+		t.Fatalf("Stat after failed: %v", err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("expected compacted checkpoint file to shrink: before=%d after=%d", before.Size(), after.Size())
+	}
+
+	checkpoints, err := loadRollupCheckpoints(root, defaultRollupCheckpointFile)
+	if err != nil {
+		t.Fatalf("loadRollupCheckpoints failed: %v", err)
+	}
+	if len(checkpoints) != 2 {
+		t.Fatalf("expected 2 compacted checkpoints, got=%d", len(checkpoints))
+	}
+	if checkpoints["job-alpha"] == 0 {
+		t.Fatalf("expected retained checkpoint for job-alpha")
+	}
+	if checkpoints["job-beta"] != 999999 {
+		t.Fatalf("expected latest job-beta checkpoint, got=%d", checkpoints["job-beta"])
+	}
+
+	rawCompact, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		t.Fatalf("ReadFile compacted checkpoint failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rawCompact)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 compacted lines, got=%d (%q)", len(lines), string(rawCompact))
+	}
+	if lines[0] != fmt.Sprintf("job-alpha,%d", checkpoints["job-alpha"]) {
+		t.Fatalf("unexpected first compacted line: %q", lines[0])
+	}
+	if lines[1] != "job-beta,999999" {
+		t.Fatalf("unexpected second compacted line: %q", lines[1])
 	}
 }
 

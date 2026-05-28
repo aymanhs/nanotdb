@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -278,7 +280,7 @@ func TestOpenEngineWalFsyncPolicyAlways(t *testing.T) {
 
 func TestOpenEngineCopiesDefaultsToDatabaseManifest(t *testing.T) {
 	root := t.TempDir()
-	cfg := []byte("[defaults]\ndatabases = [\"prod\"]\n\n[manifest_defaults.retention]\ngrace = \"1s\"\nretention_days = 7\nmax_active_days = 3\npartition = \"year\"\n\n[manifest_defaults.wal]\nenabled = false\nskip_before = \"30m\"\n\n[manifest_defaults.page]\nmax_records = 3\nmax_bytes = 256\nmax_age = \"2s\"\n")
+	cfg := []byte("[defaults]\ndatabases = [\"prod\"]\n\n[manifest_defaults.retention]\ngrace = \"1s\"\nretention_days = 7\nretention_action = \"delete\"\nmax_active_days = 3\npartition = \"year\"\n\n[manifest_defaults.wal]\nenabled = false\nskip_before = \"30m\"\n\n[manifest_defaults.page]\nmax_records = 3\nmax_bytes = 256\nmax_age = \"2s\"\n")
 	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
 		t.Fatalf("write engine.toml failed: %v", err)
 	}
@@ -298,6 +300,9 @@ func TestOpenEngineCopiesDefaultsToDatabaseManifest(t *testing.T) {
 	}
 	if rt.info.RetentionDays != 7 {
 		t.Fatalf("retention_days mismatch: got=%d want=%d", rt.info.RetentionDays, 7)
+	}
+	if rt.info.RetentionAction != RetentionActionDelete {
+		t.Fatalf("retention_action mismatch: got=%q want=%q", rt.info.RetentionAction, RetentionActionDelete)
 	}
 	if rt.info.MaxActiveDays != 3 {
 		t.Fatalf("max_active_days mismatch: got=%d want=%d", rt.info.MaxActiveDays, 3)
@@ -332,6 +337,9 @@ func TestOpenEngineCopiesDefaultsToDatabaseManifest(t *testing.T) {
 	if !strings.Contains(manifestText, "partition = \"year\"") {
 		t.Fatalf("expected manifest.toml retention partition from engine.toml")
 	}
+	if !strings.Contains(manifestText, "retention_action = \"delete\"") {
+		t.Fatalf("expected manifest.toml retention_action from engine.toml")
+	}
 	if !strings.Contains(manifestText, "[wal]") || !strings.Contains(manifestText, "enabled = false") {
 		t.Fatalf("expected manifest.toml wal defaults from engine.toml")
 	}
@@ -360,6 +368,141 @@ func TestEngineManifestRetentionPartitionInvalid(t *testing.T) {
 		t.Fatalf("expected getOrCreateDB to fail for invalid partition")
 	} else if !strings.Contains(err.Error(), "invalid partition") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEngineManifestRetentionActionInvalid(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nretention_action = \"compress\"\nmax_active_days = 2\npartition = \"day\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 16000\nmax_bytes = 127000\nmax_age = \"60s\"\n")
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed unexpectedly: %v", err)
+	}
+	defer e.Close()
+
+	if _, _, err := e.getOrCreateDB("prod"); err == nil {
+		t.Fatalf("expected getOrCreateDB to fail for invalid retention_action")
+	} else if !strings.Contains(err.Error(), "invalid retention_action") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEngineManifestRetentionArchiveRejectsForeverPartition(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nretention_action = \"archive\"\nmax_active_days = 2\npartition = \"forever\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 16000\nmax_bytes = 127000\nmax_age = \"60s\"\n")
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed unexpectedly: %v", err)
+	}
+	defer e.Close()
+
+	if _, _, err := e.getOrCreateDB("prod"); err == nil {
+		t.Fatalf("expected getOrCreateDB to fail for archive retention on forever partition")
+	} else if !strings.Contains(err.Error(), "partition=forever") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCleanupRetentionDeleteRemovesExpiredPartitionFamily(t *testing.T) {
+	root := t.TempDir()
+	oldPart := "1970-01-02"
+	keepPart := "1970-01-04"
+	for _, name := range []string{
+		"data-" + oldPart + ".dat",
+		"raw-" + oldPart + ".dat",
+		"metric-" + oldPart + ".dat",
+		"data-" + keepPart + ".dat",
+		"raw-" + keepPart + ".dat",
+		"metric-" + keepPart + ".dat",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0644); err != nil {
+			t.Fatalf("WriteFile(%s) failed: %v", name, err)
+		}
+	}
+
+	e := &Engine{logger: defaultEngineLogger()}
+	db := &Database{Name: "prod", RootDataDir: root}
+	rt := &dbRuntime{info: DBInfo{RetentionDays: 1, RetentionAction: RetentionActionDelete, Partition: "day"}}
+	nowTS := Timestamp(4 * 24 * int64(time.Hour))
+
+	e.cleanupRetention(db, rt, nowTS)
+
+	for _, name := range []string{"data-" + oldPart + ".dat", "raw-" + oldPart + ".dat", "metric-" + oldPart + ".dat"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected expired file %s to be removed, got err=%v", name, err)
+		}
+	}
+	for _, name := range []string{"data-" + keepPart + ".dat", "raw-" + keepPart + ".dat", "metric-" + keepPart + ".dat"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("expected live file %s to remain: %v", name, err)
+		}
+	}
+}
+
+func TestCleanupRetentionArchiveBundlesExpiredPartitionFamily(t *testing.T) {
+	root := t.TempDir()
+	part := "1970-01-02"
+	files := map[string][]byte{
+		"data-" + part + ".dat":   []byte("data payload"),
+		"raw-" + part + ".dat":    []byte("raw payload"),
+		"metric-" + part + ".dat": []byte("metric payload"),
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), body, 0644); err != nil {
+			t.Fatalf("WriteFile(%s) failed: %v", name, err)
+		}
+	}
+
+	e := &Engine{logger: defaultEngineLogger()}
+	db := &Database{Name: "prod", RootDataDir: root}
+	rt := &dbRuntime{info: DBInfo{RetentionDays: 1, RetentionAction: RetentionActionArchive, Partition: "day"}}
+	nowTS := Timestamp(4 * 24 * int64(time.Hour))
+
+	e.cleanupRetention(db, rt, nowTS)
+
+	archivePath := filepath.Join(root, "archive-1970-01.tar")
+	f, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatalf("Open(%s) failed: %v", archivePath, err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	archived := make(map[string]string)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next failed: %v", err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("ReadAll tar entry failed: %v", err)
+		}
+		archived[hdr.Name] = string(body)
+	}
+	for name, body := range files {
+		if got := archived[name]; got != string(body) {
+			t.Fatalf("archive entry mismatch for %s: got=%q want=%q", name, got, string(body))
+		}
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected archived source file %s to be removed, got err=%v", name, err)
+		}
 	}
 }
 

@@ -153,6 +153,10 @@ func TestRunQueryAggregateJSON_AllowsMissingEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
 		t.Fatalf("WriteFile engine.toml failed: %v", err)
 	}
+	now := time.Date(2026, 5, 24, 12, 10, 0, 0, time.UTC)
+	oldNow := queryTimeNow
+	queryTimeNow = func() time.Time { return now }
+	defer func() { queryTimeNow = oldNow }()
 
 	e, err := engine.OpenEngine(root, 1024*1024)
 	if err != nil {
@@ -196,7 +200,278 @@ func TestRunQueryAggregateJSON_AllowsMissingEnd(t *testing.T) {
 	if report.RowCount != 4 {
 		t.Fatalf("row count mismatch: got=%d want=4", report.RowCount)
 	}
-	if report.End != nil {
-		t.Fatalf("expected omitted report end when --end is absent, got=%d", *report.End)
+	if report.End == nil {
+		t.Fatal("expected report end to default to now when --end is absent")
+	}
+	if *report.End != now.UnixNano() {
+		t.Fatalf("end mismatch: got=%d want=%d", *report.End, now.UnixNano())
+	}
+}
+
+func TestRunQueryStartAcceptsRelativeDuration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	oldNow := queryTimeNow
+	queryTimeNow = func() time.Time { return now }
+	defer func() { queryTimeNow = oldNow }()
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: -3 * time.Minute, value: 10},
+		{offset: -90 * time.Second, value: 20},
+		{offset: -30 * time.Second, value: 30},
+	} {
+		if err := e.AddSample("prod", "temp.out_dry", engine.Timestamp(now.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runQuery([]string{
+			"--root", root,
+			"--db", "prod",
+			"--metric", "^temp\\.out_dry$",
+			"--start", "2m",
+			"--json",
+		}); err != nil {
+			t.Fatalf("runQuery failed: %v", err)
+		}
+	})
+
+	var report queryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("Unmarshal failed: %v\noutput=%s", err, out)
+	}
+	if report.Start == nil {
+		t.Fatal("expected report start to be populated")
+	}
+	wantStart := now.Add(-2 * time.Minute).UnixNano()
+	if *report.Start != wantStart {
+		t.Fatalf("start mismatch: got=%d want=%d", *report.Start, wantStart)
+	}
+	if report.RowCount != 2 {
+		t.Fatalf("row count mismatch: got=%d want=2", report.RowCount)
+	}
+	if report.End == nil {
+		t.Fatal("expected report end to default to now")
+	}
+	if *report.End != now.UnixNano() {
+		t.Fatalf("end mismatch: got=%d want=%d", *report.End, now.UnixNano())
+	}
+}
+
+func TestRunQueryEndAcceptsRelativeDuration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	oldNow := queryTimeNow
+	queryTimeNow = func() time.Time { return now }
+	defer func() { queryTimeNow = oldNow }()
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: -4 * time.Minute, value: 10},
+		{offset: -3 * time.Minute, value: 20},
+		{offset: -90 * time.Second, value: 30},
+	} {
+		if err := e.AddSample("prod", "temp.out_dry", engine.Timestamp(now.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runQuery([]string{
+			"--root", root,
+			"--db", "prod",
+			"--metric", "^temp\\.out_dry$",
+			"--start", "5m",
+			"--end", "2m",
+			"--json",
+		}); err != nil {
+			t.Fatalf("runQuery failed: %v", err)
+		}
+	})
+
+	var report queryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("Unmarshal failed: %v\noutput=%s", err, out)
+	}
+	if report.Start == nil || report.End == nil {
+		t.Fatalf("expected start and end in report, got start=%v end=%v", report.Start, report.End)
+	}
+	wantStart := now.Add(-5 * time.Minute).UnixNano()
+	wantEnd := now.Add(-2 * time.Minute).UnixNano()
+	if *report.Start != wantStart {
+		t.Fatalf("start mismatch: got=%d want=%d", *report.Start, wantStart)
+	}
+	if *report.End != wantEnd {
+		t.Fatalf("end mismatch: got=%d want=%d", *report.End, wantEnd)
+	}
+	if report.RowCount != 2 {
+		t.Fatalf("row count mismatch: got=%d want=2", report.RowCount)
+	}
+}
+
+func TestParseExtendedDurationSupportsDaysAndWeeks(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+	}{
+		{input: "1d", want: 24 * time.Hour},
+		{input: "1w", want: 7 * 24 * time.Hour},
+		{input: "1d2h30m", want: 26*time.Hour + 30*time.Minute},
+		{input: "1.5d", want: 36 * time.Hour},
+	}
+	for _, tc := range tests {
+		got, err := parseExtendedDuration(tc.input)
+		if err != nil {
+			t.Fatalf("parseExtendedDuration(%q) failed: %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Fatalf("parseExtendedDuration(%q) mismatch: got=%s want=%s", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestParseExtendedDurationRejectsUnknownUnits(t *testing.T) {
+	_, err := parseExtendedDuration("1fortnight")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unknown duration unit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunQueryStartAcceptsDayDuration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	oldNow := queryTimeNow
+	queryTimeNow = func() time.Time { return now }
+	defer func() { queryTimeNow = oldNow }()
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	for _, sample := range []struct {
+		offset time.Duration
+		value  float32
+	}{
+		{offset: -25 * time.Hour, value: 10},
+		{offset: -23 * time.Hour, value: 20},
+		{offset: -30 * time.Minute, value: 30},
+	} {
+		if err := e.AddSample("prod", "temp.out_dry", engine.Timestamp(now.Add(sample.offset).UnixNano()), sample.value); err != nil {
+			t.Fatalf("AddSample failed: %v", err)
+		}
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runQuery([]string{
+			"--root", root,
+			"--db", "prod",
+			"--metric", "^temp\\.out_dry$",
+			"--start", "1d",
+			"--json",
+		}); err != nil {
+			t.Fatalf("runQuery failed: %v", err)
+		}
+	})
+
+	var report queryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("Unmarshal failed: %v\noutput=%s", err, out)
+	}
+	if report.Start == nil {
+		t.Fatal("expected report start to be populated")
+	}
+	wantStart := now.Add(-24 * time.Hour).UnixNano()
+	if *report.Start != wantStart {
+		t.Fatalf("start mismatch: got=%d want=%d", *report.Start, wantStart)
+	}
+	if report.RowCount != 2 {
+		t.Fatalf("row count mismatch: got=%d want=2", report.RowCount)
+	}
+}
+
+func TestRunQueryWithoutMetricQueriesAllMetrics(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), []byte(testImportEngineTOML), 0644); err != nil {
+		t.Fatalf("WriteFile engine.toml failed: %v", err)
+	}
+
+	e, err := engine.OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	ts := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	if err := e.AddSample("prod", "cpu.temp", engine.Timestamp(ts.UnixNano()), float32(40)); err != nil {
+		t.Fatalf("AddSample cpu.temp failed: %v", err)
+	}
+	if err := e.AddSample("prod", "mem.used", engine.Timestamp(ts.Add(time.Second).UnixNano()), float32(50)); err != nil {
+		t.Fatalf("AddSample mem.used failed: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runQuery([]string{
+			"--root", root,
+			"--db", "prod",
+			"--start", strconv.FormatInt(ts.Add(-time.Second).UnixNano(), 10),
+			"--end", strconv.FormatInt(ts.Add(2*time.Second).UnixNano(), 10),
+			"--json",
+		}); err != nil {
+			t.Fatalf("runQuery failed: %v", err)
+		}
+	})
+
+	var report queryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("Unmarshal failed: %v\noutput=%s", err, out)
+	}
+	if report.MetricRegex != ".*" {
+		t.Fatalf("metric regex mismatch: got=%q want=%q", report.MetricRegex, ".*")
+	}
+	if report.RowCount != 2 {
+		t.Fatalf("row count mismatch: got=%d want=2", report.RowCount)
+	}
+	gotMetrics := []string{report.Rows[0].Metric, report.Rows[1].Metric}
+	if gotMetrics[0] != "cpu.temp" || gotMetrics[1] != "mem.used" {
+		t.Fatalf("unexpected metrics: got=%v", gotMetrics)
 	}
 }

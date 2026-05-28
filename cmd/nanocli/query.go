@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -43,22 +42,24 @@ type queryReport struct {
 	DurationMS   int64      `json:"duration_ms"`
 }
 
+var queryTimeNow = time.Now
+
 func runQuery(args []string) error {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	rootDir := fs.String("root", "", "root data directory that contains engine.toml")
 	dbName := fs.String("db", "", "database name")
-	metricRegex := fs.String("metric", ".*", "regex applied to metric names")
-	startText := fs.String("start", "", "optional range start time (RFC3339Nano, unix seconds, or unix nanos)")
-	endText := fs.String("end", "", "optional range end time (RFC3339Nano, unix seconds, or unix nanos)")
+	metricRegex := fs.String("metric", ".*", "optional regex applied to metric names; defaults to all metrics")
+	startText := fs.String("start", "", "optional range start time (RFC3339Nano, unix seconds, unix nanos, or relative duration like 2m for now-2m)")
+	endText := fs.String("end", "", "optional range end time (RFC3339Nano, unix seconds, unix nanos, or relative duration like 30s for now-30s); defaults to now when --start is set")
 	aggregateText := fs.String("aggregate", "", "optional comma-separated aggregate list: min,max,sum,avg,count")
 	windowText := fs.String("window", "", "aggregate bucket window (for example: 5m, 1h)")
 	metricFiles := fs.String("metric-files", "config", "metric file routing mode: config, on, or off")
 	format := fs.String("format", "table", "output format: table or json")
 	jsonOut := fs.Bool("json", false, "alias for --format json")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli query --root <root-dir> --db <database> --metric <regex> [--start <time>] [--end <time>] [--aggregate <list> --window <duration>] [--format table|json]")
+		return fmt.Errorf("usage: nanocli query --root <root-dir> --db <database> [--metric <regex>] [--start <time|duration>] [--end <time>] [--aggregate <list> --window <duration>] [--format table|json]")
 	}
 
 	ctx, err := resolveDBContext(*rootDir, *dbName)
@@ -75,14 +76,14 @@ func runQuery(args []string) error {
 	var useRange bool
 	if strings.TrimSpace(*startText) != "" {
 		useRange = true
-		fromTS, err = parseTimeText(*startText)
+		fromTS, err = parseQueryTimeText(*startText, true)
 		if err != nil {
 			return fmt.Errorf("invalid --start: %w", err)
 		}
 	}
 	if strings.TrimSpace(*endText) != "" {
 		useRange = true
-		toTS, err = parseTimeText(*endText)
+		toTS, err = parseQueryTimeText(*endText, true)
 		if err != nil {
 			return fmt.Errorf("invalid --end: %w", err)
 		}
@@ -92,7 +93,7 @@ func runQuery(args []string) error {
 			fromTS = 0
 		}
 		if strings.TrimSpace(*endText) == "" {
-			toTS = engine.Timestamp(math.MaxInt64)
+			toTS = engine.Timestamp(queryTimeNow().UnixNano())
 		}
 		if toTS < fromTS {
 			return fmt.Errorf("--end must be >= --start")
@@ -168,24 +169,34 @@ func runQuery(args []string) error {
 			return err
 		}
 	} else {
-		for _, metric := range matchedMetrics {
-			if !useRange {
-				s, found, err := eng.QueryLast(ctx.Database, metric)
-				if err != nil {
-					return err
-				}
-				if !found {
-					continue
-				}
-				rows = append(rows, sampleToQueryRow(s))
-				continue
-			}
-			err := eng.QueryRange(ctx.Database, metric, fromTS, toTS, 1, func(s engine.Sample) error {
+		if useRange && len(matchedMetrics) > 1 {
+			err := eng.QueryRangeMany(ctx.Database, matchedMetrics, fromTS, toTS, 1, func(s engine.Sample) error {
 				rows = append(rows, sampleToQueryRow(s))
 				return nil
 			})
 			if err != nil {
 				return err
+			}
+		} else {
+			for _, metric := range matchedMetrics {
+				if !useRange {
+					s, found, err := eng.QueryLast(ctx.Database, metric)
+					if err != nil {
+						return err
+					}
+					if !found {
+						continue
+					}
+					rows = append(rows, sampleToQueryRow(s))
+					continue
+				}
+				err := eng.QueryRange(ctx.Database, metric, fromTS, toTS, 1, func(s engine.Sample) error {
+					rows = append(rows, sampleToQueryRow(s))
+					return nil
+				})
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -212,10 +223,8 @@ func runQuery(args []string) error {
 	if useRange {
 		from := int64(fromTS)
 		report.Start = &from
-		if strings.TrimSpace(*endText) != "" {
-			to := int64(toTS)
-			report.End = &to
-		}
+		to := int64(toTS)
+		report.End = &to
 	}
 
 	if outFormat == "json" {
@@ -331,4 +340,103 @@ func parseTimeText(v string) (engine.Timestamp, error) {
 		return engine.Timestamp(n), nil
 	}
 	return engine.Timestamp(n * int64(time.Second)), nil
+}
+
+func parseQueryTimeText(v string, allowRelativeDuration bool) (engine.Timestamp, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, fmt.Errorf("missing time value")
+	}
+	if allowRelativeDuration {
+		if d, err := parseExtendedDuration(v); err == nil {
+			return engine.Timestamp(queryTimeNow().Add(-d).UnixNano()), nil
+		}
+	}
+	return parseTimeText(v)
+}
+
+func parseExtendedDuration(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, fmt.Errorf("missing duration")
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d, nil
+	}
+
+	negative := false
+	if strings.HasPrefix(v, "+") {
+		v = v[1:]
+	} else if strings.HasPrefix(v, "-") {
+		negative = true
+		v = v[1:]
+	}
+	if v == "" {
+		return 0, fmt.Errorf("invalid duration")
+	}
+
+	units := map[string]time.Duration{
+		"ns": time.Nanosecond,
+		"us": time.Microsecond,
+		"µs": time.Microsecond,
+		"μs": time.Microsecond,
+		"ms": time.Millisecond,
+		"s":  time.Second,
+		"m":  time.Minute,
+		"h":  time.Hour,
+		"d":  24 * time.Hour,
+		"w":  7 * 24 * time.Hour,
+	}
+
+	total := 0.0
+	for len(v) > 0 {
+		numEnd := 0
+		dotSeen := false
+		for numEnd < len(v) {
+			ch := v[numEnd]
+			if ch >= '0' && ch <= '9' {
+				numEnd++
+				continue
+			}
+			if ch == '.' && !dotSeen {
+				dotSeen = true
+				numEnd++
+				continue
+			}
+			break
+		}
+		if numEnd == 0 {
+			return 0, fmt.Errorf("invalid duration")
+		}
+		numText := v[:numEnd]
+		amount, err := strconv.ParseFloat(numText, 64)
+		if err != nil {
+			return 0, err
+		}
+		v = v[numEnd:]
+		unitEnd := 0
+		for unitEnd < len(v) {
+			ch := v[unitEnd]
+			if ch >= 'a' && ch <= 'z' {
+				unitEnd++
+				continue
+			}
+			break
+		}
+		if unitEnd == 0 {
+			return 0, fmt.Errorf("invalid duration")
+		}
+		unitText := v[:unitEnd]
+		unitDur, ok := units[unitText]
+		if !ok {
+			return 0, fmt.Errorf("unknown duration unit %q", unitText)
+		}
+		total += amount * float64(unitDur)
+		v = v[unitEnd:]
+	}
+
+	if negative {
+		total = -total
+	}
+	return time.Duration(total), nil
 }

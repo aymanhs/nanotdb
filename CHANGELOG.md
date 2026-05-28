@@ -12,7 +12,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - A first-class `aggregate_band` dashboard widget with shorthand config expansion, interval-as-window behavior, batched aggregate fetching, and simplified editor support for min/avg/max band charts.
 - Built-in aggregate discovery and query surfaces, including `/api/v1/aggregates`, `nanocli query --aggregate ... --window ...`, and new aggregate options beyond the original min/max/sum/avg/count set: `median`, `p50`, `p95`, `p99`, `trimmed_avg`, and the `trimmed_average` alias.
 - Engine inspector WAL and runtime surfaces for live file/state inspection, including WAL previews, recent flush history, process RSS, Go runtime memory stats, process age, and cross-database open-page visibility.
+- `nanocli inspect catalog` for listing a database's registered metrics from `catalog.json` with name, id, and type in table or JSON form.
 - Per-file engine inspector compaction actions to build query-optimized metric `v2` files from sealed raw partitions with status and size reporting.
+- Per-database `retention.retention_action` manifest support with `keep|delete|archive`, partition-family cleanup for `data-`/`raw-`/`metric-` files, hardcoded tar archive buckets for expired sealed partitions, and cutoff-based expiry semantics so daily partitions roll into monthly archives one expired partition at a time instead of all at once at month boundaries.
 
 ### Changed
 - Shared raw-partition metric-file preparation helpers were moved into a neutral engine file and renamed away from `v1`-specific terminology, clarifying that both legacy `v1` and default `v2` metric builds use the same partition scan/coalesce path.
@@ -25,6 +27,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Default `v2` metric-file builds now tolerate sealed raw partitions whose per-metric samples appear out of timestamp order in raw page append order by normalizing each metric stream during build and verification.
 - Query APIs and web consumers now treat `end` as optional, stabilize aggregate range stepping, and collapse duplicate aggregate-band backend requests into shared multi-aggregate fetches.
+- `nanocli query` now accepts relative durations for both `--start` and `--end`, including day/week suffixes such as `1d` and `1w`, treats an omitted `--metric` as all metrics, defaults missing `--end` to `now` for range queries, and avoids repeated per-metric rescans by sharing one partition pass across multi-metric range queries.
+- Rollup checkpoint logs now compact automatically once `rollup.checkpoints.log` grows past 100 KB, rewriting the file down to the latest checkpoint per job instead of growing indefinitely.
 - Engine WAL UI now avoids redundant scanned/live preview sections, renders unset flush timestamps as `never`, and the CodeQL dismiss workflow YAML no longer fails parsing because of an unquoted colon-containing comment string.
 - Trimmed-average aggregate coverage now locks in the small-sample minimum trim and the 50-point 5% per-tail behavior through focused engine tests.
 
