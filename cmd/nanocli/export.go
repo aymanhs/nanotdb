@@ -20,6 +20,10 @@ type exportReport struct {
 }
 
 func runExport(args []string) error {
+	if len(args) > 0 && args[0] == "parts" {
+		return runExportParts(args[1:])
+	}
+
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 

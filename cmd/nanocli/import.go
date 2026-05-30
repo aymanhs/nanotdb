@@ -24,6 +24,10 @@ type importReport struct {
 }
 
 func runImport(args []string) error {
+	if len(args) > 0 && args[0] == "parts" {
+		return runImportParts(args[1:])
+	}
+
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 

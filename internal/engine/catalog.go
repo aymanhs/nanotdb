@@ -83,13 +83,69 @@ func GetMetricID[T SampleType](c *Catalog, name string) (MetricID, error) {
 }
 
 func (c *Catalog) WriteCatalog() error {
+	return c.writeCatalogToPath("")
+}
+
+func (c *Catalog) WriteCatalogTo(path string) error {
+	return c.writeCatalogToPath(path)
+}
+
+func (c *Catalog) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return nil
+	}
+	err := c.file.Close()
+	c.file = nil
+	return err
+}
+
+func (c *Catalog) writeCatalogToPath(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if !c.dirty {
+		if strings.TrimSpace(path) != "" && c.file != nil && filepath.Clean(path) != filepath.Clean(c.file.Name()) {
+			return writeCatalogEntries(path, c.catalogEntriesLocked())
+		}
 		return nil
 	}
+	if strings.TrimSpace(path) == "" {
+		if c.file == nil {
+			return fmt.Errorf("catalog file is closed")
+		}
+		path = c.file.Name()
+	}
+	if err := writeCatalogEntries(path, c.catalogEntriesLocked()); err != nil {
+		return err
+	}
+	if c.file != nil && filepath.Clean(path) == filepath.Clean(c.file.Name()) {
+		refreshed, err := os.OpenFile(path, os.O_RDWR, 0644)
+		if err != nil {
+			return err
+		}
+		if err := c.file.Close(); err != nil {
+			refreshed.Close()
+			return err
+		}
+		c.file = refreshed
+		c.dirty = false
+		return nil
+	}
+	if c.file != nil && filepath.Clean(path) != filepath.Clean(c.file.Name()) {
+		return nil
+	}
+	refreshed, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	c.file = refreshed
+	c.dirty = false
+	return nil
+}
 
+func (c *Catalog) catalogEntriesLocked() []metricDiskEntry {
 	entries := make([]metricDiskEntry, 0, len(c.metrics))
 	for name, m := range c.metrics {
 		entries = append(entries, metricDiskEntry{
@@ -98,14 +154,23 @@ func (c *Catalog) WriteCatalog() error {
 			ValueType: m.ValueType,
 		})
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
 
+func writeCatalogEntries(path string, entries []metricDiskEntry) error {
 	payload, err := json.MarshalIndent(catalogDisk{Metrics: entries}, "", "  ")
 	if err != nil {
 		return err
 	}
 	payload = append(payload, '\n')
 
-	tmpPath := c.file.Name() + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
 	tmp, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -123,20 +188,9 @@ func (c *Catalog) WriteCatalog() error {
 		return err
 	}
 
-	if err := os.Rename(tmpPath, c.file.Name()); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-
-	refreshed, err := os.OpenFile(c.file.Name(), os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	if err := c.file.Close(); err != nil {
-		refreshed.Close()
-		return err
-	}
-	c.file = refreshed
-	c.dirty = false
 	return nil
 }
 
