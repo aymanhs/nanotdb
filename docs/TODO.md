@@ -1,6 +1,9 @@
 # Things to do
-- ~~add median and trimmed average aggregate and use them for sd latency~~ added few aggregates
 - think about adding events or annotations, use those to put events for things like sd read > 500ms.
+- add baseurl so the app is friendly to reverse-proxy
+- consider having this as main webserver, support basic templats for pages
+- separate web-ui from db port
+- ~~add median and trimmed average aggregate and use them for sd latency~~ added few aggregates
 - ~~analyze existing sd latency data to see good numbers for trimming,  5%, 1%?~~
 - ~~start with ignoring anything more than 250ms for a start as an outlier ~~
 

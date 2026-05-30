@@ -164,6 +164,23 @@
     return display.unit ? fixed + display.unit : fixed;
   }
 
+  function formatTransformedValue(target, transformedValue) {
+    const display = resolveDisplayConfig(target);
+    if (!Number.isFinite(transformedValue)) {
+      return "--";
+    }
+    const fixed = formatNumericValue(transformedValue, display.decimals);
+    if (display.format) {
+      if (display.format.includes("{duration}")) {
+        return display.format.replaceAll("{duration}", formatDurationFromSeconds(transformedValue));
+      }
+      if (display.format.includes("{value}")) {
+        return display.format.replaceAll("{value}", fixed);
+      }
+    }
+    return display.unit ? fixed + display.unit : fixed;
+  }
+
   function classifySeverity(target, rawValue) {
     if (!target || !target.thresholds) {
       return "none";
@@ -213,13 +230,14 @@
   function yAxisSizeForValues(target, vals) {
     let maxLen = 0;
     (vals || []).forEach((value) => {
-      const label = value == null ? "" : formatWidgetValue(target, value);
+      const label = value == null ? "" : formatTransformedValue(target, value);
       maxLen = Math.max(maxLen, String(label).length);
     });
     const isMobile = window.matchMedia("(max-width: 699px)").matches;
     const minSize = isMobile ? 36 : 64;
-    const maxSize = isMobile ? 84 : 220;
-    return Math.min(maxSize, Math.max(minSize, maxLen * 8 + 16));
+    const maxSize = isMobile ? 56 : 220;
+    const charWidth = isMobile ? 6 : 8;
+    return Math.min(maxSize, Math.max(minSize, maxLen * charWidth + 12));
   }
 
   function buildUPlotData(seriesMap) {
@@ -284,6 +302,7 @@
     formatNumericValue,
     formatDurationFromSeconds,
     formatWidgetValue,
+    formatTransformedValue,
     classifySeverity,
     applySeverityClass,
     pickSeriesColor,
