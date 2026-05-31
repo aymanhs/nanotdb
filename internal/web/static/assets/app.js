@@ -4,7 +4,15 @@
     buildInstantQueryPath,
     buildRangeQueryPath,
     seriesUsesAggregateRange,
+    formatNumericValue,
   } = window.NANOTDB_UTILS || {};
+
+  function formatAxisValue(value) {
+    if (value == null || !Number.isFinite(Number(value))) {
+      return "";
+    }
+    return typeof formatNumericValue === "function" ? formatNumericValue(value, 2) : Number(value).toFixed(2);
+  }
 
   function apiURL(path) {
     const base = typeof cfg.apiBaseURL === "string" ? cfg.apiBaseURL.replace(/\/$/, "") : "";
@@ -367,7 +375,7 @@
         {
           stroke: chartText,
           grid: { stroke: chartGrid, width: 1 },
-          values: (u, vals) => vals.map((value) => (value == null ? "" : Number(value).toFixed(2))),
+          values: (u, vals) => vals.map(formatAxisValue),
         },
       ],
       legend: { show: true, live: true, isolate: false },
