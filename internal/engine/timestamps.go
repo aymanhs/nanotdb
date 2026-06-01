@@ -7,6 +7,83 @@ import (
 	"time"
 )
 
+// TimestampUnit identifies the unit of a bare numeric timestamp. The zero value
+// (or "") is treated as nanoseconds — bare integers are assumed to be ns unless
+// the caller has explicitly opted into a different unit (e.g. via a CLI flag or
+// HTTP query parameter).
+const (
+	TimestampUnitNanoseconds  = "ns"
+	TimestampUnitMicroseconds = "us"
+	TimestampUnitMilliseconds = "ms"
+	TimestampUnitSeconds      = "s"
+)
+
+// NormalizeTimestampUnit validates and normalizes a user-supplied unit value.
+// Empty input maps to "ns". Returns an error on unknown values.
+func NormalizeTimestampUnit(unit string) (string, error) {
+	u := strings.ToLower(strings.TrimSpace(unit))
+	switch u {
+	case "":
+		return TimestampUnitNanoseconds, nil
+	case TimestampUnitNanoseconds, TimestampUnitMicroseconds, TimestampUnitMilliseconds, TimestampUnitSeconds:
+		return u, nil
+	}
+	return "", fmt.Errorf("invalid timestamp unit: %q (expected one of: ns, us, ms, s)", unit)
+}
+
+// timestampUnitScale returns the number of nanoseconds in one unit.
+func timestampUnitScale(unit string) int64 {
+	switch unit {
+	case TimestampUnitSeconds:
+		return int64(time.Second)
+	case TimestampUnitMilliseconds:
+		return int64(time.Millisecond)
+	case TimestampUnitMicroseconds:
+		return int64(time.Microsecond)
+	default:
+		return 1
+	}
+}
+
+// ParseTimestampWithUnit parses a timestamp string using the given unit for
+// bare numeric values. Human-readable forms (RFC3339 / "2006-01-02 ..." /
+// "YYYY-MM-DD" etc.) are always interpreted with their textual semantics
+// regardless of unit. Bare integers and floats are multiplied by the unit's
+// scale in nanoseconds.
+//
+// Unit "" defaults to nanoseconds.
+func ParseTimestampWithUnit(input string, unit string) (Timestamp, error) {
+	u, err := NormalizeTimestampUnit(unit)
+	if err != nil {
+		return 0, err
+	}
+	v := strings.TrimSpace(input)
+	if v == "" {
+		return 0, fmt.Errorf("timestamp cannot be empty")
+	}
+	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		return Timestamp(t.UnixNano()), nil
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05.999999999", v); err == nil {
+		return Timestamp(t.UTC().UnixNano()), nil
+	}
+	scale := timestampUnitScale(u)
+	if strings.Contains(v, ".") {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid timestamp %q", v)
+		}
+		return Timestamp(int64(f * float64(scale))), nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err == nil {
+		return Timestamp(n * scale), nil
+	}
+	// Fall through to the human-readable parser (handles "YYYY-MM-DD",
+	// "YYYY-MM-DD HH:MM", etc.). Unit is irrelevant in that path.
+	return ParseTimestamp(v)
+}
+
 // FormatTimestamp converts a nanosecond Unix timestamp to human-readable UTC format.
 // Format: YYYY-MM-DD HH:MM:SS.nnnnnnnnn
 func FormatTimestamp(ts Timestamp) string {

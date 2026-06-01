@@ -404,14 +404,19 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 			return
 		}
 
-		start, err := parseTimeParam(r.URL.Query().Get("start"))
+		tsUnit, err := engine.NormalizeTimestampUnit(r.URL.Query().Get("timestamp_unit"))
+		if err != nil {
+			writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+			return
+		}
+		start, err := parseTimeParam(r.URL.Query().Get("start"), tsUnit)
 		if err != nil {
 			writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid start: %v", err))
 			return
 		}
 		end := engine.Timestamp(math.MaxInt64)
 		if rawEnd := strings.TrimSpace(r.URL.Query().Get("end")); rawEnd != "" {
-			end, err = parseTimeParam(rawEnd)
+			end, err = parseTimeParam(rawEnd, tsUnit)
 			if err != nil {
 				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid end: %v", err))
 				return
@@ -781,32 +786,16 @@ func resolveDBAndMetric(db, query string) (string, string, error) {
 	return "", "", fmt.Errorf("missing db parameter or DB/metric query")
 }
 
-func parseTimeParam(v string) (engine.Timestamp, error) {
+// parseTimeParam parses an HTTP query-string time value. Bare numerics are
+// interpreted with `tsUnit` (ns/us/ms/s); the empty string defaults to ns.
+// Magnitude-guessing heuristics were removed because they silently misclassified
+// ms-since-epoch values (year 2023, value > 1e12) as nanoseconds.
+func parseTimeParam(v string, tsUnit string) (engine.Timestamp, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, fmt.Errorf("missing time value")
 	}
-	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-		return engine.Timestamp(t.UnixNano()), nil
-	}
-	if strings.Contains(v, ".") {
-		f, err := strconv.ParseFloat(v, 64)
-		if err == nil {
-			return engine.Timestamp(f * float64(time.Second)), nil
-		}
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err == nil {
-		if n > 1_000_000_000_000 {
-			return engine.Timestamp(n), nil
-		}
-		return engine.Timestamp(n * int64(time.Second)), nil
-	}
-	ts, err := engine.ParseTimestamp(v)
-	if err != nil {
-		return 0, err
-	}
-	return ts, nil
+	return engine.ParseTimestampWithUnit(v, tsUnit)
 }
 
 func alignTimestampToStep(ts, step engine.Timestamp) engine.Timestamp {

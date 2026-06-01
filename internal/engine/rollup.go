@@ -10,11 +10,29 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const defaultRollupCheckpointFile = "rollup.checkpoints.log"
 const rollupCheckpointCompactBytes = 100 * 1024
+
+// rollupCheckpointMu is a per-checkpoint-file mutex keyed by the absolute
+// (filepath.Clean'd) path. Without it, an append landing between the read and
+// rename phases of compactRollupCheckpointFile would be silently dropped by
+// the rename — causing the rollup engine to reprocess intervals on next run,
+// potentially double-writing rolled-up samples.
+var rollupCheckpointMu sync.Map // map[string]*sync.Mutex
+
+func rollupCheckpointLock(path string) *sync.Mutex {
+	key := filepath.Clean(path)
+	if v, ok := rollupCheckpointMu.Load(key); ok {
+		return v.(*sync.Mutex)
+	}
+	m := &sync.Mutex{}
+	actual, _ := rollupCheckpointMu.LoadOrStore(key, m)
+	return actual.(*sync.Mutex)
+}
 
 type RollupBackfillReport struct {
 	RequestedSources       []string `json:"requested_sources"`
@@ -744,6 +762,14 @@ func appendRollupCheckpoint(rootDir, fileName, jobID string, completed Timestamp
 		return err
 	}
 	path := filepath.Join(rootDir, fileName)
+
+	// Serialize append+compact against the same checkpoint file. Without this,
+	// an append landing between the read and rename phases of
+	// compactRollupCheckpointFile is silently dropped.
+	lock := rollupCheckpointLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err
@@ -766,10 +792,12 @@ func appendRollupCheckpoint(rootDir, fileName, jobID string, completed Timestamp
 	if info.Size() <= rollupCheckpointCompactBytes {
 		return nil
 	}
-	return compactRollupCheckpointFile(rootDir, fileName)
+	return compactRollupCheckpointFileLocked(rootDir, fileName)
 }
 
-func compactRollupCheckpointFile(rootDir, fileName string) error {
+// compactRollupCheckpointFileLocked compacts the checkpoint file. Caller MUST
+// hold rollupCheckpointLock(filepath.Join(rootDir, fileName)).
+func compactRollupCheckpointFileLocked(rootDir, fileName string) error {
 	checkpoints, err := loadRollupCheckpoints(rootDir, fileName)
 	if err != nil {
 		return err

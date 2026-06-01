@@ -24,6 +24,7 @@ func TestRunRollupBackfillsSourceDatabase(t *testing.T) {
 	sourceManifest := `[retention]
 grace = "1m"
 retention_days = 30
+retention_action = "keep"
 max_active_days = 2
 
 [wal]

@@ -11,13 +11,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type OfflineLPImportOptions struct {
 	CatalogPath   string
 	OutDir        string
 	PartitionMode string
+	// TimestampUnit controls how bare numeric timestamps are interpreted.
+	// "" defaults to nanoseconds. Valid values: ns, us, ms, s.
+	TimestampUnit string
 }
 
 type OfflineLPImportPartReport struct {
@@ -82,6 +84,10 @@ func ImportOfflineLPToMetricParts(r io.Reader, opts OfflineLPImportOptions) (Off
 	if err != nil {
 		return OfflineLPImportReport{}, err
 	}
+	tsUnit, err := NormalizeTimestampUnit(opts.TimestampUnit)
+	if err != nil {
+		return OfflineLPImportReport{}, err
+	}
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return OfflineLPImportReport{}, err
 	}
@@ -108,7 +114,7 @@ func ImportOfflineLPToMetricParts(r io.Reader, opts OfflineLPImportOptions) (Off
 			skippedLines++
 			continue
 		}
-		row, err := parseOfflineLPLine(line)
+		row, err := parseOfflineLPLine(line, tsUnit)
 		if err != nil {
 			return OfflineLPImportReport{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
@@ -165,7 +171,10 @@ func ImportOfflineLPToMetricParts(r io.Reader, opts OfflineLPImportOptions) (Off
 		})
 	}
 
-	if err := catalog.WriteCatalogTo(report.CatalogPath); err != nil {
+	// The catalog was opened via LoadCatalog on report.CatalogPath, so its
+	// canonical file IS the output path. Persist via WriteCatalog() so we
+	// reuse and refresh the existing fd rather than rebinding to a snapshot.
+	if err := catalog.WriteCatalog(); err != nil {
 		return OfflineLPImportReport{}, err
 	}
 	return report, nil
@@ -221,7 +230,7 @@ func ExportOfflinePartsToLP(w io.Writer, opts OfflineLPExportOptions) (OfflineLP
 	return report, nil
 }
 
-func parseOfflineLPLine(line string) (offlineLPRow, error) {
+func parseOfflineLPLine(line string, tsUnit string) (offlineLPRow, error) {
 	parts := strings.Fields(line)
 	if len(parts) < 3 || len(parts) > 4 {
 		return offlineLPRow{}, fmt.Errorf("invalid line protocol")
@@ -230,46 +239,37 @@ func parseOfflineLPLine(line string) (offlineLPRow, error) {
 	if key == "" {
 		return offlineLPRow{}, fmt.Errorf("metric key cannot be empty")
 	}
+	// Strip an optional "<db>/" prefix produced by ExportOfflinePartsToLP
+	// --with-db. Anything beyond a single leading "/" segment is treated as
+	// part of the metric name, which is then rejected by validateMetricName
+	// (the engine forbids '/' in metric names, so a key like "a/b/c" is an
+	// error regardless of --with-db).
 	if idx := strings.Index(key, "/"); idx > 0 && idx < len(key)-1 {
 		key = key[idx+1:]
+	}
+	if err := validateMetricName(key); err != nil {
+		return offlineLPRow{}, err
 	}
 	timestampText := parts[2]
 	if len(parts) == 4 {
 		timestampText = parts[2] + " " + parts[3]
 	}
-	ts, err := parseOfflineTimestamp(timestampText)
+	ts, err := parseOfflineTimestamp(timestampText, tsUnit)
 	if err != nil {
 		return offlineLPRow{}, err
 	}
 	return offlineLPRow{Metric: key, Value: parts[1], Timestamp: ts}, nil
 }
 
-func parseOfflineTimestamp(v string) (Timestamp, error) {
+// parseOfflineTimestamp interprets bare numeric timestamps in the configured
+// unit (default ns). Heuristic magnitude guessing was removed because it
+// mis-bucketed ms timestamps (year 2023, value >1e12) as nanoseconds.
+func parseOfflineTimestamp(v string, tsUnit string) (Timestamp, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, fmt.Errorf("missing timestamp")
 	}
-	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-		return Timestamp(t.UnixNano()), nil
-	}
-	if t, err := time.Parse("2006-01-02 15:04:05.999999999", v); err == nil {
-		return Timestamp(t.UTC().UnixNano()), nil
-	}
-	if strings.Contains(v, ".") {
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid timestamp %q", v)
-		}
-		return Timestamp(f * float64(time.Second)), nil
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid timestamp %q", v)
-	}
-	if n > 1_000_000_000_000 {
-		return Timestamp(n), nil
-	}
-	return Timestamp(n * int64(time.Second)), nil
+	return ParseTimestampWithUnit(v, tsUnit)
 }
 
 func offlinePartitionKey(mode string, ts Timestamp) (string, error) {

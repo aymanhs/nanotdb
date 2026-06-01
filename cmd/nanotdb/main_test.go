@@ -377,7 +377,7 @@ func TestInitConfigFile_RejectsInvalidConfigName(t *testing.T) {
 
 func TestParseTimeParam_AcceptsHumanReadable(t *testing.T) {
 	input := "2026-05-14 12:34:56.123456789"
-	got, err := parseTimeParam(input)
+	got, err := parseTimeParam(input, "")
 	if err != nil {
 		t.Fatalf("parseTimeParam failed: %v", err)
 	}
@@ -387,12 +387,37 @@ func TestParseTimeParam_AcceptsHumanReadable(t *testing.T) {
 	}
 }
 
-func TestParseTimeParam_IntegerSecondsStillSupported(t *testing.T) {
-	got, err := parseTimeParam("1715680000")
+func TestParseTimeParam_DefaultsToNanoseconds(t *testing.T) {
+	// Default unit is nanoseconds — bare integers are no longer heuristically
+	// promoted from seconds. Callers wanting seconds must pass tsUnit="s".
+	got, err := parseTimeParam("1715680000000000000", "")
+	if err != nil {
+		t.Fatalf("parseTimeParam failed: %v", err)
+	}
+	if int64(got) != 1715680000000000000 {
+		t.Fatalf("parseTimeParam mismatch: got=%d want=%d", int64(got), int64(1715680000000000000))
+	}
+}
+
+func TestParseTimeParam_SecondsViaUnit(t *testing.T) {
+	got, err := parseTimeParam("1715680000", "s")
 	if err != nil {
 		t.Fatalf("parseTimeParam failed: %v", err)
 	}
 	want := int64(1715680000) * int64(time.Second)
+	if int64(got) != want {
+		t.Fatalf("parseTimeParam mismatch: got=%d want=%d", int64(got), want)
+	}
+}
+
+func TestParseTimeParam_MillisecondsViaUnit(t *testing.T) {
+	// 1700000000000 ms is year 2023; the old heuristic mis-bucketed this as ns
+	// (year 1970-01-20). With explicit unit it now resolves correctly.
+	got, err := parseTimeParam("1700000000000", "ms")
+	if err != nil {
+		t.Fatalf("parseTimeParam failed: %v", err)
+	}
+	want := int64(1700000000000) * int64(time.Millisecond)
 	if int64(got) != want {
 		t.Fatalf("parseTimeParam mismatch: got=%d want=%d", int64(got), want)
 	}
@@ -757,7 +782,7 @@ func TestHandleEngineOverviewIncludesOnDiskRollupDB(t *testing.T) {
 	if err := os.MkdirAll(rollupDir, 0755); err != nil {
 		t.Fatalf("MkdirAll rollup failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(rollupDir, "manifest.toml"), []byte("[retention]\nretention_days = 30\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(rollupDir, "manifest.toml"), []byte("[retention]\nretention_days = 30\nretention_action = \"keep\"\n"), 0644); err != nil {
 		t.Fatalf("WriteFile rollup manifest failed: %v", err)
 	}
 
@@ -1079,7 +1104,7 @@ func TestHandleEngineRecompact(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
 		t.Fatalf("MkdirAll prod failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[page]\nmax_records = 1\nmax_bytes = 64\nmax_age = \"10m\"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[retention]\nretention_action = \"keep\"\n\n[page]\nmax_records = 1\nmax_bytes = 64\nmax_age = \"10m\"\n"), 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
 
@@ -1099,7 +1124,7 @@ func TestHandleEngineRecompact(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[page]\nmax_records = 128\nmax_bytes = 4096\nmax_age = \"10m\"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[retention]\nretention_action = \"keep\"\n\n[page]\nmax_records = 128\nmax_bytes = 4096\nmax_age = \"10m\"\n"), 0644); err != nil {
 		t.Fatalf("WriteFile manifest update failed: %v", err)
 	}
 
@@ -1148,7 +1173,10 @@ func TestHandleRollupBackfill(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
 		t.Fatalf("MkdirAll prod failed: %v", err)
 	}
-	manifest := `[rollups]
+	manifest := `[retention]
+retention_action = "keep"
+
+[rollups]
 enabled = true
 checkpoint_file = "rollup.checkpoints.log"
 default_grace = "0s"
@@ -1263,12 +1291,12 @@ func TestHandleMetrics_LineageMultiHop(t *testing.T) {
 		t.Fatalf("MkdirAll sensors_rollup_1h failed: %v", err)
 	}
 
-	sensorsManifest := "[rollups]\nenabled = true\n[[rollups.jobs]]\nid = \"temp_1h\"\nsource_metric = \"temp.out_dry\"\ninterval = \"1h\"\naggregates = [\"sum\"]\ndestination_db = \"sensors_rollup_1h\"\ndestination_metric_prefix = \"temp.out_dry\"\n"
+	sensorsManifest := "[retention]\nretention_action = \"keep\"\n[rollups]\nenabled = true\n[[rollups.jobs]]\nid = \"temp_1h\"\nsource_metric = \"temp.out_dry\"\ninterval = \"1h\"\naggregates = [\"sum\"]\ndestination_db = \"sensors_rollup_1h\"\ndestination_metric_prefix = \"temp.out_dry\"\n"
 	if err := os.WriteFile(filepath.Join(root, "sensors", "manifest.toml"), []byte(sensorsManifest), 0644); err != nil {
 		t.Fatalf("WriteFile sensors manifest failed: %v", err)
 	}
 
-	rollupManifest := "[rollups]\nenabled = true\n[[rollups.jobs]]\nid = \"temp_1d_from_1h\"\nsource_metric = \"temp.out_dry.sum\"\ninterval = \"24h\"\naggregates = [\"avg\"]\ndestination_db = \"sensors_rollup_1d\"\ndestination_metric_prefix = \"temp.out_dry\"\n"
+	rollupManifest := "[retention]\nretention_action = \"keep\"\n[rollups]\nenabled = true\n[[rollups.jobs]]\nid = \"temp_1d_from_1h\"\nsource_metric = \"temp.out_dry.sum\"\ninterval = \"24h\"\naggregates = [\"avg\"]\ndestination_db = \"sensors_rollup_1d\"\ndestination_metric_prefix = \"temp.out_dry\"\n"
 	if err := os.WriteFile(filepath.Join(root, "sensors_rollup_1h", "manifest.toml"), []byte(rollupManifest), 0644); err != nil {
 		t.Fatalf("WriteFile rollup manifest failed: %v", err)
 	}

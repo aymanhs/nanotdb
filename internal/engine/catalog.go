@@ -82,12 +82,49 @@ func GetMetricID[T SampleType](c *Catalog, name string) (MetricID, error) {
 	return newID, nil
 }
 
+// WriteCatalog persists the catalog to its canonical on-disk file (the path
+// passed to LoadCatalog). Clears the dirty flag on success.
 func (c *Catalog) WriteCatalog() error {
-	return c.writeCatalogToPath("")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return fmt.Errorf("catalog file is closed")
+	}
+	canonical := c.file.Name()
+	if err := writeCatalogEntries(canonical, c.catalogEntriesLocked()); err != nil {
+		return err
+	}
+	// Re-open after the atomic rename so the file descriptor points at the new
+	// inode. Closing the previous fd after a successful rename is safe.
+	refreshed, err := os.OpenFile(canonical, os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	if err := c.file.Close(); err != nil {
+		refreshed.Close()
+		return err
+	}
+	c.file = refreshed
+	c.dirty = false
+	return nil
 }
 
+// WriteCatalogTo writes a *snapshot* of the catalog to an external path. It
+// NEVER mutates the canonical file binding (c.file) and NEVER clears the dirty
+// flag — calling WriteCatalogTo on an in-memory catalog used by a live engine
+// must not redirect future WriteCatalog() calls. If path is empty or matches
+// the canonical file, the caller almost certainly meant WriteCatalog().
 func (c *Catalog) WriteCatalogTo(path string) error {
-	return c.writeCatalogToPath(path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("WriteCatalogTo: path must be non-empty")
+	}
+	if c.file != nil && filepath.Clean(path) == filepath.Clean(c.file.Name()) {
+		return fmt.Errorf("WriteCatalogTo: refusing to overwrite canonical catalog file %q; use WriteCatalog() instead", path)
+	}
+	return writeCatalogEntries(path, c.catalogEntriesLocked())
 }
 
 func (c *Catalog) Close() error {
@@ -99,50 +136,6 @@ func (c *Catalog) Close() error {
 	err := c.file.Close()
 	c.file = nil
 	return err
-}
-
-func (c *Catalog) writeCatalogToPath(path string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.dirty {
-		if strings.TrimSpace(path) != "" && c.file != nil && filepath.Clean(path) != filepath.Clean(c.file.Name()) {
-			return writeCatalogEntries(path, c.catalogEntriesLocked())
-		}
-		return nil
-	}
-	if strings.TrimSpace(path) == "" {
-		if c.file == nil {
-			return fmt.Errorf("catalog file is closed")
-		}
-		path = c.file.Name()
-	}
-	if err := writeCatalogEntries(path, c.catalogEntriesLocked()); err != nil {
-		return err
-	}
-	if c.file != nil && filepath.Clean(path) == filepath.Clean(c.file.Name()) {
-		refreshed, err := os.OpenFile(path, os.O_RDWR, 0644)
-		if err != nil {
-			return err
-		}
-		if err := c.file.Close(); err != nil {
-			refreshed.Close()
-			return err
-		}
-		c.file = refreshed
-		c.dirty = false
-		return nil
-	}
-	if c.file != nil && filepath.Clean(path) != filepath.Clean(c.file.Name()) {
-		return nil
-	}
-	refreshed, err := os.OpenFile(path, os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	c.file = refreshed
-	c.dirty = false
-	return nil
 }
 
 func (c *Catalog) catalogEntriesLocked() []metricDiskEntry {

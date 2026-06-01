@@ -15,7 +15,7 @@ func TestRecompactDataFileRewritesSealedPartition(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
 		t.Fatalf("MkdirAll prod failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[page]\nmax_records = 1\nmax_bytes = 64\nmax_age = \"10m\"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[retention]\nretention_action = \"keep\"\n\n[page]\nmax_records = 1\nmax_bytes = 64\nmax_age = \"10m\"\n"), 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestRecompactDataFileRewritesSealedPartition(t *testing.T) {
 		t.Fatalf("expected at least 2 frames before recompact, got=%d", oldStats.Frames)
 	}
 
-	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[page]\nmax_records = 128\nmax_bytes = 4096\nmax_age = \"10m\"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), []byte("[retention]\nretention_action = \"keep\"\n\n[page]\nmax_records = 128\nmax_bytes = 4096\nmax_age = \"10m\"\n"), 0644); err != nil {
 		t.Fatalf("WriteFile manifest update failed: %v", err)
 	}
 

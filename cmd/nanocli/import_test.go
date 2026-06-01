@@ -31,6 +31,7 @@ func TestRunImportTriggersSourceConfiguredRollups(t *testing.T) {
 	sourceManifest := `[retention]
 grace = "1m"
 retention_days = 30
+retention_action = "keep"
 max_active_days = 2
 
 [wal]
@@ -226,6 +227,7 @@ databases = []
 [manifest_defaults.retention]
 grace = "5m"
 retention_days = 30
+retention_action = "keep"
 max_active_days = 2
 
 [manifest_defaults.wal]
@@ -256,6 +258,7 @@ func TestChainedRollups_1HTo1D(t *testing.T) {
 	sourceManifest := `[retention]
 grace = "1m"
 retention_days = 30
+retention_action = "keep"
 max_active_days = 2
 
 [wal]
@@ -285,6 +288,7 @@ destination_metric_prefix = "temperature"
 	h1Manifest := `[retention]
 grace = "1m"
 retention_days = 30
+retention_action = "keep"
 max_active_days = 2
 
 [wal]
@@ -314,6 +318,7 @@ destination_metric_prefix = "temperature"
 	d1Manifest := `[retention]
 grace = "1m"
 retention_days = 30
+retention_action = "keep"
 max_active_days = 2
 
 [wal]

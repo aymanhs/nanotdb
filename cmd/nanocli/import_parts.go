@@ -31,9 +31,10 @@ func runImportParts(args []string) error {
 	partitionMode := fs.String("partition-mode", "", "partition mode: day, month, or year")
 	catalogPath := fs.String("catalog", "", "optional existing catalog snapshot to validate against")
 	outDir := fs.String("out-dir", ".", "output folder for catalog.json and metric-*.dat files")
+	timestampUnit := fs.String("timestamp-unit", "ns", "unit for bare numeric timestamps: ns, us, ms, s")
 	jsonOut := fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli import parts --in <line-protocol-file> --partition-mode <day|month|year> [--catalog <catalog.json>] [--out-dir <dir>] [--json]")
+		return fmt.Errorf("usage: nanocli import parts --in <line-protocol-file> --partition-mode <day|month|year> [--catalog <catalog.json>] [--out-dir <dir>] [--timestamp-unit ns|us|ms|s] [--json]")
 	}
 	if *inputPath == "" {
 		return fmt.Errorf("--in is required")
@@ -62,6 +63,7 @@ func runImportParts(args []string) error {
 		CatalogPath:   *catalogPath,
 		OutDir:        rootOut,
 		PartitionMode: *partitionMode,
+		TimestampUnit: *timestampUnit,
 	})
 	if err != nil {
 		return err

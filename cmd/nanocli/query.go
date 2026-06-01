@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -57,9 +58,14 @@ func runQuery(args []string) error {
 	windowText := fs.String("window", "", "aggregate bucket window (for example: 5m, 1h)")
 	metricFiles := fs.String("metric-files", "config", "metric file routing mode: config, on, or off")
 	format := fs.String("format", "table", "output format: table or json")
+	timestampUnit := fs.String("timestamp-unit", "ns", "unit for bare numeric --start/--end values: ns, us, ms, s")
 	jsonOut := fs.Bool("json", false, "alias for --format json")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: nanocli query --root <root-dir> --db <database> [--metric <regex>] [--start <time|duration>] [--end <time>] [--aggregate <list> --window <duration>] [--format table|json]")
+		return fmt.Errorf("usage: nanocli query --root <root-dir> --db <database> [--metric <regex>] [--start <time|duration>] [--end <time>] [--aggregate <list> --window <duration>] [--format table|json] [--timestamp-unit ns|us|ms|s]")
+	}
+	tsUnit, err := engine.NormalizeTimestampUnit(*timestampUnit)
+	if err != nil {
+		return fmt.Errorf("invalid --timestamp-unit: %w", err)
 	}
 
 	ctx, err := resolveDBContext(*rootDir, *dbName)
@@ -76,14 +82,14 @@ func runQuery(args []string) error {
 	var useRange bool
 	if strings.TrimSpace(*startText) != "" {
 		useRange = true
-		fromTS, err = parseQueryTimeText(*startText, true)
+		fromTS, err = parseQueryTimeText(*startText, true, tsUnit)
 		if err != nil {
 			return fmt.Errorf("invalid --start: %w", err)
 		}
 	}
 	if strings.TrimSpace(*endText) != "" {
 		useRange = true
-		toTS, err = parseQueryTimeText(*endText, true)
+		toTS, err = parseQueryTimeText(*endText, true, tsUnit)
 		if err != nil {
 			return fmt.Errorf("invalid --end: %w", err)
 		}
@@ -93,7 +99,10 @@ func runQuery(args []string) error {
 			fromTS = 0
 		}
 		if strings.TrimSpace(*endText) == "" {
-			toTS = engine.Timestamp(queryTimeNow().UnixNano())
+			// Unbounded end: include future-dated samples (clock skew, scheduled
+			// backfill writes, replication lag). Defaulting to now() silently
+			// dropped them.
+			toTS = engine.Timestamp(math.MaxInt64)
 		}
 		if toTS < fromTS {
 			return fmt.Errorf("--end must be >= --start")
@@ -317,32 +326,19 @@ func loadMetricNamesFromCatalog(path string) ([]string, error) {
 	return metrics, nil
 }
 
-func parseTimeText(v string) (engine.Timestamp, error) {
+// parseTimeText parses a CLI/HTTP time value. Bare numeric values are
+// interpreted with the supplied unit (default "ns" when empty); the old
+// magnitude heuristic that silently treated ms-since-epoch as ns has been
+// removed in favour of an explicit unit.
+func parseTimeText(v string, tsUnit string) (engine.Timestamp, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, fmt.Errorf("missing time value")
 	}
-	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-		return engine.Timestamp(t.UnixNano()), nil
-	}
-	if strings.Contains(v, ".") {
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			return 0, err
-		}
-		return engine.Timestamp(f * float64(time.Second)), nil
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	if n > 1_000_000_000_000 {
-		return engine.Timestamp(n), nil
-	}
-	return engine.Timestamp(n * int64(time.Second)), nil
+	return engine.ParseTimestampWithUnit(v, tsUnit)
 }
 
-func parseQueryTimeText(v string, allowRelativeDuration bool) (engine.Timestamp, error) {
+func parseQueryTimeText(v string, allowRelativeDuration bool, tsUnit string) (engine.Timestamp, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, fmt.Errorf("missing time value")
@@ -352,7 +348,7 @@ func parseQueryTimeText(v string, allowRelativeDuration bool) (engine.Timestamp,
 			return engine.Timestamp(queryTimeNow().Add(-d).UnixNano()), nil
 		}
 	}
-	return parseTimeText(v)
+	return parseTimeText(v, tsUnit)
 }
 
 func parseExtendedDuration(v string) (time.Duration, error) {

@@ -353,7 +353,7 @@ func TestEngineManifestRetentionPartitionInvalid(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nmax_active_days = 2\npartition = \"weekly\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 16000\nmax_bytes = 127000\nmax_age = \"60s\"\n")
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nretention_action = \"keep\"\nmax_active_days = 2\npartition = \"weekly\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 16000\nmax_bytes = 127000\nmax_age = \"60s\"\n")
 	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
@@ -515,6 +515,7 @@ func TestEngineManifestRollupDefaultsApplyToPatternJobs(t *testing.T) {
 	manifest := []byte("[retention]\n" +
 		"grace = \"5m\"\n" +
 		"retention_days = 30\n" +
+		"retention_action = \"keep\"\n" +
 		"max_active_days = 2\n" +
 		"partition = \"day\"\n\n" +
 		"[wal]\n" +
@@ -575,7 +576,7 @@ func TestEngineYearPartitionWritesYearlyDatFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nmax_active_days = 30\npartition = \"year\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 2\nmax_bytes = 127000\nmax_age = \"60s\"\n")
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nretention_action = \"keep\"\nmax_active_days = 30\npartition = \"year\"\n\n[wal]\nenabled = true\nskip_before = \"1h\"\n\n[page]\nmax_records = 2\nmax_bytes = 127000\nmax_age = \"60s\"\n")
 	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
@@ -875,7 +876,7 @@ func TestEngineWALDisabledPerDatabase(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[wal]\nenabled = false\n")
+	manifest := []byte("[retention]\nretention_action = \"keep\"\n\n[wal]\nenabled = false\n")
 	if err := os.WriteFile(filepath.Join(dbDir, "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
@@ -908,7 +909,7 @@ func TestEngineManifestFrameFlushConfigApplied(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[page]\nmax_records = 3\nmax_bytes = 128\nmax_age = \"30s\"\n")
+	manifest := []byte("[retention]\nretention_action = \"keep\"\n\n[page]\nmax_records = 3\nmax_bytes = 128\nmax_age = \"30s\"\n")
 	if err := os.WriteFile(filepath.Join(dbDir, "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
@@ -963,7 +964,7 @@ func TestEngineManifestGraceDurationStringAccepted(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[retention]\ngrace = \"1s\"\n")
+	manifest := []byte("[retention]\ngrace = \"1s\"\nretention_action = \"keep\"\n")
 	if err := os.WriteFile(filepath.Join(dbDir, "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
@@ -1116,7 +1117,7 @@ func TestEngineWALResetAfterPageFlush(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[page]\nmax_records = 3\nmax_bytes = 1048576\nmax_age = \"1h\"\n")
+	manifest := []byte("[retention]\nretention_action = \"keep\"\n\n[page]\nmax_records = 3\nmax_bytes = 1048576\nmax_age = \"1h\"\n")
 	if err := os.WriteFile(filepath.Join(dbDir, "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}
@@ -1159,7 +1160,7 @@ func TestEngineWALResetAfterMidnightFlushesStalePreviousDay(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	manifest := []byte("[retention]\nmax_active_days = 2\npartition = \"day\"\n\n[page]\nmax_records = 16000\nmax_bytes = 1048576\nmax_age = \"1ms\"\n")
+	manifest := []byte("[retention]\nretention_action = \"keep\"\nmax_active_days = 2\npartition = \"day\"\n\n[page]\nmax_records = 16000\nmax_bytes = 1048576\nmax_age = \"1ms\"\n")
 	if err := os.WriteFile(filepath.Join(dbDir, "manifest.toml"), manifest, 0644); err != nil {
 		t.Fatalf("WriteFile manifest failed: %v", err)
 	}

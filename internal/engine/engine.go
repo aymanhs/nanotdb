@@ -879,6 +879,17 @@ func (e *Engine) AddLine(line string) error {
 	return e.AddSample(dbName, metric, ts, f32)
 }
 
+// validateMetricName rejects metric names that contain characters incompatible
+// with the line-protocol "<db>/<metric>" framing or with downstream file/path
+// usage. '/' in particular conflicts with the line-protocol DB delimiter and
+// breaks roundtripping through the offline LP exporter.
+func validateMetricName(name string) error {
+	if strings.ContainsRune(name, '/') {
+		return fmt.Errorf("invalid metric name %q: '/' is reserved (used as DB/metric delimiter in line protocol)", name)
+	}
+	return nil
+}
+
 // AddSample ingests one typed sample directly.
 // This is the canonical ingest API used by all write paths.
 func (e *Engine) AddSample(database, metric string, ts Timestamp, value any) error {
@@ -887,6 +898,9 @@ func (e *Engine) AddSample(database, metric string, ts Timestamp, value any) err
 	}
 	if strings.TrimSpace(metric) == "" {
 		return fmt.Errorf("metric cannot be empty")
+	}
+	if err := validateMetricName(metric); err != nil {
+		return err
 	}
 
 	e.writeMu.Lock()
@@ -2813,6 +2827,14 @@ func loadExistingDBInfo(root string, defaults DBInfo) (DBInfo, bool, error) {
 		manifest := DBManifestTOML{}
 		if _, err := toml.Decode(string(raw), &manifest); err != nil {
 			return DBInfo{}, false, fmt.Errorf("parse %s: %w", path, err)
+		}
+		// retention_action MUST be set explicitly on existing manifests. Pre-1.4
+		// manifests did not have this field; if we defaulted it silently, a
+		// retention_days>0 manifest that previously deleted partitions would
+		// silently switch to "keep" on upgrade and disk would grow unbounded.
+		// Forcing the operator to touch the manifest makes the choice explicit.
+		if strings.TrimSpace(manifest.Retention.RetentionAction) == "" {
+			return DBInfo{}, false, fmt.Errorf("invalid %s: retention.retention_action is required (expected keep|delete|archive)", path)
 		}
 		info := dbInfoFromManifest(manifest)
 		info, err = normalizeDBInfo(info, defaults)

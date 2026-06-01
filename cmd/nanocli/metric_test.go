@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -201,10 +202,10 @@ func TestRunQueryAggregateJSON_AllowsMissingEnd(t *testing.T) {
 		t.Fatalf("row count mismatch: got=%d want=4", report.RowCount)
 	}
 	if report.End == nil {
-		t.Fatal("expected report end to default to now when --end is absent")
+		t.Fatal("expected report end to default to MaxInt64 when --end is absent")
 	}
-	if *report.End != now.UnixNano() {
-		t.Fatalf("end mismatch: got=%d want=%d", *report.End, now.UnixNano())
+	if *report.End != math.MaxInt64 {
+		t.Fatalf("end mismatch: got=%d want=%d", *report.End, int64(math.MaxInt64))
 	}
 }
 
@@ -266,10 +267,10 @@ func TestRunQueryStartAcceptsRelativeDuration(t *testing.T) {
 		t.Fatalf("row count mismatch: got=%d want=2", report.RowCount)
 	}
 	if report.End == nil {
-		t.Fatal("expected report end to default to now")
+		t.Fatal("expected report end to default to MaxInt64 when --end is absent")
 	}
-	if *report.End != now.UnixNano() {
-		t.Fatalf("end mismatch: got=%d want=%d", *report.End, now.UnixNano())
+	if *report.End != math.MaxInt64 {
+		t.Fatalf("end mismatch: got=%d want=%d", *report.End, int64(math.MaxInt64))
 	}
 }
 
