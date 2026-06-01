@@ -356,18 +356,11 @@ func (e *Engine) compareDataAndMetricPartition(database, partition string, force
 	if forcedCompare != nil {
 		return forcedCompare(db.catalog, metricPath, dataSamples)
 	}
-	version, err := readMetricFrameVersion(metricPath)
+	r, err := OpenMetricFile(metricPath)
 	if err != nil {
 		return err
 	}
-	switch version {
-	case metricFileV1Version:
-		return compareMetricPartitionSamplesFromFile(db.catalog, metricPath, dataSamples)
-	case metricFileV2Version:
-		return compareMetricPartitionSamplesFromFileV2(db.catalog, metricPath, dataSamples)
-	default:
-		return fmt.Errorf("unsupported metric file version: %d", version)
-	}
+	return r.Compare(db.catalog, dataSamples)
 }
 
 func ReadMetricFileV1(path string) ([]MetricFilePage, error) {
@@ -398,65 +391,23 @@ func ReadMetricFileVersion(path string) (uint16, error) {
 	return readMetricFrameVersion(path)
 }
 
+// ReadMetricFileSummary returns a compact description of every frame in the
+// metric file at path, regardless of on-disk format version.
 func ReadMetricFileSummary(path string) (MetricFileSummary, error) {
-	version, err := readMetricFrameVersion(path)
+	r, err := OpenMetricFile(path)
 	if err != nil {
 		return MetricFileSummary{}, err
 	}
-	switch version {
-	case metricFileV1Version:
-		infos, err := ReadMetricFilePageInfosV1(path)
-		if err != nil {
-			return MetricFileSummary{}, err
-		}
-		summary := MetricFileSummary{Version: version, MetricFrames: make([]MetricFileFrameInfo, 0, len(infos))}
-		for _, info := range infos {
-			summary.MetricFrames = append(summary.MetricFrames, MetricFileFrameInfo{
-				Index:           info.Index,
-				MetricID:        info.MetricID,
-				ValueType:       info.ValueType,
-				MetricMinTS:     info.MetricMinTS,
-				MetricMaxTS:     info.MetricMaxTS,
-				PointCount:      info.PointCount,
-				UncompressedLen: info.UncompressedLen,
-				PayloadLen:      info.PayloadLen,
-			})
-		}
-		return summary, nil
-	case metricFileV2Version:
-		return readMetricFileSummaryV2(path)
-	default:
-		return MetricFileSummary{}, fmt.Errorf("unsupported metric file version: %d", version)
-	}
+	return r.Summary()
 }
 
+// WalkMetricFileFrames invokes fn for every frame in the metric file at path.
 func WalkMetricFileFrames(path string, fn func(MetricFileFrameInfo) error) error {
-	version, err := readMetricFrameVersion(path)
+	r, err := OpenMetricFile(path)
 	if err != nil {
 		return err
 	}
-	switch version {
-	case metricFileV1Version:
-		idx := 0
-		return WalkMetricFileV1(path, func(page MetricFilePage) error {
-			info := MetricFileFrameInfo{
-				Index:           idx,
-				MetricID:        page.MetricID,
-				ValueType:       page.ValueType,
-				MetricMinTS:     page.MetricMinTS,
-				MetricMaxTS:     page.MetricMaxTS,
-				PointCount:      page.PointCount,
-				UncompressedLen: page.UncompressedLen,
-				PayloadLen:      page.PayloadLen,
-			}
-			idx++
-			return fn(info)
-		})
-	case metricFileV2Version:
-		return walkMetricFileFramesV2(path, fn)
-	default:
-		return fmt.Errorf("unsupported metric file version: %d", version)
-	}
+	return r.WalkFrames(fn)
 }
 
 func WalkMetricFilePageInfosV1(path string, fn func(MetricFilePageInfoV1) error) error {
@@ -530,33 +481,19 @@ func WalkMetricFileV1(path string, fn func(MetricFilePage) error) error {
 }
 
 func collectMetricFromMetricFile(database, metric string, entry MetricEntry, path string, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {
-	version, err := readMetricFrameVersion(path)
+	r, err := OpenMetricFile(path)
 	if err != nil {
 		return err
 	}
-	switch version {
-	case metricFileV1Version:
-		return collectMetricFromMetricFileV1(database, metric, entry, path, fromTS, toTS, stride, count, fn)
-	case metricFileV2Version:
-		return collectMetricFromMetricFileV2(database, metric, entry, path, fromTS, toTS, stride, count, fn)
-	default:
-		return fmt.Errorf("unsupported metric file version: %d", version)
-	}
+	return r.CollectMetric(database, metric, entry, fromTS, toTS, stride, count, fn)
 }
 
 func collectMetricSetFromMetricFile(database string, targets map[MetricID]*rangeQueryTarget, path string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
-	version, err := readMetricFrameVersion(path)
+	r, err := OpenMetricFile(path)
 	if err != nil {
 		return err
 	}
-	switch version {
-	case metricFileV1Version:
-		return collectMetricSetFromMetricFileV1(database, targets, path, fromTS, toTS, stride, fn)
-	case metricFileV2Version:
-		return collectMetricSetFromMetricFileV2(database, targets, path, fromTS, toTS, stride, fn)
-	default:
-		return fmt.Errorf("unsupported metric file version: %d", version)
-	}
+	return r.CollectMetricSet(database, targets, fromTS, toTS, stride, fn)
 }
 
 func collectMetricFromMetricFileV1(database, metric string, entry MetricEntry, path string, fromTS, toTS Timestamp, stride int, count *int, fn SampleCallback) error {

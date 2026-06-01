@@ -125,7 +125,7 @@ func groupRollupJobs(jobs []DBManifestRollupJob) []rollupJobGroup {
 	order := make([]string, 0, len(jobs))
 
 	for _, job := range jobs {
-		interval, err := time.ParseDuration(job.Interval)
+		interval, err := ParseDuration(job.Interval)
 		if err != nil || interval <= 0 {
 			continue
 		}
@@ -599,12 +599,12 @@ func (e *Engine) insertRollupSample(dbName, metricName string, ts Timestamp, val
 
 func resolveRollupGrace(info DBInfo, job DBManifestRollupJob) (time.Duration, error) {
 	if strings.TrimSpace(job.Grace) != "" {
-		return time.ParseDuration(job.Grace)
+		return ParseDuration(job.Grace)
 	}
 	if strings.TrimSpace(info.Rollups.DefaultGrace) != "" {
-		return time.ParseDuration(info.Rollups.DefaultGrace)
+		return ParseDuration(info.Rollups.DefaultGrace)
 	}
-	return time.ParseDuration(info.Grace)
+	return ParseDuration(info.Grace)
 }
 
 func latestClosedMetricTimestamp(sourceDB *Database, sourceRT *dbRuntime, metric string) (Timestamp, bool) {

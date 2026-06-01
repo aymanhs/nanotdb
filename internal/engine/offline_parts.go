@@ -1,15 +1,24 @@
 package engine
 
+// This file implements the offline (cold) line-protocol → metric-*.dat
+// importer/exporter used by `nanocli import parts` and `nanocli export parts`.
+// It intentionally maintains a parallel ingest pipeline distinct from
+// Engine.AddSample so it can run without WAL, retention, or page accounting
+// against a target directory that is NOT a live engine root.
+//
+// Shared helpers (value-type stringification, LP value formatting/parsing)
+// now live in sample_format.go and are used by both this file and the online
+// ingest path — keeping the rules consistent without re-coupling to the live
+// engine machinery.
+
 import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -217,7 +226,7 @@ func ExportOfflinePartsToLP(w io.Writer, opts OfflineLPExportOptions) (OfflineLP
 			if strings.TrimSpace(opts.WithDB) != "" {
 				key = strings.TrimSpace(opts.WithDB) + "/" + sample.Metric
 			}
-			if _, err := fmt.Fprintf(bw, "%s %s %s\n", key, offlineLPValue(sample.ValueType, sample.Raw), FormatTimestamp(sample.TS)); err != nil {
+			if _, err := fmt.Fprintf(bw, "%s %s %s\n", key, FormatLPValue(sample.ValueType, sample.Raw), FormatTimestamp(sample.TS)); err != nil {
 				return OfflineLPExportReport{}, err
 			}
 		}
@@ -333,12 +342,11 @@ func inferOfflineMetricType(metric string, rowsByPartition map[string]map[string
 	hasFloat := false
 	for _, metricRows := range rowsByPartition {
 		for _, point := range metricRows[metric] {
-			value := strings.TrimSpace(point.Value)
-			if strings.HasSuffix(value, "i") {
+			if LPValueHasIntSuffix(point.Value) {
 				hasExplicitInt = true
 				continue
 			}
-			if strings.ContainsAny(value, ".eE") {
+			if LPValueLooksLikeFloat(point.Value) {
 				hasFloat = true
 			}
 		}
@@ -378,13 +386,13 @@ func buildMetricPagesForOfflinePartition(catalog *Catalog, metricRows map[string
 			page.Times = append(page.Times, point.TS)
 			switch entry.ValueType {
 			case Int32Sample:
-				value, err := parseOfflineIntValue(point.Value)
+				value, err := ParseLPIntValue(point.Value)
 				if err != nil {
 					return nil, 0, 0, fmt.Errorf("metric %q: %w", name, err)
 				}
 				page.Int32 = append(page.Int32, value)
 			case Float32Sample:
-				value, err := parseOfflineFloatValue(point.Value)
+				value, err := ParseLPFloatValue(point.Value)
 				if err != nil {
 					return nil, 0, 0, fmt.Errorf("metric %q: %w", name, err)
 				}
@@ -399,28 +407,6 @@ func buildMetricPagesForOfflinePartition(catalog *Catalog, metricRows map[string
 		return pages[i].MetricID < pages[j].MetricID
 	})
 	return pages, len(pages), totalPoints, nil
-}
-
-func parseOfflineIntValue(v string) (int32, error) {
-	v = strings.TrimSpace(v)
-	v = strings.TrimSuffix(v, "i")
-	n, err := strconv.ParseInt(v, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid int32 value %q", v)
-	}
-	return int32(n), nil
-}
-
-func parseOfflineFloatValue(v string) (float32, error) {
-	v = strings.TrimSpace(v)
-	if strings.HasSuffix(v, "i") {
-		return 0, fmt.Errorf("unexpected int suffix for float metric")
-	}
-	f, err := strconv.ParseFloat(v, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid float32 value %q", v)
-	}
-	return float32(f), nil
 }
 
 type offlineExportFile struct {
@@ -554,39 +540,17 @@ func collectOfflineDataFileSamples(catalog *Catalog, path string) ([]offlineExpo
 }
 
 func collectOfflineMetricFileSamples(catalog *Catalog, path string) ([]offlineExportSample, error) {
-	version, err := readMetricFrameVersion(path)
+	r, err := OpenMetricFile(path)
 	if err != nil {
 		return nil, err
 	}
-	switch version {
-	case metricFileV1Version:
-		return collectOfflineMetricFileSamplesV1(catalog, path)
-	case metricFileV2Version:
-		return collectOfflineMetricFileSamplesV2(catalog, path)
-	default:
-		return nil, fmt.Errorf("unsupported metric file version: %d", version)
-	}
-}
-
-func collectOfflineMetricFileSamplesV1(catalog *Catalog, path string) ([]offlineExportSample, error) {
 	out := make([]offlineExportSample, 0, 256)
-	err := WalkMetricFileV1(path, func(page MetricFilePage) error {
-		name, _, ok := catalog.GetMetricByID(page.MetricID)
+	err = r.WalkSamples(func(mid MetricID, valueType byte, ts Timestamp, raw uint32) error {
+		name, _, ok := catalog.GetMetricByID(mid)
 		if !ok {
-			return fmt.Errorf("metric id %d missing from catalog", page.MetricID)
+			return fmt.Errorf("metric id %d missing from catalog", mid)
 		}
-		switch page.ValueType {
-		case Int32Sample:
-			for i, ts := range page.Times {
-				out = append(out, offlineExportSample{Metric: name, ValueType: page.ValueType, Raw: uint32(page.Int32[i]), TS: ts})
-			}
-		case Float32Sample:
-			for i, ts := range page.Times {
-				out = append(out, offlineExportSample{Metric: name, ValueType: page.ValueType, Raw: math.Float32bits(page.Float32[i]), TS: ts})
-			}
-		default:
-			return fmt.Errorf("unsupported metric value type: %d", page.ValueType)
-		}
+		out = append(out, offlineExportSample{Metric: name, ValueType: valueType, Raw: raw, TS: ts})
 		return nil
 	})
 	if err != nil {
@@ -595,84 +559,3 @@ func collectOfflineMetricFileSamplesV1(catalog *Catalog, path string) ([]offline
 	return out, nil
 }
 
-func collectOfflineMetricFileSamplesV2(catalog *Catalog, path string) ([]offlineExportSample, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	hdr, err := readMetricFileV2HeaderFromFile(f)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := readMetricFileV2FooterFromFile(f, st.Size()); err != nil {
-		return nil, err
-	}
-	timeEntries, metricEntries, err := resolveMetricFileIndexesV2(f, path, st, hdr)
-	if err != nil {
-		return nil, err
-	}
-	timeByID := make(map[uint16]metricTimeFrameIndexEntryV2, len(timeEntries))
-	for _, entry := range timeEntries {
-		timeByID[entry.TimeFrameID] = entry
-	}
-	localTimes := make(map[uint16][]Timestamp, len(timeEntries))
-	identity := metricTimeFrameCacheIdentityV2(path, st)
-	out := make([]offlineExportSample, 0, 256)
-	for _, info := range metricEntries {
-		name, _, ok := catalog.GetMetricByID(info.MetricID)
-		if !ok {
-			return nil, fmt.Errorf("metric id %d missing from catalog", info.MetricID)
-		}
-		timeInfo, ok := timeByID[info.TimeFrameID]
-		if !ok {
-			return nil, fmt.Errorf("metric %d references missing time frame %d", info.MetricID, info.TimeFrameID)
-		}
-		times, err := resolveMetricTimeFrameV2(f, identity, localTimes, timeInfo)
-		if err != nil {
-			return nil, err
-		}
-		frame, err := readOneMetricMetricFrameV2(f, st.Size(), info)
-		if err != nil {
-			return nil, err
-		}
-		pointCount, err := metricValuePointCountFromDecodedLen(frame.ValueType, frame.DecodedLen)
-		if err != nil {
-			return nil, err
-		}
-		start := int(info.TimeOffset)
-		end := start + int(pointCount)
-		if start < 0 || end > len(times) {
-			return nil, fmt.Errorf("metric %d time slice out of bounds", info.MetricID)
-		}
-		frameTimes := times[start:end]
-		switch frame.ValueType {
-		case Int32Sample:
-			for i, ts := range frameTimes {
-				out = append(out, offlineExportSample{Metric: name, ValueType: frame.ValueType, Raw: uint32(frame.Int32[i]), TS: ts})
-			}
-		case Float32Sample:
-			for i, ts := range frameTimes {
-				out = append(out, offlineExportSample{Metric: name, ValueType: frame.ValueType, Raw: math.Float32bits(frame.Float32[i]), TS: ts})
-			}
-		default:
-			return nil, fmt.Errorf("unsupported metric value type: %d", frame.ValueType)
-		}
-	}
-	return out, nil
-}
-
-func offlineLPValue(valueType byte, raw uint32) string {
-	switch valueType {
-	case Int32Sample:
-		return strconv.FormatInt(int64(int32(raw)), 10) + "i"
-	case Float32Sample:
-		return strconv.FormatFloat(float64(math.Float32frombits(raw)), 'f', -1, 32)
-	default:
-		return "0"
-	}
-}

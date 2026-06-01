@@ -445,7 +445,7 @@ func handleQueryRange(eng *engine.Engine) http.HandlerFunc {
 				writeVMError(w, http.StatusBadRequest, "bad_data", "aggregate queries require both aggregate and window")
 				return
 			}
-			window, err := time.ParseDuration(windowText)
+			window, err := engine.ParseDuration(windowText)
 			if err != nil || window <= 0 {
 				writeVMError(w, http.StatusBadRequest, "bad_data", fmt.Sprintf("invalid window: %v", err))
 				return
@@ -810,7 +810,7 @@ func parseStepParam(v string) (engine.Timestamp, error) {
 	if v == "" {
 		return 0, nil
 	}
-	if d, err := time.ParseDuration(v); err == nil {
+	if d, err := engine.ParseDuration(v); err == nil {
 		if d < 0 {
 			return 0, fmt.Errorf("step must be >= 0")
 		}
@@ -826,22 +826,10 @@ func parseStepParam(v string) (engine.Timestamp, error) {
 	return engine.Timestamp(f * float64(time.Second)), nil
 }
 
-func sampleValueString(s engine.Sample) string {
-	if s.ValueType == engine.Int32Sample {
-		return strconv.FormatInt(int64(s.Int32), 10)
-	}
-	return strconv.FormatFloat(float64(s.Float32), 'f', -1, 32)
-}
-
-func metricTypeName(vt byte) string {
-	if vt == engine.Int32Sample {
-		return "int32"
-	}
-	if vt == engine.Float32Sample {
-		return "float32"
-	}
-	return "unknown"
-}
+// sampleValueString / metricTypeName delegate to engine.FormatSampleValue and
+// engine.ValueTypeName — the canonical helpers shared across the codebase.
+func sampleValueString(s engine.Sample) string { return engine.FormatSampleValue(s) }
+func metricTypeName(vt byte) string            { return engine.ValueTypeName(vt) }
 
 func toUnixSeconds(ts engine.Timestamp) float64 {
 	return float64(ts) / float64(time.Second)

@@ -106,13 +106,6 @@ func buildInspectCatalogReport(ctx dbContext) (inspectCatalogListReport, error) 
 	return report, nil
 }
 
-func inspectCatalogValueType(valueType byte) string {
-	switch valueType {
-	case engine.Int32Sample:
-		return "int32"
-	case engine.Float32Sample:
-		return "float32"
-	default:
-		return fmt.Sprintf("unknown(%d)", valueType)
-	}
-}
+// inspectCatalogValueType is kept as a one-line shim; engine.ValueTypeName is
+// the canonical implementation used by every other consumer.
+func inspectCatalogValueType(valueType byte) string { return engine.ValueTypeName(valueType) }

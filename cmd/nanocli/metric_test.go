@@ -364,7 +364,9 @@ func TestParseExtendedDurationRejectsUnknownUnits(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "unknown duration unit") {
+	// engine.ParseDuration delegates to time.ParseDuration for non-d/w units,
+	// so the error message uses the stdlib phrasing.
+	if !strings.Contains(err.Error(), "unknown unit") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

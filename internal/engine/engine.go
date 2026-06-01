@@ -420,7 +420,7 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	if strings.TrimSpace(cfg.Stats.Interval) == "" {
 		cfg.Stats.Interval = def.Stats.Interval
 	}
-	statsInterval, err := time.ParseDuration(cfg.Stats.Interval)
+	statsInterval, err := ParseDuration(cfg.Stats.Interval)
 	if err != nil {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid stats_interval: %w", err)
 	}
@@ -1376,82 +1376,19 @@ type rangeQueryTarget struct {
 	count int
 }
 
+// queryRange is the n=1 special case of queryRangeMany. Kept as a thin wrapper
+// for callers that already have a single metric name; behaviour is identical.
 func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
-	if toTS < fromTS {
-		return fmt.Errorf("invalid range: toTS < fromTS")
-	}
-	if stride < 1 {
-		stride = 1
-	}
-
-	db, rt, err := e.getOrCreateDB(database)
-	if err != nil {
-		return err
-	}
-
-	entry, ok := db.catalog.GetMetricEntry(metric)
-	if !ok {
-		return nil
-	}
-
-	count := 0
-	lastPath := ""
-	for d := dayStartUTC(fromTS); !d.After(dayStartUTC(toTS)); d = d.Add(24 * time.Hour) {
-		part := partitionKey(rt, Timestamp(d.UnixNano()))
-		path := metricRawPartitionPath(db.RootDataDir, part)
-		if path == lastPath {
-			continue
-		}
-		lastPath = path
-		if e.PreferMetricFiles {
-			metricPath := filepath.Join(db.RootDataDir, "metric-"+part+".dat")
-			if err := collectMetricFromMetricFile(database, metric, entry, metricPath, fromTS, toTS, stride, &count, fn); err == nil {
-				// metric frames processed, skip raw file to avoid double counting
-			} else if os.IsNotExist(err) {
-				rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
-				if rawErr == nil {
-					if err := collectMetricFromFile(database, metric, entry, rawPath, fromTS, toTS, stride, &count, fn); err == nil {
-						// persisted raw frames processed
-					} else if os.IsNotExist(err) {
-						// no persisted file for this partition
-					} else {
-						return fmt.Errorf("read %s: %w", rawPath, err)
-					}
-				} else if os.IsNotExist(rawErr) {
-					// no persisted file for this partition
-				} else {
-					return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
-				}
-			} else {
-				return fmt.Errorf("read %s: %w", metricPath, err)
-			}
-		} else {
-			rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
-			if rawErr == nil {
-				if err := collectMetricFromFile(database, metric, entry, rawPath, fromTS, toTS, stride, &count, fn); err == nil {
-					// persisted raw frames processed
-				} else if os.IsNotExist(err) {
-					// no persisted file for this partition
-				} else {
-					return fmt.Errorf("read %s: %w", rawPath, err)
-				}
-			} else if os.IsNotExist(rawErr) {
-				// no persisted file for this partition
-			} else {
-				return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
-			}
-		}
-
-		if p := e.snapshotOpenPage(rt, part, writeLockHeld); p != nil {
-			if err := collectMetricFromPage(database, metric, entry, p, fromTS, toTS, stride, &count, fn); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+	return e.queryRangeMany(database, []string{metric}, fromTS, toTS, stride, fn, writeLockHeld)
 }
 
+// queryRangeMany scans samples for one or more metrics within a time range.
+// For each partition it:
+//   1. Tries the columnar metric-*.dat file first (if PreferMetricFiles).
+//   2. Falls back to the raw data-*.dat file when the metric file is absent.
+//   3. Layers in the in-memory open page for the current partition (if any).
+//
+// queryRange is the n=1 alias; both share this body.
 func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
 	if toTS < fromTS {
 		return fmt.Errorf("invalid range: toTS < fromTS")
@@ -1485,43 +1422,9 @@ func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS 
 			continue
 		}
 		lastPath = path
-		if e.PreferMetricFiles {
-			metricPath := filepath.Join(db.RootDataDir, "metric-"+part+".dat")
-			if err := collectMetricSetFromMetricFile(database, targets, metricPath, fromTS, toTS, stride, fn); err == nil {
-				// metric frames processed, skip raw file to avoid double counting
-			} else if os.IsNotExist(err) {
-				rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
-				if rawErr == nil {
-					if err := collectMetricSetFromFile(database, targets, rawPath, fromTS, toTS, stride, fn); err == nil {
-						// persisted raw frames processed
-					} else if os.IsNotExist(err) {
-						// no persisted file for this partition
-					} else {
-						return fmt.Errorf("read %s: %w", rawPath, err)
-					}
-				} else if os.IsNotExist(rawErr) {
-					// no persisted file for this partition
-				} else {
-					return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
-				}
-			} else {
-				return fmt.Errorf("read %s: %w", metricPath, err)
-			}
-		} else {
-			rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
-			if rawErr == nil {
-				if err := collectMetricSetFromFile(database, targets, rawPath, fromTS, toTS, stride, fn); err == nil {
-					// persisted raw frames processed
-				} else if os.IsNotExist(err) {
-					// no persisted file for this partition
-				} else {
-					return fmt.Errorf("read %s: %w", rawPath, err)
-				}
-			} else if os.IsNotExist(rawErr) {
-				// no persisted file for this partition
-			} else {
-				return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
-			}
+
+		if err := e.scanPersistedPartition(db, database, part, targets, fromTS, toTS, stride, fn); err != nil {
+			return err
 		}
 
 		if p := e.snapshotOpenPage(rt, part, writeLockHeld); p != nil {
@@ -1531,6 +1434,39 @@ func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS 
 		}
 	}
 
+	return nil
+}
+
+// scanPersistedPartition reads samples for the given targets from on-disk
+// state for one partition: the columnar metric file when configured/present,
+// else the raw data file. A missing file is not an error — the open page may
+// still hold samples for this partition.
+func (e *Engine) scanPersistedPartition(db *Database, database, part string, targets map[MetricID]*rangeQueryTarget, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	if e.PreferMetricFiles {
+		metricPath := filepath.Join(db.RootDataDir, "metric-"+part+".dat")
+		err := collectMetricSetFromMetricFile(database, targets, metricPath, fromTS, toTS, stride, fn)
+		if err == nil {
+			// metric frames processed; skip raw file to avoid double counting
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read %s: %w", metricPath, err)
+		}
+		// metric file absent → fall through to raw
+	}
+	rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, part)
+	if rawErr != nil {
+		if os.IsNotExist(rawErr) {
+			return nil
+		}
+		return fmt.Errorf("resolve raw partition %s: %w", part, rawErr)
+	}
+	if err := collectMetricSetFromFile(database, targets, rawPath, fromTS, toTS, stride, fn); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", rawPath, err)
+	}
 	return nil
 }
 
@@ -1922,11 +1858,11 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 	if err != nil {
 		return nil, nil, err
 	}
-	walSkipBefore, err := time.ParseDuration(info.WALSkipBefore)
+	walSkipBefore, err := ParseDuration(info.WALSkipBefore)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid wal_skip_before for database %q: %w", database, err)
 	}
-	pageMaxAge, err := time.ParseDuration(info.PageMaxAge)
+	pageMaxAge, err := ParseDuration(info.PageMaxAge)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid page_max_age for database %q: %w", database, err)
 	}
@@ -2629,13 +2565,13 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	if len(info.Rollups.GlobalExcludePatterns) == 0 {
 		info.Rollups.GlobalExcludePatterns = append([]string(nil), def.Rollups.GlobalExcludePatterns...)
 	}
-	if _, err := time.ParseDuration(info.Grace); err != nil {
+	if _, err := ParseDuration(info.Grace); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid grace: %w", err)
 	}
-	if _, err := time.ParseDuration(info.WALSkipBefore); err != nil {
+	if _, err := ParseDuration(info.WALSkipBefore); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid wal_skip_before: %w", err)
 	}
-	if _, err := time.ParseDuration(info.PageMaxAge); err != nil {
+	if _, err := ParseDuration(info.PageMaxAge); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid page_max_age: %w", err)
 	}
 	info.Partition = strings.ToLower(strings.TrimSpace(info.Partition))
@@ -2660,12 +2596,12 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 		return info, nil
 	}
 	if strings.TrimSpace(info.Rollups.DefaultGrace) != "" {
-		if _, err := time.ParseDuration(info.Rollups.DefaultGrace); err != nil {
+		if _, err := ParseDuration(info.Rollups.DefaultGrace); err != nil {
 			return DBInfo{}, fmt.Errorf("invalid rollups.default_grace: %w", err)
 		}
 	}
 	if strings.TrimSpace(info.Rollups.DefaultInterval) != "" {
-		if _, err := time.ParseDuration(info.Rollups.DefaultInterval); err != nil {
+		if _, err := ParseDuration(info.Rollups.DefaultInterval); err != nil {
 			return DBInfo{}, fmt.Errorf("invalid rollups.default_interval: %w", err)
 		}
 	}
@@ -2719,7 +2655,7 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 		if job.Interval == "" {
 			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].interval: empty", idx)
 		}
-		if _, err := time.ParseDuration(job.Interval); err != nil {
+		if _, err := ParseDuration(job.Interval); err != nil {
 			return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].interval: %w", idx, err)
 		}
 		if job.DestinationDB == "" {
@@ -2734,7 +2670,7 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 			}
 		}
 		if job.Grace != "" {
-			if _, err := time.ParseDuration(job.Grace); err != nil {
+			if _, err := ParseDuration(job.Grace); err != nil {
 				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].grace: %w", idx, err)
 			}
 		}
@@ -2898,32 +2834,11 @@ func parseLineProtocol(line string) (database, metric string, ts Timestamp, valu
 		return
 	}
 
-	valText := fields[1]
-	if strings.HasSuffix(valText, "i") {
-		intText := strings.TrimSuffix(valText, "i")
-		if intText == "" {
-			err = fmt.Errorf("invalid int value %q", valText)
-			return
-		}
-		parsed, perr := strconv.ParseInt(intText, 10, 64)
-		if perr != nil {
-			err = fmt.Errorf("invalid int value %q", valText)
-			return
-		}
-		if parsed < math.MinInt32 || parsed > math.MaxInt32 {
-			err = fmt.Errorf("int value out of int32 range %q", valText)
-			return
-		}
-		valueType = Int32Sample
-		i32 = int32(parsed)
-	} else {
-		parsed, perr := strconv.ParseFloat(valText, 32)
-		if perr != nil {
-			err = fmt.Errorf("invalid numeric value %q", valText)
-			return
-		}
-		valueType = Float32Sample
-		f32 = float32(parsed)
+	// Delegate to the shared LP value parser (sample_format.go). Keeps the
+	// online and offline ingest paths agreed on what a valid sample is.
+	valueType, i32, f32, err = ParseLPValue(fields[1])
+	if err != nil {
+		return
 	}
 
 	if len(fields) > 2 {

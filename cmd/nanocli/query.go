@@ -122,7 +122,7 @@ func runQuery(args []string) error {
 	var aggregateNames []string
 	var aggregateWindow time.Duration
 	if aggregateMode {
-		aggregateWindow, err = time.ParseDuration(strings.TrimSpace(*windowText))
+		aggregateWindow, err = engine.ParseDuration(strings.TrimSpace(*windowText))
 		if err != nil || aggregateWindow <= 0 {
 			return fmt.Errorf("invalid --window: %w", err)
 		}
@@ -351,88 +351,8 @@ func parseQueryTimeText(v string, allowRelativeDuration bool, tsUnit string) (en
 	return parseTimeText(v, tsUnit)
 }
 
+// parseExtendedDuration delegates to engine.ParseDuration, which accepts the
+// same units as time.ParseDuration plus `d` (days) and `w` (weeks).
 func parseExtendedDuration(v string) (time.Duration, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0, fmt.Errorf("missing duration")
-	}
-	if d, err := time.ParseDuration(v); err == nil {
-		return d, nil
-	}
-
-	negative := false
-	if strings.HasPrefix(v, "+") {
-		v = v[1:]
-	} else if strings.HasPrefix(v, "-") {
-		negative = true
-		v = v[1:]
-	}
-	if v == "" {
-		return 0, fmt.Errorf("invalid duration")
-	}
-
-	units := map[string]time.Duration{
-		"ns": time.Nanosecond,
-		"us": time.Microsecond,
-		"µs": time.Microsecond,
-		"μs": time.Microsecond,
-		"ms": time.Millisecond,
-		"s":  time.Second,
-		"m":  time.Minute,
-		"h":  time.Hour,
-		"d":  24 * time.Hour,
-		"w":  7 * 24 * time.Hour,
-	}
-
-	total := 0.0
-	for len(v) > 0 {
-		numEnd := 0
-		dotSeen := false
-		for numEnd < len(v) {
-			ch := v[numEnd]
-			if ch >= '0' && ch <= '9' {
-				numEnd++
-				continue
-			}
-			if ch == '.' && !dotSeen {
-				dotSeen = true
-				numEnd++
-				continue
-			}
-			break
-		}
-		if numEnd == 0 {
-			return 0, fmt.Errorf("invalid duration")
-		}
-		numText := v[:numEnd]
-		amount, err := strconv.ParseFloat(numText, 64)
-		if err != nil {
-			return 0, err
-		}
-		v = v[numEnd:]
-		unitEnd := 0
-		for unitEnd < len(v) {
-			ch := v[unitEnd]
-			if ch >= 'a' && ch <= 'z' {
-				unitEnd++
-				continue
-			}
-			break
-		}
-		if unitEnd == 0 {
-			return 0, fmt.Errorf("invalid duration")
-		}
-		unitText := v[:unitEnd]
-		unitDur, ok := units[unitText]
-		if !ok {
-			return 0, fmt.Errorf("unknown duration unit %q", unitText)
-		}
-		total += amount * float64(unitDur)
-		v = v[unitEnd:]
-	}
-
-	if negative {
-		total = -total
-	}
-	return time.Duration(total), nil
+	return engine.ParseDuration(v)
 }
