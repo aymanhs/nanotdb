@@ -631,7 +631,8 @@ func WriteMetricFileV2(path string, partitionKind uint8, codec BlockCompressionC
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	return nil
+	// Directory fsync (#10): see comment in catalog.go writeCatalogEntries.
+	return syncParentDir(path)
 }
 
 func planMetricFramesV2(pages []MetricFilePageInput) ([]metricTimeFramePlanV2, []metricMetricFramePlanV2, error) {
@@ -1177,6 +1178,12 @@ func readOneMetricTimeFrameV2(f *os.File, info metricTimeFrameIndexEntryV2) ([]T
 	if hdr.StartTS != info.StartTS || hdr.EndTS != info.EndTS {
 		return nil, fmt.Errorf("time frame timestamp bounds mismatch")
 	}
+	if hdr.PayloadLen > MaxOnDiskFramePayloadBytes {
+		return nil, fmt.Errorf("time frame payload length %d exceeds cap %d (corrupt or hostile input)", hdr.PayloadLen, MaxOnDiskFramePayloadBytes)
+	}
+	if hdr.DecodedLen > MaxOnDiskFramePayloadBytes {
+		return nil, fmt.Errorf("time frame decoded length %d exceeds cap %d (corrupt or hostile input)", hdr.DecodedLen, MaxOnDiskFramePayloadBytes)
+	}
 	codec, err := BlockCompressionCodecByID(hdr.CodecID)
 	if err != nil {
 		return nil, err
@@ -1247,6 +1254,12 @@ func readOneMetricMetricFrameV2(f *os.File, fileSize int64, info metricMetricFra
 	codec, err := BlockCompressionCodecByID(hdr.CodecID)
 	if err != nil {
 		return metricMetricFrameV2{}, err
+	}
+	if hdr.PayloadLen > MaxOnDiskFramePayloadBytes {
+		return metricMetricFrameV2{}, fmt.Errorf("metric frame payload length %d exceeds cap %d (corrupt or hostile input)", hdr.PayloadLen, MaxOnDiskFramePayloadBytes)
+	}
+	if hdr.DecodedLen > MaxOnDiskFramePayloadBytes {
+		return metricMetricFrameV2{}, fmt.Errorf("metric frame decoded length %d exceeds cap %d (corrupt or hostile input)", hdr.DecodedLen, MaxOnDiskFramePayloadBytes)
 	}
 	payloadOffset := int64(info.FrameOffset) + metricFileV2FrameHeaderLen
 	payloadEnd := payloadOffset + int64(hdr.PayloadLen) + 4
@@ -1381,7 +1394,11 @@ func collectMetricFromMetricFileV2(database, metric string, entry MetricEntry, p
 		if err != nil {
 			return err
 		}
-		endOffset := int(info.TimeOffset + pointCount)
+		// Compute in int to avoid uint32 wrap (#17). The previous form
+		// `int(info.TimeOffset + pointCount)` silently truncated when the
+		// uint32 sum exceeded 2^32-1, producing a small endOffset that
+		// passed the bounds check and returned a zero/partial slice.
+		endOffset := int(info.TimeOffset) + int(pointCount)
 		if endOffset > len(times) {
 			return fmt.Errorf("metric time slice out of bounds: offset=%d points=%d len=%d", info.TimeOffset, pointCount, len(times))
 		}
@@ -1448,7 +1465,11 @@ func collectMetricSetFromMetricFileV2(database string, targets map[MetricID]*ran
 		if err != nil {
 			return err
 		}
-		endOffset := int(info.TimeOffset + pointCount)
+		// Compute in int to avoid uint32 wrap (#17). The previous form
+		// `int(info.TimeOffset + pointCount)` silently truncated when the
+		// uint32 sum exceeded 2^32-1, producing a small endOffset that
+		// passed the bounds check and returned a zero/partial slice.
+		endOffset := int(info.TimeOffset) + int(pointCount)
 		if endOffset > len(times) {
 			return fmt.Errorf("metric time slice out of bounds: offset=%d points=%d len=%d", info.TimeOffset, pointCount, len(times))
 		}
@@ -1724,7 +1745,11 @@ func walkMetricFileFramesV2(path string, fn func(MetricFileFrameInfo) error) err
 		if err != nil {
 			return err
 		}
-		endOffset := int(info.TimeOffset + pointCount)
+		// Compute in int to avoid uint32 wrap (#17). The previous form
+		// `int(info.TimeOffset + pointCount)` silently truncated when the
+		// uint32 sum exceeded 2^32-1, producing a small endOffset that
+		// passed the bounds check and returned a zero/partial slice.
+		endOffset := int(info.TimeOffset) + int(pointCount)
 		if endOffset > len(times) {
 			return fmt.Errorf("metric time slice out of bounds: offset=%d points=%d len=%d", info.TimeOffset, pointCount, len(times))
 		}

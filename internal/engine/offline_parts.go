@@ -114,6 +114,9 @@ func ImportOfflineLPToMetricParts(r io.Reader, opts OfflineLPImportOptions) (Off
 	skippedLines := 0
 
 	s := bufio.NewScanner(r)
+	// 1 MiB line cap matches engine.ImportFile — longer LP lines surface as
+	// s.Err() rather than silently truncating the import.
+	s.Buffer(make([]byte, 64*1024), 1024*1024)
 	lineNo := 0
 	for s.Scan() {
 		lineNo++
@@ -193,6 +196,11 @@ func ExportOfflinePartsToLP(w io.Writer, opts OfflineLPExportOptions) (OfflineLP
 	catalogPath := strings.TrimSpace(opts.CatalogPath)
 	if catalogPath == "" {
 		return OfflineLPExportReport{}, fmt.Errorf("catalog path is required")
+	}
+	if withDB := strings.TrimSpace(opts.WithDB); withDB != "" {
+		if err := ValidateDatabaseName(withDB); err != nil {
+			return OfflineLPExportReport{}, fmt.Errorf("invalid --with-db: %w", err)
+		}
 	}
 	if _, err := os.Stat(catalogPath); err != nil {
 		return OfflineLPExportReport{}, err

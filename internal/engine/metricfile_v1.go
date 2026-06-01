@@ -238,7 +238,8 @@ func WriteMetricFileV1(path string, partitionKind uint8, codec BlockCompressionC
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	return nil
+	// Directory fsync (#10): see comment in catalog.go writeCatalogEntries.
+	return syncParentDir(path)
 }
 
 // BuildMetricFileV1 creates metric-<partition>.dat from data-<partition>.dat for one database.
@@ -713,6 +714,12 @@ func readOneMetricPageV1(f *os.File, fileSize int64, pi metricFileV1PageInfo) (M
 	}
 	if payloadLen != pi.PayloadLen || uncompressedLen != pi.UncompressedLen || pointCount != pi.PointCount {
 		return MetricFilePage{}, fmt.Errorf("page_info/frame length mismatch")
+	}
+	if payloadLen > MaxOnDiskFramePayloadBytes {
+		return MetricFilePage{}, fmt.Errorf("v1 frame payload length %d exceeds cap %d (corrupt or hostile input)", payloadLen, MaxOnDiskFramePayloadBytes)
+	}
+	if uncompressedLen > MaxOnDiskFramePayloadBytes {
+		return MetricFilePage{}, fmt.Errorf("v1 frame decoded length %d exceeds cap %d (corrupt or hostile input)", uncompressedLen, MaxOnDiskFramePayloadBytes)
 	}
 
 	payloadOffset := int64(pi.PageOffset) + metricFileV1FrameHeaderLen

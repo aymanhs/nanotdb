@@ -16,7 +16,7 @@ type Catalog struct {
 	mu       sync.RWMutex
 	file     *os.File
 	metrics  map[string]MetricEntry
-	idToName map[int16]string // reverse index for O(1) GetMetricByID
+	idToName map[MetricID]string // reverse index for O(1) GetMetricByID
 	dirty    bool
 }
 
@@ -77,7 +77,7 @@ func GetMetricID[T SampleType](c *Catalog, name string) (MetricID, error) {
 	}
 	newID := MetricID(len(c.metrics) + 1)
 	c.metrics[name] = MetricEntry{MetricID: newID, ValueType: want}
-	c.idToName[int16(newID)] = name
+	c.idToName[newID] = name
 	c.dirty = true
 	return newID, nil
 }
@@ -171,20 +171,27 @@ func writeCatalogEntries(path string, entries []metricDiskEntry) error {
 
 	if _, err := tmp.Write(payload); err != nil {
 		tmp.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
-	return nil
+	// Directory fsync (#10): without it, on ext3, ext4 with `data=writeback`,
+	// or XFS edge cases a crash immediately after rename can leave the new
+	// directory entry unjournaled and the catalog unreachable.
+	return syncParentDir(path)
 }
 
 func (c *Catalog) IsDirty() bool {
@@ -246,7 +253,7 @@ func (c *Catalog) EnsureMetricEntry(name string, mid MetricID, valueType byte) e
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("metric name cannot be empty")
 	}
-	if existingName, ok := c.idToName[int16(mid)]; ok && existingName != name {
+	if existingName, ok := c.idToName[mid]; ok && existingName != name {
 		return fmt.Errorf("metric id %d already assigned to %q", mid, existingName)
 	}
 	if existing, ok := c.metrics[name]; ok {
@@ -256,11 +263,11 @@ func (c *Catalog) EnsureMetricEntry(name string, mid MetricID, valueType byte) e
 		if existing.ValueType != valueType {
 			return fmt.Errorf("metric %q type mismatch: got=%d want=%d", name, existing.ValueType, valueType)
 		}
-		c.idToName[int16(mid)] = name
+		c.idToName[mid] = name
 		return nil
 	}
 	c.metrics[name] = MetricEntry{MetricID: mid, ValueType: valueType}
-	c.idToName[int16(mid)] = name
+	c.idToName[mid] = name
 	c.dirty = true
 	return nil
 }
@@ -269,7 +276,7 @@ func (c *Catalog) GetMetricByID(mid MetricID) (string, MetricEntry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	name, ok := c.idToName[int16(mid)]
+	name, ok := c.idToName[mid]
 	if !ok {
 		return "", MetricEntry{}, false
 	}
@@ -284,7 +291,7 @@ func (c *Catalog) UpdateLastByMetricID(mid MetricID, ts Timestamp, raw []byte) e
 	if len(raw) != 4 {
 		return fmt.Errorf("invalid sample width: got=%d want=4", len(raw))
 	}
-	name, ok := c.idToName[int16(mid)]
+	name, ok := c.idToName[mid]
 	if !ok {
 		return fmt.Errorf("metric %d not found", mid)
 	}
@@ -311,7 +318,7 @@ func LoadCatalog(filename string) (*Catalog, error) {
 	c := &Catalog{
 		file:     file,
 		metrics:  make(map[string]MetricEntry),
-		idToName: make(map[int16]string),
+		idToName: make(map[MetricID]string),
 		dirty:    false,
 	}
 
@@ -335,9 +342,33 @@ func LoadCatalog(filename string) (*Catalog, error) {
 		return nil, err
 	}
 
+	// Validate every entry on load (#14). A corrupt or manually-edited
+	// catalog.json with id=0, duplicate ids, duplicate names, or an invalid
+	// value_type byte would otherwise be silently accepted and cause
+	// hard-to-diagnose failures at query time.
 	for _, m := range onDisk.Metrics {
+		if m.Name == "" {
+			file.Close()
+			return nil, fmt.Errorf("catalog %q: entry with empty name", filename)
+		}
+		if m.MetricID == 0 {
+			file.Close()
+			return nil, fmt.Errorf("catalog %q: invalid metric id 0 for %q (ids must be >= 1)", filename, m.Name)
+		}
+		if m.ValueType != Int32Sample && m.ValueType != Float32Sample {
+			file.Close()
+			return nil, fmt.Errorf("catalog %q: invalid value_type %d for %q", filename, m.ValueType, m.Name)
+		}
+		if _, dup := c.metrics[m.Name]; dup {
+			file.Close()
+			return nil, fmt.Errorf("catalog %q: duplicate metric name %q", filename, m.Name)
+		}
+		if existing, dup := c.idToName[m.MetricID]; dup {
+			file.Close()
+			return nil, fmt.Errorf("catalog %q: duplicate metric id %d (used by %q and %q)", filename, m.MetricID, existing, m.Name)
+		}
 		c.metrics[m.Name] = MetricEntry{MetricID: m.MetricID, ValueType: m.ValueType}
-		c.idToName[int16(m.MetricID)] = m.Name
+		c.idToName[m.MetricID] = m.Name
 	}
 
 	return c, nil

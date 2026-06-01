@@ -19,6 +19,19 @@ const (
 	PageMaxBytes   = 256 * 1024       // 256 KB estimated uncompressed payload
 	PageMaxAge     = 10 * time.Second // max age before forced flush
 	HeaderSize     = 18               // StartTime(8) + EndTime(8) + NumRecords(2)
+
+	// MaxOnDiskFramePayloadBytes caps the number of bytes any single on-disk
+	// frame payload (compressed page in data-*.dat, or compressed
+	// time/metric frame in metric-*.dat) may declare in its length field
+	// before we allocate the receiving buffer.
+	//
+	// This is a defence against compression-bomb / corruption scenarios:
+	// a 1-bit flip in a length varint can turn 0x80 into a 4 GB allocation
+	// that OOM-kills the process before the CRC check runs. The cap is set
+	// generously above any real frame (the largest legitimate frame is
+	// bounded by PageMaxBytes plus codec metadata) so legitimate writers are
+	// never affected; only crafted/corrupt input triggers the rejection.
+	MaxOnDiskFramePayloadBytes = 128 * 1024 * 1024 // 128 MiB
 )
 
 var pageEncodeBufferPool = sync.Pool{
@@ -246,6 +259,9 @@ func (p *Page) DecodeFrom(r *bytes.Reader) error {
 	compressedLen, err := binary.ReadUvarint(r)
 	if err != nil {
 		return err
+	}
+	if compressedLen > MaxOnDiskFramePayloadBytes {
+		return fmt.Errorf("page frame payload length %d exceeds cap %d (corrupt or hostile input)", compressedLen, MaxOnDiskFramePayloadBytes)
 	}
 
 	compressed := make([]byte, compressedLen)

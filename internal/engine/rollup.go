@@ -52,19 +52,26 @@ type rollupBackfillPlan struct {
 }
 
 // TriggerRollupsForSource computes rollups for one source database using jobs
-// configured in the source database manifest.
+// configured in the source database manifest. Acquires writeMu internally; do
+// not call while writeMu is already held — see triggerRollupsForSourceLocked.
 func (e *Engine) TriggerRollupsForSource(sourceDBName string) {
-	e.triggerRollupsForSource(sourceDBName, false)
-}
-
-func (e *Engine) triggerRollupsForSource(sourceDBName string, writeLockHeld bool) {
 	sourceDBName = strings.TrimSpace(sourceDBName)
 	if sourceDBName == "" {
 		return
 	}
-	if !writeLockHeld {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+	e.triggerRollupsForSourceLocked(sourceDBName)
+}
+
+// triggerRollupsForSourceLocked is the writeMu-already-held variant invoked
+// from the seal/flush path inside addParsedSample. Replaces the prior
+// `writeLockHeld bool` flag-parameter (review #6) so the locking protocol is
+// expressed in the function name rather than as an opaque positional bool.
+func (e *Engine) triggerRollupsForSourceLocked(sourceDBName string) {
+	sourceDBName = strings.TrimSpace(sourceDBName)
+	if sourceDBName == "" {
+		return
 	}
 	sourceDB, sourceRT, err := e.getOrCreateDB(sourceDBName)
 	if err != nil {
@@ -84,6 +91,21 @@ func (e *Engine) triggerRollupsForSource(sourceDBName string, writeLockHeld bool
 		return
 	}
 	updated := e.processRollupJobGroups(sourceDB, sourceRT, jobs, checkpoints)
+
+	// Durability ordering (#9): the rolled-up samples sit in destination DB
+	// open pages with WAL disabled. Persist them to data-*.dat BEFORE
+	// declaring intervals complete in the checkpoint file — otherwise a
+	// crash between checkpoint-fsync and the next destination flush would
+	// leave the checkpoint declaring "interval done" with nothing on disk,
+	// and the interval would never be reprocessed.
+	if len(updated) > 0 {
+		destinations := collectRollupDestinations(jobs)
+		if err := e.flushDatabasesLocked(destinations); err != nil {
+			e.logInfo("rollup destination flush failed; deferring checkpoint", "source_database", sourceDBName, "error", err)
+			return
+		}
+	}
+
 	for jobID, completed := range updated {
 		if completed <= checkpoints[jobID] {
 			continue
@@ -94,6 +116,25 @@ func (e *Engine) triggerRollupsForSource(sourceDBName string, writeLockHeld bool
 		checkpoints[jobID] = completed
 	}
 	e.logDebug("rollup trigger finished", "source_database", sourceDBName, "updated_jobs", len(updated))
+}
+
+// collectRollupDestinations returns the unique destination database names
+// across a set of rollup jobs.
+func collectRollupDestinations(jobs []DBManifestRollupJob) []string {
+	seen := make(map[string]struct{}, len(jobs))
+	out := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		dst := strings.TrimSpace(j.DestinationDB)
+		if dst == "" {
+			continue
+		}
+		if _, ok := seen[dst]; ok {
+			continue
+		}
+		seen[dst] = struct{}{}
+		out = append(out, dst)
+	}
+	return out
 }
 
 type rollupJobGroup struct {
@@ -310,6 +351,11 @@ func (e *Engine) TriggerRollupsForSources(sourceDBNames []string) {
 
 func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, error) {
 	report := RollupBackfillReport{RequestedSources: normalizeDatabaseNames(sourceDBNames)}
+	for _, name := range report.RequestedSources {
+		if err := ValidateDatabaseName(name); err != nil {
+			return report, err
+		}
+	}
 	e.logInfo("rollup backfill started", "sources", report.RequestedSources)
 
 	e.rollupBackfill.Lock()
@@ -543,15 +589,18 @@ func (e *Engine) resetRollupDestination(database string) ([]string, []string, []
 	return removedData, removedWAL, removedCatalog, nil
 }
 
-// triggerRollups is called after a file is closed/flushed.
+// triggerRollups is called after a file is closed/flushed. Caller already
+// holds writeMu (we are deep inside addParsedSample → sealDay).
 func (e *Engine) triggerRollups(sourceDBName string) {
-	e.triggerRollupsForSource(sourceDBName, true)
+	e.triggerRollupsForSourceLocked(sourceDBName)
 }
 
 func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, job DBManifestRollupJob, periodStart, periodEnd Timestamp) error {
 	points := make([]float32, 0, 256)
 
-	err := e.queryRange(sourceDB.Name, job.SourceMetric, periodStart, periodEnd-1, 1, func(s Sample) error {
+	// Caller (triggerRollupsForSourceLocked) already holds writeMu, so use the
+	// *Locked variant; the public queryRange would re-acquire and deadlock.
+	err := e.queryRangeLocked(sourceDB.Name, job.SourceMetric, periodStart, periodEnd-1, 1, func(s Sample) error {
 		var val float32
 		if s.ValueType == Int32Sample {
 			val = float32(s.Int32)
@@ -560,7 +609,7 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		}
 		points = append(points, val)
 		return nil
-	}, true)
+	})
 	if err != nil || len(points) == 0 {
 		return err
 	}
@@ -570,7 +619,7 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		if !ok {
 			continue
 		}
-		value, err := aggFn.Compute(periodStart, periodEnd, points)
+		value, err := aggFn.Compute(points)
 		if err != nil {
 			return err
 		}
@@ -830,5 +879,10 @@ func compactRollupCheckpointFileLocked(rootDir, fileName string) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	// Directory fsync (#10): see comment in catalog.go writeCatalogEntries.
+	return syncParentDir(path)
 }

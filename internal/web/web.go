@@ -117,9 +117,12 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 				http.Error(w, "failed to save dashboard config", http.StatusInternalServerError)
 				return
 			}
+			// Return just the basename, not the absolute path (#25).
+			// The directory is well-known ("dashboard_backups" under the
+			// data dir); leaking the full path discloses home/install layout.
 			writeDashboardMutationResponse(w, http.StatusOK, dashboardMutationResponse{
 				OK:         true,
-				BackupPath: backupPath,
+				BackupPath: filepath.Base(backupPath),
 				Config:     &dashboardCfg,
 				Payload:    savedPayload,
 			})

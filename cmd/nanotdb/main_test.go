@@ -930,6 +930,12 @@ func TestHandleEngineFiles(t *testing.T) {
 		t.Fatalf("expected at least two data files, got=%v", dataPaths)
 	}
 	selectedFile := dataPaths[0]
+	// JSON responses now return engine-root-relative paths (#25); compute the
+	// rel form for the equality check below.
+	selectedFileRel, err := filepath.Rel(root, selectedFile)
+	if err != nil {
+		t.Fatalf("Rel selectedFile failed: %v", err)
+	}
 	filesReq := httptest.NewRequest(http.MethodGet, "/api/engine/files?db=prod&data_file="+url.QueryEscape(selectedFile), nil)
 	filesRec := httptest.NewRecorder()
 	handleEngineFiles(eng)(filesRec, filesReq)
@@ -990,7 +996,7 @@ func TestHandleEngineFiles(t *testing.T) {
 	}
 	selectedFound := false
 	for _, item := range filesResp.Data.Result.Data {
-		if item.Path == selectedFile {
+		if item.Path == selectedFileRel {
 			selectedFound = true
 			if len(item.Pages) == 0 {
 				t.Fatalf("expected scanned page details for selected file: %+v", item)

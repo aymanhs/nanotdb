@@ -123,10 +123,23 @@ func main() {
 	mux.HandleFunc("/api/engine/runtime", handleEngineRuntime(eng))
 	web.Register(mux, runtimeCfg.WebConfig, runtimeCfg.DataDir)
 
+	// HTTP server timeouts (#12). Defaults below are conservative; tune via
+	// engine.toml if needed.
+	//   ReadHeaderTimeout — slow-loris protection on header read.
+	//   ReadTimeout       — cap on full request read (bodies on import etc.).
+	//   WriteTimeout      — cap on response delivery (queries can be slow, so
+	//                       this is generous; long-running operations are
+	//                       expected to be batched smaller).
+	//   IdleTimeout       — close keep-alive connections that go silent.
+	//   MaxHeaderBytes    — explicit cap (Go default is 1 MiB).
 	srv := &http.Server{
 		Addr:              runtimeCfg.EngineConfig.Engine.Listen,
 		Handler:           withRequestLogging(logger, mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 * 1024,
 	}
 
 	go func() {
@@ -330,10 +343,18 @@ func handleRollupBackfill(eng *engine.Engine) http.HandlerFunc {
 
 		requested := make([]string, 0, len(req.SourceDBs)+1)
 		if db := strings.TrimSpace(req.SourceDB); db != "" {
+			if err := engine.ValidateDatabaseName(db); err != nil {
+				writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+				return
+			}
 			requested = append(requested, db)
 		}
 		for _, db := range req.SourceDBs {
 			if db = strings.TrimSpace(db); db != "" {
+				if err := engine.ValidateDatabaseName(db); err != nil {
+					writeVMError(w, http.StatusBadRequest, "bad_data", err.Error())
+					return
+				}
 				requested = append(requested, db)
 			}
 		}
@@ -777,13 +798,18 @@ func resolveDBAndMetric(db, query string) (string, string, error) {
 	if query == "" {
 		return "", "", fmt.Errorf("missing query parameter")
 	}
-	if db != "" {
-		return db, query, nil
+	if db == "" {
+		if i := strings.IndexByte(query, '/'); i > 0 && i < len(query)-1 {
+			db = query[:i]
+			query = query[i+1:]
+		} else {
+			return "", "", fmt.Errorf("missing db parameter or DB/metric query")
+		}
 	}
-	if i := strings.IndexByte(query, '/'); i > 0 && i < len(query)-1 {
-		return query[:i], query[i+1:], nil
+	if err := engine.ValidateDatabaseName(db); err != nil {
+		return "", "", err
 	}
-	return "", "", fmt.Errorf("missing db parameter or DB/metric query")
+	return db, query, nil
 }
 
 // parseTimeParam parses an HTTP query-string time value. Bare numerics are

@@ -665,6 +665,11 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 	selectedDataFile = strings.TrimSpace(selectedDataFile)
 	if selectedDataFile == "" && len(ctx.DataFilePaths) > 0 {
 		selectedDataFile = ctx.DataFilePaths[0]
+	} else if selectedDataFile != "" && !filepath.IsAbs(selectedDataFile) {
+		// JSON responses now return engine-root-relative paths (#25). The UI
+		// echoes them back as data_file=... in the next request — resolve
+		// against rootDir so the absolute-path comparison below still works.
+		selectedDataFile = filepath.Join(eng.RootDataDir, selectedDataFile)
 	}
 
 	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), Metric: make([]engineMetricFile, 0, len(ctx.MetricFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
@@ -672,12 +677,13 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 	for _, path := range ctx.DataFilePaths {
 		stats, err := engine.ScanDataFileStats(path)
 		part := dataFilePart(path)
+		jsonPath := relPath(eng.RootDataDir, path)
 		if err != nil {
-			report.Data = append(report.Data, engineDataFile{Path: path, Part: part, Active: activeParts[part], ScanError: err.Error()})
+			report.Data = append(report.Data, engineDataFile{Path: jsonPath, Part: part, Active: activeParts[part], ScanError: err.Error()})
 			continue
 		}
 		item := engineDataFile{
-			Path:    path,
+			Path:    jsonPath,
 			Part:    part,
 			Active:  activeParts[part],
 			Bytes:   stats.FileBytes,
@@ -729,11 +735,12 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 	for _, path := range ctx.MetricFilePaths {
 		st, err := os.Stat(path)
 		part := metricFilePart(path)
+		jsonPath := relPath(eng.RootDataDir, path)
 		if err != nil {
-			report.Metric = append(report.Metric, engineMetricFile{Path: path, Part: part, ScanError: err.Error()})
+			report.Metric = append(report.Metric, engineMetricFile{Path: jsonPath, Part: part, ScanError: err.Error()})
 			continue
 		}
-		item := engineMetricFile{Path: path, Part: part, Bytes: st.Size()}
+		item := engineMetricFile{Path: jsonPath, Part: part, Bytes: st.Size()}
 		summary, err := engine.ReadMetricFileSummary(path)
 		if err != nil {
 			item.ScanError = err.Error()
@@ -765,12 +772,13 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 
 	for _, path := range ctx.WALFilePaths {
 		stats, records, err := engine.ScanWALFile(path)
+		jsonPath := relPath(eng.RootDataDir, path)
 		if err != nil {
-			report.WAL = append(report.WAL, engineWALFile{Path: path, ScanError: err.Error()})
+			report.WAL = append(report.WAL, engineWALFile{Path: jsonPath, ScanError: err.Error()})
 			continue
 		}
 		item := engineWALFile{
-			Path:         path,
+			Path:         jsonPath,
 			Bytes:        stats.FileBytes,
 			Records:      stats.Records,
 			DecodedBytes: stats.DecodedBytes,
@@ -832,6 +840,22 @@ func buildWALPreview(records []engineWALRecord, limit int) engineWALPreview {
 	}
 	preview.Last = append([]engineWALRecord(nil), records[len(records)-limit:]...)
 	return preview
+}
+
+// relPath returns p as an engine-root-relative path for JSON responses.
+// Stripping the absolute prefix (#25) keeps `/api/engine/...` payloads free of
+// the operator's home directory / install layout. If p does not live under
+// rootDir, the basename is returned as a defensive fallback rather than
+// leaking an unrelated absolute path.
+func relPath(rootDir, p string) string {
+	if p == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(rootDir, p)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filepath.Base(p)
+	}
+	return rel
 }
 
 func dataFilePart(path string) string {
@@ -905,11 +929,19 @@ func convertRuntimeWALRecords(records []engine.WALRecord) []engineWALRecord {
 }
 
 func resolveServerDBContext(rootDir string, database string) (serverDBContext, error) {
-	database = strings.Trim(strings.TrimSpace(database), "/")
-	if database == "" {
-		return serverDBContext{}, fmt.Errorf("missing db parameter")
+	database = strings.TrimSpace(database)
+	// Reject any name that could escape rootDir or carry path separators.
+	// This is the first line of defence against `?db=../etc` style traversal
+	// (review item #3); the HasPrefix check below is a belt-and-braces guard
+	// against any future relaxation of the validator.
+	if err := engine.ValidateDatabaseName(database); err != nil {
+		return serverDBContext{}, err
 	}
 	dbDir := filepath.Join(rootDir, database)
+	cleanRoot := filepath.Clean(rootDir)
+	if !strings.HasPrefix(filepath.Clean(dbDir), cleanRoot+string(os.PathSeparator)) {
+		return serverDBContext{}, fmt.Errorf("invalid database path")
+	}
 	st, err := os.Stat(dbDir)
 	if err != nil {
 		if os.IsNotExist(err) {

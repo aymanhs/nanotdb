@@ -200,6 +200,13 @@ func appendSampleRecord[T SampleType](w *WAL, metricID MetricID, metricName stri
 
 	// If new metric, write metric name and value type
 	if metricName != "" {
+		// Belt-and-braces: ingest validation already rejects names >255
+		// bytes (#16), but the on-disk format here encodes the length in a
+		// single byte. If anything ever bypasses ingest validation, surface
+		// it as a write error rather than silently truncating the prefix.
+		if len(metricName) > MaxMetricNameLen {
+			return 0, fmt.Errorf("wal: metric name %q exceeds %d-byte limit", metricName, MaxMetricNameLen)
+		}
 		buf.WriteByte(byte(len(metricName)))
 		buf.WriteString(metricName)
 		buf.WriteByte(vtype)
@@ -363,23 +370,30 @@ func (w *WAL) RecordsWithCatalog(cat *Catalog) ([]WALRecord, error) {
 			hasBaseline = true
 		}
 
-		// If catalog provided and ValueType is sentinel (0), look it up
-		if cat != nil && rec.ValueType == 0 && rec.MetricName == "" {
+		// Sentinel ValueType (0) means the WAL omitted the type because the
+		// metric was already known when written. If a catalog is provided,
+		// resolve via lookup. If lookup fails, surface an error rather than
+		// guessing (#18) — guessing Int32Sample silently misreads float32
+		// bits. When no catalog is supplied (counting/inspection callers),
+		// leave ValueType=0 with the raw bits stashed as uint32; the caller
+		// is responsible for not interpreting Value.
+		if rec.ValueType == 0 && cat != nil {
 			_, entry, ok := cat.GetMetricByID(rec.MetricID)
-			if ok {
-				rec.ValueType = entry.ValueType
-				// Re-interpret the value bytes with the correct type
-				var raw [4]byte
-				if v, ok := rec.Value.(int32); ok {
-					binary.LittleEndian.PutUint32(raw[:], uint32(v))
-				} else if v, ok := rec.Value.(float32); ok {
-					binary.LittleEndian.PutUint32(raw[:], math.Float32bits(v))
-				}
-				if entry.ValueType == Int32Sample {
-					rec.Value = int32(binary.LittleEndian.Uint32(raw[:]))
-				} else if entry.ValueType == Float32Sample {
-					rec.Value = math.Float32frombits(binary.LittleEndian.Uint32(raw[:]))
-				}
+			if !ok {
+				return nil, fmt.Errorf("wal record for metric_id=%d omits value_type; catalog has no entry for that id", rec.MetricID)
+			}
+			rawBits, ok := rec.Value.(uint32)
+			if !ok {
+				return nil, fmt.Errorf("wal record for metric_id=%d: unexpected sentinel payload type %T", rec.MetricID, rec.Value)
+			}
+			rec.ValueType = entry.ValueType
+			switch entry.ValueType {
+			case Int32Sample:
+				rec.Value = int32(rawBits)
+			case Float32Sample:
+				rec.Value = math.Float32frombits(rawBits)
+			default:
+				return nil, fmt.Errorf("wal record for metric_id=%d: catalog has invalid value_type %d", rec.MetricID, entry.ValueType)
 			}
 		}
 
@@ -619,17 +633,20 @@ func decodeWALPayloadCompactWithBaseline(payload []byte, baselineTS Timestamp, h
 	var valueRaw [4]byte
 	copy(valueRaw[:], payload[pos:pos+4])
 
-	if vtype == 0 {
-		// Sentinel: will be resolved during replay by looking up catalog
-		vtype = Int32Sample // default; caller overrides
-	}
-
 	rec := WALRecord{SegmentID: 1, MetricID: metricID, MetricName: metricName, Timestamp: ts, ValueType: vtype}
 	switch vtype {
 	case Int32Sample:
 		rec.Value = int32(binary.LittleEndian.Uint32(valueRaw[:]))
 	case Float32Sample:
 		rec.Value = math.Float32frombits(binary.LittleEndian.Uint32(valueRaw[:]))
+	case 0:
+		// Sentinel: the WAL writer omitted ValueType because the metric was
+		// already known. RecordsWithCatalog must resolve it via the catalog;
+		// stash the raw 4 bytes as a uint32 so the resolver can re-interpret
+		// once the correct ValueType is known. We do NOT default to a
+		// concrete type here (#18) — a missing catalog lookup must surface
+		// as an error rather than silently misread float bits as int.
+		rec.Value = binary.LittleEndian.Uint32(valueRaw[:])
 	default:
 		return WALRecord{}, fmt.Errorf("unsupported wal value type: %d", vtype)
 	}

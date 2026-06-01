@@ -4,8 +4,6 @@ import "testing"
 
 func TestAggregatorRegistrySupportsBuiltins(t *testing.T) {
 	points := []float32{10, 20, 40, 50, 100}
-	start := Timestamp(0)
-	end := Timestamp(1)
 
 	cases := []struct {
 		name string
@@ -27,7 +25,7 @@ func TestAggregatorRegistrySupportsBuiltins(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected aggregator %q to be registered", tt.name)
 		}
-		got, err := agg.Compute(start, end, points)
+		got, err := agg.Compute(points)
 		if err != nil {
 			t.Fatalf("Compute(%q) failed: %v", tt.name, err)
 		}
@@ -50,7 +48,7 @@ func TestAggregatorRegistrySupportsTrimmedAverage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected trimmed_avg to be registered")
 	}
-	got, err := agg.Compute(0, 1, points)
+	got, err := agg.Compute(points)
 	if err != nil {
 		t.Fatalf("trimmed_avg compute failed: %v", err)
 	}
@@ -61,7 +59,7 @@ func TestAggregatorRegistrySupportsTrimmedAverage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected trimmed_average alias to be registered")
 	}
-	aliasGot, err := alias.Compute(0, 1, points)
+	aliasGot, err := alias.Compute(points)
 	if err != nil {
 		t.Fatalf("trimmed_average compute failed: %v", err)
 	}
@@ -72,7 +70,7 @@ func TestAggregatorRegistrySupportsTrimmedAverage(t *testing.T) {
 
 func TestTrimmedAverageTrimsAtLeastOnePointPerTailWhenPossible(t *testing.T) {
 	agg := trimmedAvgAggregator{}
-	got, err := agg.Compute(0, 1, []float32{1, 2, 1000})
+	got, err := agg.Compute([]float32{1, 2, 1000})
 	if err != nil {
 		t.Fatalf("trimmed_avg compute failed: %v", err)
 	}
@@ -91,7 +89,7 @@ func TestTrimmedAverageUsesFivePercentPerTailForLargerSamples(t *testing.T) {
 	}
 
 	agg := trimmedAvgAggregator{}
-	got, err := agg.Compute(0, 1, points)
+	got, err := agg.Compute(points)
 	if err != nil {
 		t.Fatalf("trimmed_avg compute failed: %v", err)
 	}

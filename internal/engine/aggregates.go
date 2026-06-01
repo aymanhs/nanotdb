@@ -10,7 +10,7 @@ import (
 // points are source metric values collected for that window.
 type Aggregator interface {
 	Name() string
-	Compute(periodStart, periodEnd Timestamp, points []float32) (float32, error)
+	Compute(points []float32) (float32, error)
 }
 
 type minAggregator struct{}
@@ -32,7 +32,7 @@ type trimmedAvgAggregator struct{}
 
 func (minAggregator) Name() string { return "min" }
 
-func (minAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (minAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
@@ -47,7 +47,7 @@ func (minAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float3
 
 func (maxAggregator) Name() string { return "max" }
 
-func (maxAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (maxAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
@@ -62,7 +62,7 @@ func (maxAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float3
 
 func (sumAggregator) Name() string { return "sum" }
 
-func (sumAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (sumAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
@@ -75,7 +75,7 @@ func (sumAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float3
 
 func (avgAggregator) Name() string { return "avg" }
 
-func (avgAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (avgAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
@@ -88,7 +88,7 @@ func (avgAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float3
 
 func (countAggregator) Name() string { return "count" }
 
-func (countAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (countAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
@@ -97,7 +97,7 @@ func (countAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (floa
 
 func (p percentileAggregator) Name() string { return p.name }
 
-func (p percentileAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (p percentileAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
@@ -118,12 +118,14 @@ func (p percentileAggregator) Compute(_ Timestamp, _ Timestamp, points []float32
 
 func (trimmedAvgAggregator) Name() string { return "trimmed_avg" }
 
-func (trimmedAvgAggregator) Compute(_ Timestamp, _ Timestamp, points []float32) (float32, error) {
+func (trimmedAvgAggregator) Compute(points []float32) (float32, error) {
 	if len(points) == 0 {
 		return 0, fmt.Errorf("no points")
 	}
 	sorted := append([]float32(nil), points...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	// 5% trim from each tail when there are ≥20 samples, else trim 1 from
+	// each tail. The thresholds keep small windows from collapsing to zero.
 	trim := 1
 	if len(sorted) >= 20 {
 		trim = len(sorted) / 20
@@ -170,10 +172,6 @@ func isSupportedAggregate(name string) bool {
 
 func defaultRollupAggregates() []string {
 	return []string{"min", "max", "sum", "avg", "count"}
-}
-
-func supportedAggregates() []string {
-	return SupportedAggregates()
 }
 
 func SupportedAggregates() []string {

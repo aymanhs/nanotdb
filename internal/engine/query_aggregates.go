@@ -146,7 +146,7 @@ func (e *Engine) QueryAggregateRange(database, metric string, fromTS, toTS Times
 			return nil
 		}
 		for _, agg := range resolved {
-			value, err := agg.impl.Compute(effectiveStart, effectiveEnd, bucketPoints)
+			value, err := agg.impl.Compute(bucketPoints)
 			if err != nil {
 				return err
 			}
@@ -221,7 +221,7 @@ func resolveAggregators(names []string) ([]namedAggregator, error) {
 		}
 		agg, ok := getAggregator(name)
 		if !ok {
-			return nil, fmt.Errorf("unsupported aggregate %q (supported: %s)", name, strings.Join(supportedAggregates(), ","))
+			return nil, fmt.Errorf("unsupported aggregate %q (supported: %s)", name, strings.Join(SupportedAggregates(), ","))
 		}
 		seen[name] = struct{}{}
 		resolved = append(resolved, namedAggregator{name: name, impl: agg})

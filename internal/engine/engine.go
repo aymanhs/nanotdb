@@ -6,6 +6,7 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -223,6 +224,25 @@ type Engine struct {
 	StatsInterval         time.Duration
 	dbDefaults            DBInfo
 
+	// LOCK ORDERING (must be obeyed by every code path to avoid deadlock):
+	//
+	//   writeMu  →  mu  →  rollupBackfill  →  WAL/catalog file locks
+	//
+	// In words: any goroutine that needs more than one of these MUST acquire
+	// them in that left-to-right order. Releasing happens in reverse. A path
+	// that takes mu (read or write) is forbidden from then taking writeMu —
+	// that's the ABBA case from review #6.
+	//
+	//   writeMu  — exclusive ingest serialization (one writer at a time).
+	//   mu       — guards e.dbs / e.runtimes maps and other engine-level state.
+	//              Held briefly. Readers may RLock; writers must Lock.
+	//   rollupBackfill — held for the duration of a rollup backfill so concurrent
+	//              BackfillRollups invocations serialize without blocking ingest.
+	//
+	// snapshotOpenPage / snapshotOpenPages must NEVER be called while mu is
+	// held by the current goroutine — they internally acquire writeMu, which
+	// would invert the order. InspectDBRuntime is careful to RUnlock mu before
+	// invoking either; new call sites must do the same.
 	mu             sync.RWMutex
 	writeMu        sync.Mutex
 	dbs            map[string]*Database
@@ -412,6 +432,9 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	if cfg.Metrics.TimeCacheSlots <= 0 {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.time_cache_slots: must be > 0")
 	}
+	if cfg.Metrics.TimeCacheSlots > maxTimeCacheSlots {
+		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.time_cache_slots: %d (max %d)", cfg.Metrics.TimeCacheSlots, maxTimeCacheSlots)
+	}
 	loggingCfg, err := normalizeLoggingConfig(cfg.Logging, def.Logging)
 	if err != nil {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid logging: %w", err)
@@ -472,7 +495,9 @@ func writeEngineConfigTOML(path string, cfg EngineConfig) error {
 	if err := toml.NewEncoder(buf).Encode(cfg); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	// Atomic write (#8): a crash mid-WriteFile leaves a corrupt engine.toml
+	// that fails to parse on next open and refuses to start the engine.
+	return writeFileAtomic(path, buf.Bytes())
 }
 
 // OpenEngine opens or creates the engine rooted at rootDataDir.
@@ -510,10 +535,17 @@ func durabilitySyncPolicy(profile string) (syncDataFile bool, syncCatalog bool) 
 
 // Close flushes all open day-pages, resets WAL files, emits a final stats snapshot,
 // and closes every open database. Always call Close before the process exits.
+//
+// Per-database failures (#21) are collected and joined into the final error
+// rather than returning early — a single broken database must not leave other
+// databases with un-flushed pages or open WAL fds.
 func (e *Engine) Close() error {
 	e.logInfo("engine closing", "data_dir", e.RootDataDir)
 	e.writeMu.Lock()
 	defer e.writeMu.Unlock()
+
+	var closeErrs []error
+
 	e.mu.Lock()
 	for name, db := range e.dbs {
 		if name == internalStatsDatabase {
@@ -524,20 +556,21 @@ func (e *Engine) Close() error {
 			continue
 		}
 		for day, p := range rt.openDays {
-			if p != nil {
-				if err := e.writePageToDailyFile(db, name, day, p); err != nil {
-					e.mu.Unlock()
-					return err
-				}
-				delete(rt.openDays, day)
+			if p == nil {
+				continue
 			}
+			if err := e.writePageToDailyFile(db, name, day, p); err != nil {
+				closeErrs = append(closeErrs, fmt.Errorf("flush %q day %s: %w", name, day, err))
+				continue
+			}
+			delete(rt.openDays, day)
 		}
 		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
 			e.logDebug("wal reset", "database", name, "buffer_bytes", db.wal.Stats().BufferBytes)
 		}
 		if err := maybeResetWAL(db, rt); err != nil {
-			e.mu.Unlock()
-			return err
+			closeErrs = append(closeErrs, fmt.Errorf("reset wal for %q: %w", name, err))
+			// Keep going — the next database still needs flushing/closing.
 		}
 		e.captureWALStats(db, name)
 	}
@@ -551,19 +584,34 @@ func (e *Engine) Close() error {
 	for name, db := range e.dbs {
 		if db.catalog != nil && db.catalog.IsDirty() {
 			if err := db.catalog.WriteCatalog(); err != nil {
-				return fmt.Errorf("write catalog for database %q: %w", name, err)
+				closeErrs = append(closeErrs, fmt.Errorf("write catalog for database %q: %w", name, err))
+				// Still attempt db.Close() — the catalog write may have left
+				// the fd in an unusable state, but we must release the WAL.
 			}
 		}
 		if err := db.Close(); err != nil {
-			return fmt.Errorf("close database %q: %w", name, err)
+			closeErrs = append(closeErrs, fmt.Errorf("close database %q: %w", name, err))
+			continue
 		}
 		e.logDebug("database closed", "database", name)
+	}
+	if len(closeErrs) > 0 {
+		e.logInfo("engine close completed with errors", "data_dir", e.RootDataDir, "errors", len(closeErrs))
+		return errors.Join(closeErrs...)
 	}
 	e.logInfo("engine closed", "data_dir", e.RootDataDir)
 	return nil
 }
 
 func (e *Engine) flushDatabases(databaseNames []string) error {
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+	return e.flushDatabasesLocked(databaseNames)
+}
+
+// flushDatabasesLocked is the writeMu-already-held variant. Used by code paths
+// (e.g. the rollup trigger) that hold writeMu for an entire seal/flush window.
+func (e *Engine) flushDatabasesLocked(databaseNames []string) error {
 	seen := make(map[string]struct{}, len(databaseNames))
 	names := make([]string, 0, len(databaseNames))
 	for _, name := range databaseNames {
@@ -578,9 +626,6 @@ func (e *Engine) flushDatabases(databaseNames []string) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-
-	e.writeMu.Lock()
-	defer e.writeMu.Unlock()
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -879,13 +924,71 @@ func (e *Engine) AddLine(line string) error {
 	return e.AddSample(dbName, metric, ts, f32)
 }
 
+// MaxMetricNameLen caps the byte length of a metric name. The WAL on-disk
+// format encodes the metric name length in a single byte (see wal.go:203 —
+// the writer can't represent names longer than 255 bytes without silently
+// truncating the length prefix and desynchronising every subsequent record).
+// We reject anything longer at ingest so that hazard can never reach the
+// WAL writer (#16).
+const MaxMetricNameLen = 255
+
 // validateMetricName rejects metric names that contain characters incompatible
-// with the line-protocol "<db>/<metric>" framing or with downstream file/path
-// usage. '/' in particular conflicts with the line-protocol DB delimiter and
-// breaks roundtripping through the offline LP exporter.
+// with the line-protocol "<db>/<metric>" framing, the WAL encoding, or
+// downstream file/path usage.
 func validateMetricName(name string) error {
+	if name == "" {
+		return fmt.Errorf("metric name cannot be empty")
+	}
+	if len(name) > MaxMetricNameLen {
+		return fmt.Errorf("metric name %q too long: %d bytes (max %d)", name, len(name), MaxMetricNameLen)
+	}
 	if strings.ContainsRune(name, '/') {
 		return fmt.Errorf("invalid metric name %q: '/' is reserved (used as DB/metric delimiter in line protocol)", name)
+	}
+	return nil
+}
+
+// ValidateDatabaseName enforces a strict allowlist for database names. DB
+// names become directory names under the engine root, are interpolated into
+// stat keys, appear in HTTP query parameters, and are part of every WAL/data/
+// catalog file path — so anything that could escape a path, embed a directory
+// separator, or look like a relative segment is rejected here, once, at every
+// ingress (line protocol, AddSample, getOrCreateDB, HTTP handlers).
+//
+// Rules (deliberately conservative):
+//   - 1..64 bytes
+//   - characters: [A-Za-z0-9_.-]
+//   - cannot start with '.' or '-' (avoids "..", ".hidden", "-flag" arguments)
+//   - cannot be exactly "." or ".."
+//
+// Anything more exotic (slashes, backslashes, NULs, whitespace, non-ASCII) is
+// rejected. Existing databases that already violate this can still be opened
+// (the engine's open-on-demand path treats them as legacy), but new ingest
+// against an invalid name will fail fast.
+func ValidateDatabaseName(name string) error {
+	if name == "" {
+		return fmt.Errorf("database name cannot be empty")
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("database name %q too long (max 64 bytes)", name)
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("invalid database name %q: reserved", name)
+	}
+	first := name[0]
+	if first == '.' || first == '-' {
+		return fmt.Errorf("invalid database name %q: first character must be alphanumeric or '_'", name)
+	}
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= '0' && ch <= '9':
+		case ch == '_' || ch == '-' || ch == '.':
+		default:
+			return fmt.Errorf("invalid database name %q: character %q at position %d (allowed: letters, digits, '_', '-', '.')", name, string(ch), i)
+		}
 	}
 	return nil
 }
@@ -893,8 +996,9 @@ func validateMetricName(name string) error {
 // AddSample ingests one typed sample directly.
 // This is the canonical ingest API used by all write paths.
 func (e *Engine) AddSample(database, metric string, ts Timestamp, value any) error {
-	if strings.TrimSpace(database) == "" {
-		return fmt.Errorf("database cannot be empty")
+	database = strings.TrimSpace(database)
+	if err := ValidateDatabaseName(database); err != nil {
+		return err
 	}
 	if strings.TrimSpace(metric) == "" {
 		return fmt.Errorf("metric cannot be empty")
@@ -1076,6 +1180,10 @@ func (e *Engine) ImportFile(path string) error {
 	defer f.Close()
 
 	s := bufio.NewScanner(f)
+	// Allow lines up to 1 MiB so long metric names or large value strings
+	// don't silently terminate scanning with bufio.ErrTooLong (the default
+	// is 64 KiB). Anything beyond this is surfaced as an error via s.Err().
+	s.Buffer(make([]byte, 64*1024), 1024*1024)
 	lineNo := 0
 	for s.Scan() {
 		lineNo++
@@ -1095,19 +1203,36 @@ func (e *Engine) ImportFile(path string) error {
 
 // ExportFile exports one database to a LP file using: DB/metric value ts.
 // Exported timestamps use FormatTimestamp (UTC, YYYY-MM-DD HH:MM:SS.nnnnnnnnn).
+//
+// Close errors are not silently dropped (#22): for a writable file the kernel
+// may surface buffered-write failures only at Close time, so we explicitly
+// Sync + Close and surface whichever error fires first.
 func (e *Engine) ExportFile(database, outPath string) error {
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		return err
 	}
-	defer outFile.Close()
-
-	return e.ExportToWriter(database, outFile)
+	writeErr := e.ExportToWriter(database, outFile)
+	syncErr := outFile.Sync()
+	closeErr := outFile.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if syncErr != nil {
+		return fmt.Errorf("sync %s: %w", outPath, syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %s: %w", outPath, closeErr)
+	}
+	return nil
 }
 
 // ExportToWriter exports one database to an arbitrary writer using line protocol.
 // Timestamps are written with FormatTimestamp (UTC, YYYY-MM-DD HH:MM:SS.nnnnnnnnn).
 func (e *Engine) ExportToWriter(database string, out io.Writer) error {
+	if err := ValidateDatabaseName(strings.TrimSpace(database)); err != nil {
+		return err
+	}
 	db, rt, err := e.getOrCreateDB(database)
 	if err != nil {
 		return err
@@ -1361,13 +1486,13 @@ func collectFloat32Samples(database, metric string, times []Timestamp, values []
 // Stride controls downsampling: stride=1 returns every sample, stride=N returns every Nth.
 // Each matching sample is passed to the callback; callback errors terminate early.
 func (e *Engine) QueryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
-	return e.queryRange(database, metric, fromTS, toTS, stride, fn, false)
+	return e.queryRange(database, metric, fromTS, toTS, stride, fn)
 }
 
 // QueryRangeMany scans samples for multiple metrics within a time range.
 // It reuses each persisted partition scan across all requested metrics.
 func (e *Engine) QueryRangeMany(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
-	return e.queryRangeMany(database, metrics, fromTS, toTS, stride, fn, false)
+	return e.queryRangeMany(database, metrics, fromTS, toTS, stride, fn)
 }
 
 type rangeQueryTarget struct {
@@ -1376,10 +1501,18 @@ type rangeQueryTarget struct {
 	count int
 }
 
-// queryRange is the n=1 special case of queryRangeMany. Kept as a thin wrapper
-// for callers that already have a single metric name; behaviour is identical.
-func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
-	return e.queryRangeMany(database, []string{metric}, fromTS, toTS, stride, fn, writeLockHeld)
+// queryRange is the n=1 special case of queryRangeMany. The public path goes
+// through queryRangeMany which acquires writeMu when cloning the open page.
+func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	return e.queryRangeMany(database, []string{metric}, fromTS, toTS, stride, fn)
+}
+
+// queryRangeLocked is the writeMu-already-held variant of queryRange. Used
+// from the rollup path where the entire trigger sequence runs under writeMu;
+// see triggerRollupsForSourceLocked. Calling this without writeMu held is a
+// data race against concurrent writers.
+func (e *Engine) queryRangeLocked(database, metric string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	return e.queryRangeManyImpl(database, []string{metric}, fromTS, toTS, stride, fn, true)
 }
 
 // queryRangeMany scans samples for one or more metrics within a time range.
@@ -1388,8 +1521,15 @@ func (e *Engine) queryRange(database, metric string, fromTS, toTS Timestamp, str
 //   2. Falls back to the raw data-*.dat file when the metric file is absent.
 //   3. Layers in the in-memory open page for the current partition (if any).
 //
-// queryRange is the n=1 alias; both share this body.
-func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
+// queryRange is the n=1 alias; both share queryRangeManyImpl. Callers that
+// already hold writeMu must use queryRangeLocked / queryRangeManyLocked
+// instead — never call this public path while writeMu is held (deadlock on
+// the non-reentrant Mutex).
+func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback) error {
+	return e.queryRangeManyImpl(database, metrics, fromTS, toTS, stride, fn, false)
+}
+
+func (e *Engine) queryRangeManyImpl(database string, metrics []string, fromTS, toTS Timestamp, stride int, fn SampleCallback, writeLockHeld bool) error {
 	if toTS < fromTS {
 		return fmt.Errorf("invalid range: toTS < fromTS")
 	}
@@ -1427,7 +1567,15 @@ func (e *Engine) queryRangeMany(database string, metrics []string, fromTS, toTS 
 			return err
 		}
 
-		if p := e.snapshotOpenPage(rt, part, writeLockHeld); p != nil {
+		var p *Page
+		if writeLockHeld {
+			// Caller holds writeMu — clone the open page directly without
+			// re-acquiring the mutex (sync.Mutex is non-reentrant).
+			p = clonePage(rt.openDays[part])
+		} else {
+			p = e.snapshotOpenPage(rt, part)
+		}
+		if p != nil {
 			if err := collectMetricSetFromPage(database, targets, p, fromTS, toTS, stride, fn); err != nil {
 				return err
 			}
@@ -1475,14 +1623,16 @@ type openDaySnapshot struct {
 	page *Page
 }
 
-func (e *Engine) snapshotOpenPage(rt *dbRuntime, day string, writeLockHeld bool) *Page {
+// snapshotOpenPage returns a deep copy of the in-memory page for `day`, or
+// nil if no such page exists. It always acquires writeMu; callers MUST NOT
+// hold e.mu (RLock or Lock) when invoking this, per the lock-order comment on
+// the Engine struct.
+func (e *Engine) snapshotOpenPage(rt *dbRuntime, day string) *Page {
 	if rt == nil {
 		return nil
 	}
-	if !writeLockHeld {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
-	}
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 	return clonePage(rt.openDays[day])
 }
 
@@ -1630,6 +1780,9 @@ func readCompressedPageFrame(r *bufio.Reader, compressedBuf *[]byte) (PageHeader
 			return PageHeader{}, nil, 0, fmt.Errorf("truncated frame length")
 		}
 		return PageHeader{}, nil, 0, err
+	}
+	if compressedLen > MaxOnDiskFramePayloadBytes {
+		return PageHeader{}, nil, 0, fmt.Errorf("page frame payload length %d exceeds cap %d (corrupt or hostile input)", compressedLen, MaxOnDiskFramePayloadBytes)
 	}
 
 	if cap(*compressedBuf) < int(compressedLen) {
@@ -2020,6 +2173,20 @@ func (e *Engine) recordWALReplayMetrics(database string, records, bytes int64, s
 
 // replayWALIntoRuntime rebuilds open in-memory day pages from WAL records.
 // Replay uses the same day open/seal policy as normal ingestion.
+//
+// Duplicate-frame guard (#1): if a partition's data-*.dat already exists, its
+// frames are the durable record of every sample with ts <= maxEnd. A crash
+// between data-fsync and WAL-truncate leaves the WAL with records that have
+// already been persisted; replaying them would re-append the same frames on
+// the next flush. We compute per-partition watermarks once up-front and skip
+// any WAL record at or below the watermark. The remaining tail is exactly the
+// not-yet-durable suffix.
+//
+// Defensive OOO retry (#2): in earlier versions a cross-metric out-of-order
+// write could leave a WAL record that fails to replay (page max is already
+// past the record's ts). Rather than aborting the entire replay, we now flush
+// the offending page and re-insert the record into a fresh page — matching
+// the live-ingest retry path.
 func (e *Engine) replayWALIntoRuntime(db *Database, rt *dbRuntime, dbName string) error {
 	if db == nil || db.wal == nil || rt == nil {
 		return nil
@@ -2032,6 +2199,31 @@ func (e *Engine) replayWALIntoRuntime(db *Database, rt *dbRuntime, dbName string
 		return nil
 	}
 
+	// Per-partition durable watermark: any WAL record at or below this ts is
+	// already on disk in data-<part>.dat. Computed lazily on first reference.
+	durableMaxTS := make(map[string]Timestamp)
+	resolveWatermark := func(part string) (Timestamp, error) {
+		if ts, ok := durableMaxTS[part]; ok {
+			return ts, nil
+		}
+		path := metricRawPartitionPath(db.RootDataDir, part)
+		st, err := ScanDataFileStats(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				durableMaxTS[part] = -1 // sentinel: no data file yet, replay all records
+				return -1, nil
+			}
+			return 0, fmt.Errorf("scan %s for replay watermark: %w", path, err)
+		}
+		if st.Frames == 0 {
+			durableMaxTS[part] = -1
+			return -1, nil
+		}
+		durableMaxTS[part] = st.MaxEnd
+		return st.MaxEnd, nil
+	}
+
+	skipped := 0
 	for _, rec := range recs {
 		if rec.MetricName != "" {
 			if err := db.catalog.EnsureMetricEntry(rec.MetricName, rec.MetricID, rec.ValueType); err != nil {
@@ -2043,6 +2235,16 @@ func (e *Engine) replayWALIntoRuntime(db *Database, rt *dbRuntime, dbName string
 		}
 
 		day := partitionKey(rt, rec.Timestamp)
+		watermark, err := resolveWatermark(day)
+		if err != nil {
+			return err
+		}
+		if watermark >= 0 && rec.Timestamp <= watermark {
+			// Already durable on disk; skip to avoid double-write on next flush.
+			skipped++
+			continue
+		}
+
 		if err := e.ensureDayOpen(db, rt, dbName, day, rec.Timestamp, false); err != nil {
 			return err
 		}
@@ -2065,11 +2267,37 @@ func (e *Engine) replayWALIntoRuntime(db *Database, rt *dbRuntime, dbName string
 			return fmt.Errorf("invalid wal value type %d", rec.ValueType)
 		}
 
-		if err := e.addToOpenDay(db, rt, day, rec.Timestamp, rec.MetricID, raw[:], rec.SegmentID); err != nil {
+		err = e.addToOpenDay(db, rt, day, rec.Timestamp, rec.MetricID, raw[:], rec.SegmentID)
+		if err == nil {
+			continue
+		}
+		// Defensive OOO retry: an earlier-version WAL may contain a record
+		// whose ts is below the current page's max (cross-metric phantom
+		// scenario, #2). Flush the page and reinsert. If flush itself fails,
+		// surface the original error.
+		if err != ErrOutOfOrderTimestamp {
 			return err
+		}
+		e.logInfo("wal replay out-of-order; flushing page and retrying",
+			"database", dbName, "partition", day, "ts", rec.Timestamp, "metric_id", rec.MetricID)
+		if existing := rt.openDays[day]; existing != nil {
+			if werr := e.writePageToDailyFile(db, dbName, day, existing); werr != nil {
+				return fmt.Errorf("wal replay ooo flush failed: %w (original: %v)", werr, err)
+			}
+			delete(rt.openDays, day)
+		}
+		if err := e.ensureDayOpen(db, rt, dbName, day, rec.Timestamp, false); err != nil {
+			return err
+		}
+		if err := e.addToOpenDay(db, rt, day, rec.Timestamp, rec.MetricID, raw[:], rec.SegmentID); err != nil {
+			return fmt.Errorf("wal replay reinsert after ooo flush: %w", err)
 		}
 	}
 
+	if skipped > 0 {
+		e.logInfo("wal replay skipped durable records",
+			"database", dbName, "skipped", skipped, "total", len(recs))
+	}
 	return nil
 }
 
@@ -2514,13 +2742,32 @@ func partitionKey(rt *dbRuntime, ts Timestamp) string {
 	return dayKey(ts)
 }
 
+// Per-database manifest field upper bounds (#20). Operators can choose any
+// value down to the field minimums, but extreme values (typo or pathological
+// config) are rejected here so they cannot land at runtime and cause OOM or
+// integer overflow downstream. The ceilings are far above any realistic
+// production setting.
+const (
+	maxMaxActiveDays    = 1000           // open day-pages held simultaneously
+	maxRetentionDays    = 36500          // ~100 years of calendar days
+	maxPageMaxRecords   = 65535          // PageHeader.NumRecords is uint16
+	maxPageMaxBytes     = 64 * 1024 * 1024 // 64 MiB, half the on-disk frame cap
+	maxTimeCacheSlots   = 1 << 20         // 1M cache entries — already absurd
+)
+
 func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	def := defaults
 	if info.MaxActiveDays <= 0 {
 		info.MaxActiveDays = def.MaxActiveDays
 	}
+	if info.MaxActiveDays > maxMaxActiveDays {
+		return DBInfo{}, fmt.Errorf("invalid max_active_days: %d (max %d)", info.MaxActiveDays, maxMaxActiveDays)
+	}
 	if info.RetentionDays <= 0 {
 		info.RetentionDays = def.RetentionDays
+	}
+	if info.RetentionDays > maxRetentionDays {
+		return DBInfo{}, fmt.Errorf("invalid retention_days: %d (max %d)", info.RetentionDays, maxRetentionDays)
 	}
 	if strings.TrimSpace(info.RetentionAction) == "" {
 		info.RetentionAction = def.RetentionAction
@@ -2534,8 +2781,14 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	if info.PageMaxRecords <= 0 {
 		info.PageMaxRecords = def.PageMaxRecords
 	}
+	if info.PageMaxRecords > maxPageMaxRecords {
+		return DBInfo{}, fmt.Errorf("invalid page.max_records: %d (max %d — PageHeader.NumRecords is uint16)", info.PageMaxRecords, maxPageMaxRecords)
+	}
 	if info.PageMaxBytes <= 0 {
 		info.PageMaxBytes = def.PageMaxBytes
+	}
+	if info.PageMaxBytes > maxPageMaxBytes {
+		return DBInfo{}, fmt.Errorf("invalid page.max_bytes: %d (max %d)", info.PageMaxBytes, maxPageMaxBytes)
 	}
 	if strings.TrimSpace(info.PageMaxAge) == "" {
 		info.PageMaxAge = def.PageMaxAge
@@ -2684,7 +2937,7 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 		for aggIdx, agg := range job.Aggregates {
 			agg = strings.TrimSpace(strings.ToLower(agg))
 			if !isSupportedAggregate(agg) {
-				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].aggregates[%d]: %q (supported: %s)", idx, aggIdx, job.Aggregates[aggIdx], strings.Join(supportedAggregates(), ","))
+				return DBInfo{}, fmt.Errorf("invalid rollups.jobs[%d].aggregates[%d]: %q (supported: %s)", idx, aggIdx, job.Aggregates[aggIdx], strings.Join(SupportedAggregates(), ","))
 			}
 			job.Aggregates[aggIdx] = agg
 		}
@@ -2735,7 +2988,10 @@ func writeDBInfoTOML(path string, info DBInfo) error {
 	if err := toml.NewEncoder(buf).Encode(dbManifestFromInfo(info)); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	// Atomic write (#8): manifest.toml drives every retention/rollup/page
+	// decision for this database. A truncated/corrupt manifest from a crash
+	// mid-write would refuse to open the DB on next start.
+	return writeFileAtomic(path, buf.Bytes())
 }
 
 func writeRollupDBInfoTOML(path string, info DBInfo, interval time.Duration) error {
@@ -2753,7 +3009,7 @@ func writeRollupDBInfoTOML(path string, info DBInfo, interval time.Duration) err
 	if err := toml.NewEncoder(buf).Encode(dbManifestFromInfo(info)); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	return writeFileAtomic(path, buf.Bytes())
 }
 
 func loadExistingDBInfo(root string, defaults DBInfo) (DBInfo, bool, error) {

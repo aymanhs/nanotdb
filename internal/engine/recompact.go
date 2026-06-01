@@ -41,8 +41,8 @@ func (e *Engine) RecompactDataFile(database, part string) (DataFileRecompactRepo
 		Database: strings.TrimSpace(database),
 		Part:     strings.TrimSpace(part),
 	}
-	if report.Database == "" {
-		return report, fmt.Errorf("database is required")
+	if err := ValidateDatabaseName(report.Database); err != nil {
+		return report, err
 	}
 	if report.Part == "" {
 		return report, fmt.Errorf("part is required")
@@ -102,8 +102,8 @@ func (e *Engine) CompactDataFileToMetricV2(database, part string) (DataFileMetri
 		Database: strings.TrimSpace(database),
 		Part:     strings.TrimSpace(part),
 	}
-	if report.Database == "" {
-		return report, fmt.Errorf("database is required")
+	if err := ValidateDatabaseName(report.Database); err != nil {
+		return report, err
 	}
 	if report.Part == "" {
 		return report, fmt.Errorf("part is required")
@@ -277,23 +277,41 @@ func validateRecompactSourcePage(p *Page) error {
 }
 
 func writeAtomicDataFile(path string, payload []byte) error {
-	tmpPath := path + ".recompact.tmp"
+	return writeFileAtomicWithSuffix(path, payload, ".recompact.tmp")
+}
+
+// writeFileAtomic is the canonical atomic-replace primitive: write bytes to a
+// temp file, fsync, close, rename over the target, fsync the parent directory.
+// Used by every code path that updates a config/manifest/catalog file. The
+// directory fsync is essential — without it, on ext3, ext4 with
+// `data=writeback`, or XFS edge cases, a crash immediately after rename can
+// leave the directory entry update unjournaled and the new file unreachable.
+func writeFileAtomic(path string, payload []byte) error {
+	return writeFileAtomicWithSuffix(path, payload, ".tmp")
+}
+
+func writeFileAtomicWithSuffix(path string, payload []byte, suffix string) error {
+	tmpPath := path + suffix
 	f, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(payload); err != nil {
 		f.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	return syncParentDir(path)
