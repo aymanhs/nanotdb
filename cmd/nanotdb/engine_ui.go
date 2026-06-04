@@ -24,19 +24,24 @@ type serverDBContext struct {
 	DataFilePaths   []string
 	MetricFilePaths []string
 	WALFilePaths    []string
+	EventFilePaths  []string
 }
 
 type engineDatabaseSummary struct {
 	Name        string                  `json:"name"`
 	MetricCount int                     `json:"metric_count"`
+	EventCount  int                     `json:"event_count"`
 	Manifest    engine.DBInfo           `json:"manifest"`
 	Stats       engine.DBStats          `json:"stats"`
 	OpenPages   int                     `json:"open_pages"`
 	DataFiles   int                     `json:"data_files"`
 	DataBytes   int64                   `json:"data_bytes"`
+	EventFiles  int                     `json:"event_files"`
+	EventBytes  int64                   `json:"event_bytes"`
 	WALFiles    int                     `json:"wal_files"`
 	WALBytes    int64                   `json:"wal_bytes"`
 	Active      bool                    `json:"active"`
+	Error       string                  `json:"error,omitempty"`
 	Runtime     engine.DBRuntimeInspect `json:"runtime,omitempty"`
 }
 
@@ -49,9 +54,19 @@ type engineMetricInfo struct {
 	LastValue     string `json:"last_value,omitempty"`
 }
 
+type engineEventInfo struct {
+	Name            string `json:"name"`
+	ID              uint16 `json:"id"`
+	ValueType       string `json:"value_type"`
+	LastTimestamp   string `json:"last_timestamp,omitempty"`
+	LastTimestampNS int64  `json:"last_timestamp_ns,omitempty"`
+}
+
 type engineDatabaseDetail struct {
-	Summary engineDatabaseSummary `json:"summary"`
-	Metrics []engineMetricInfo    `json:"metrics"`
+	Summary       engineDatabaseSummary `json:"summary"`
+	Metrics       []engineMetricInfo    `json:"metrics"`
+	EventsEnabled bool                  `json:"events_enabled"`
+	Events        []engineEventInfo     `json:"events"`
 }
 
 type engineDataPage struct {
@@ -138,8 +153,22 @@ type engineFilesReport struct {
 	Database      string             `json:"database"`
 	Data          []engineDataFile   `json:"data"`
 	Metric        []engineMetricFile `json:"metric"`
+	Events        []engineEventFile  `json:"events"`
 	WAL           []engineWALFile    `json:"wal"`
 	RecordPreview engineWALPreview   `json:"record_preview"`
+}
+
+type engineEventFile struct {
+	Path         string `json:"path"`
+	Part         string `json:"part,omitempty"`
+	Bytes        int64  `json:"bytes"`
+	Frames       int    `json:"frames"`
+	Records      int64  `json:"records"`
+	MinTimestamp int64  `json:"min_timestamp_ns,omitempty"`
+	MaxTimestamp int64  `json:"max_timestamp_ns,omitempty"`
+	MinUTC       string `json:"min_utc,omitempty"`
+	MaxUTC       string `json:"max_utc,omitempty"`
+	ScanError    string `json:"scan_error,omitempty"`
 }
 
 type engineRuntimeReport struct {
@@ -189,13 +218,28 @@ type engineRuntimeOpenPage struct {
 	Persisted    bool   `json:"persisted"`
 }
 
+type engineRuntimeOpenEventsPage struct {
+	Database     string `json:"database"`
+	Day          string `json:"day"`
+	Records      int    `json:"records"`
+	StartTS      int64  `json:"start_timestamp_ns"`
+	EndTS        int64  `json:"end_timestamp_ns"`
+	MaxRecords   int    `json:"max_records"`
+	MaxBytes     int    `json:"max_bytes"`
+	MaxAgeNS     int64  `json:"max_age_ns"`
+	AgeNS        int64  `json:"age_ns"`
+	WALSegmentID uint16 `json:"wal_segment_id"`
+}
+
 type engineRuntimeOverviewReport struct {
-	DatabaseCount       int                     `json:"database_count"`
-	ActiveDatabaseCount int                     `json:"active_database_count"`
-	MetricCount         int                     `json:"metric_count"`
-	Process             engineRuntimeProcess    `json:"process"`
-	GoMem               engineRuntimeGoMem      `json:"go_mem"`
-	OpenPages           []engineRuntimeOpenPage `json:"open_pages"`
+	DatabaseCount       int                           `json:"database_count"`
+	ActiveDatabaseCount int                           `json:"active_database_count"`
+	MetricCount         int                           `json:"metric_count"`
+	EventCount          int                           `json:"event_count"`
+	Process             engineRuntimeProcess          `json:"process"`
+	GoMem               engineRuntimeGoMem            `json:"go_mem"`
+	OpenPages           []engineRuntimeOpenPage       `json:"open_pages"`
+	OpenEventsPages     []engineRuntimeOpenEventsPage `json:"open_events_pages"`
 }
 
 type engineOverviewSettings struct {
@@ -234,8 +278,13 @@ func handleEngineOverview(eng *engine.Engine, runtimeCfg runtimeConfig) http.Han
 		for _, name := range names {
 			item, err := buildEngineDatabaseSummary(eng, name)
 			if err != nil {
-				writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
-				return
+				// Surface the per-db error rather than failing the entire overview.
+				items = append(items, engineDatabaseSummary{
+					Name:   name,
+					Active: eng.IsDatabaseActive(name),
+					Error:  err.Error(),
+				})
+				continue
 			}
 			items = append(items, item)
 		}
@@ -327,13 +376,43 @@ func handleEngineDatabase(eng *engine.Engine) http.HandlerFunc {
 			items = append(items, item)
 		}
 
+		eventsEnabled := true
+		eventItems := make([]engineEventInfo, 0)
+		events, err := eng.ListEvents(database)
+		if err != nil {
+			if errors.Is(err, engine.ErrEventsDisabled) {
+				eventsEnabled = false
+			} else if strings.Contains(err.Error(), "database not found") {
+				writeVMError(w, http.StatusNotFound, "not_found", err.Error())
+				return
+			} else {
+				writeVMError(w, http.StatusInternalServerError, "execution", err.Error())
+				return
+			}
+		} else {
+			for _, e := range events {
+				item := engineEventInfo{
+					Name:      e.Name,
+					ID:        uint16(e.EventID),
+					ValueType: engine.EventValueTypeName(e.ValueType),
+				}
+				if e.LastValid {
+					item.LastTimestampNS = int64(e.LastTS)
+					item.LastTimestamp = engine.FormatTimestamp(e.LastTS)
+				}
+				eventItems = append(eventItems, item)
+			}
+		}
+
 		writeJSON(w, http.StatusOK, vmResponse{
 			Status: "success",
 			Data: map[string]interface{}{
 				"resultType": "engine_database",
 				"result": engineDatabaseDetail{
-					Summary: summary,
-					Metrics: items,
+					Summary:       summary,
+					Metrics:       items,
+					EventsEnabled: eventsEnabled,
+					Events:        eventItems,
 				},
 			},
 		})
@@ -442,7 +521,8 @@ func buildEngineRuntimeOverview(eng *engine.Engine) (engineRuntimeOverviewReport
 			NumGC:           memStats.NumGC,
 			GCCPUFraction:   memStats.GCCPUFraction,
 		},
-		OpenPages: make([]engineRuntimeOpenPage, 0),
+		OpenPages:       make([]engineRuntimeOpenPage, 0),
+		OpenEventsPages: make([]engineRuntimeOpenEventsPage, 0),
 	}
 	if memStats.LastGC > 0 {
 		report.GoMem.LastGCAt = time.Unix(0, int64(memStats.LastGC)).UTC()
@@ -456,6 +536,7 @@ func buildEngineRuntimeOverview(eng *engine.Engine) (engineRuntimeOverviewReport
 			continue
 		}
 		report.MetricCount += runtimeInspect.MetricCount
+		report.EventCount += runtimeInspect.EventCount
 		for _, page := range runtimeInspect.OpenPages {
 			report.OpenPages = append(report.OpenPages, engineRuntimeOpenPage{
 				Database:     name,
@@ -475,6 +556,20 @@ func buildEngineRuntimeOverview(eng *engine.Engine) (engineRuntimeOverviewReport
 				Persisted:    page.Persisted,
 			})
 		}
+		for _, ep := range runtimeInspect.OpenEventsPages {
+			report.OpenEventsPages = append(report.OpenEventsPages, engineRuntimeOpenEventsPage{
+				Database:     name,
+				Day:          ep.Day,
+				Records:      ep.Records,
+				StartTS:      int64(ep.StartTS),
+				EndTS:        int64(ep.EndTS),
+				MaxRecords:   ep.MaxRecords,
+				MaxBytes:     ep.MaxBytes,
+				MaxAgeNS:     int64(ep.MaxAge),
+				AgeNS:        int64(ep.Age),
+				WALSegmentID: ep.WALSegmentID,
+			})
+		}
 	}
 	sort.Slice(report.OpenPages, func(i, j int) bool {
 		if report.OpenPages[i].Database != report.OpenPages[j].Database {
@@ -484,6 +579,15 @@ func buildEngineRuntimeOverview(eng *engine.Engine) (engineRuntimeOverviewReport
 			return report.OpenPages[i].Day < report.OpenPages[j].Day
 		}
 		return report.OpenPages[i].StartTS < report.OpenPages[j].StartTS
+	})
+	sort.Slice(report.OpenEventsPages, func(i, j int) bool {
+		if report.OpenEventsPages[i].Database != report.OpenEventsPages[j].Database {
+			return report.OpenEventsPages[i].Database < report.OpenEventsPages[j].Database
+		}
+		if report.OpenEventsPages[i].Day != report.OpenEventsPages[j].Day {
+			return report.OpenEventsPages[i].Day < report.OpenEventsPages[j].Day
+		}
+		return report.OpenEventsPages[i].StartTS < report.OpenEventsPages[j].StartTS
 	})
 	return report, nil
 }
@@ -620,6 +724,14 @@ func buildEngineDatabaseSummary(eng *engine.Engine, database string) (engineData
 		}
 		dataBytes += st.Size()
 	}
+	var eventBytes int64
+	for _, path := range ctx.EventFilePaths {
+		st, err := os.Stat(path)
+		if err != nil {
+			return engineDatabaseSummary{}, err
+		}
+		eventBytes += st.Size()
+	}
 	var walBytes int64
 	for _, path := range ctx.WALFilePaths {
 		st, err := os.Stat(path)
@@ -628,14 +740,21 @@ func buildEngineDatabaseSummary(eng *engine.Engine, database string) (engineData
 		}
 		walBytes += st.Size()
 	}
+	eventCount := 0
+	if events, eerr := eng.ListEvents(database); eerr == nil {
+		eventCount = len(events)
+	}
 	return engineDatabaseSummary{
 		Name:        database,
 		MetricCount: runtimeInspect.MetricCount,
+		EventCount:  eventCount,
 		Manifest:    runtimeInspect.Manifest,
 		Stats:       runtimeInspect.Stats,
 		OpenPages:   len(runtimeInspect.OpenPages),
 		DataFiles:   len(ctx.DataFilePaths),
 		DataBytes:   dataBytes,
+		EventFiles:  len(ctx.EventFilePaths),
+		EventBytes:  eventBytes,
 		WALFiles:    len(ctx.WALFilePaths),
 		WALBytes:    walBytes,
 		Active:      active,
@@ -672,7 +791,7 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 		selectedDataFile = filepath.Join(eng.RootDataDir, selectedDataFile)
 	}
 
-	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), Metric: make([]engineMetricFile, 0, len(ctx.MetricFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
+	report := engineFilesReport{Database: database, Data: make([]engineDataFile, 0, len(ctx.DataFilePaths)), Metric: make([]engineMetricFile, 0, len(ctx.MetricFilePaths)), Events: make([]engineEventFile, 0, len(ctx.EventFilePaths)), WAL: make([]engineWALFile, 0, len(ctx.WALFilePaths))}
 	allRecords := make([]engineWALRecord, 0)
 	for _, path := range ctx.DataFilePaths {
 		stats, err := engine.ScanDataFileStats(path)
@@ -768,6 +887,30 @@ func buildEngineFilesReport(eng *engine.Engine, database string, selectedDataFil
 			item.MaxUTC = engine.FormatTimestamp(engine.Timestamp(item.MaxTimestamp))
 		}
 		report.Metric = append(report.Metric, item)
+	}
+
+	for _, path := range ctx.EventFilePaths {
+		stats, err := engine.ScanEventsFileStats(path)
+		part := eventFilePart(path)
+		jsonPath := relPath(eng.RootDataDir, path)
+		if err != nil {
+			report.Events = append(report.Events, engineEventFile{Path: jsonPath, Part: part, ScanError: err.Error()})
+			continue
+		}
+		item := engineEventFile{
+			Path:    jsonPath,
+			Part:    part,
+			Bytes:   stats.FileBytes,
+			Frames:  stats.Frames,
+			Records: stats.TotalRecords,
+		}
+		if stats.Frames > 0 {
+			item.MinTimestamp = int64(stats.MinStart)
+			item.MaxTimestamp = int64(stats.MaxEnd)
+			item.MinUTC = engine.FormatTimestamp(stats.MinStart)
+			item.MaxUTC = engine.FormatTimestamp(stats.MaxEnd)
+		}
+		report.Events = append(report.Events, item)
 	}
 
 	for _, path := range ctx.WALFilePaths {
@@ -882,6 +1025,18 @@ func metricFilePart(path string) string {
 	return part
 }
 
+func eventFilePart(path string) string {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "events-") || !strings.HasSuffix(base, ".dat") {
+		return ""
+	}
+	part := strings.TrimSuffix(strings.TrimPrefix(base, "events-"), ".dat")
+	if part == base {
+		return ""
+	}
+	return part
+}
+
 func loadMetricNames(catalogPath string) (map[engine.MetricID]string, error) {
 	type metricDiskEntry struct {
 		Name     string          `json:"name"`
@@ -960,12 +1115,17 @@ func resolveServerDBContext(rootDir string, database string) (serverDBContext, e
 	if err != nil {
 		return serverDBContext{}, err
 	}
+	eventFiles, err := filepath.Glob(filepath.Join(dbDir, "events-*.dat"))
+	if err != nil {
+		return serverDBContext{}, err
+	}
 	walFiles, err := filepath.Glob(filepath.Join(dbDir, "*.wal"))
 	if err != nil {
 		return serverDBContext{}, err
 	}
 	sort.Strings(dataFiles)
 	sort.Strings(metricFiles)
+	sort.Strings(eventFiles)
 	sort.Strings(walFiles)
-	return serverDBContext{RootDir: rootDir, Database: database, DatabaseDir: dbDir, DataFilePaths: dataFiles, MetricFilePaths: metricFiles, WALFilePaths: walFiles}, nil
+	return serverDBContext{RootDir: rootDir, Database: database, DatabaseDir: dbDir, DataFilePaths: dataFiles, MetricFilePaths: metricFiles, EventFilePaths: eventFiles, WALFilePaths: walFiles}, nil
 }

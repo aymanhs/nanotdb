@@ -266,24 +266,31 @@
       renderSummaryCards([
         { label: "Databases", value: number(items.length) },
         { label: "Metrics", value: number(items.reduce((sum, item) => sum + (item.metric_count || 0), 0)) },
+        { label: "Events", value: number(items.reduce((sum, item) => sum + (item.event_count || 0), 0)) },
         { label: "Open Pages", value: number(items.reduce((sum, item) => sum + (item.open_pages || 0), 0)) },
         { label: "WAL Bytes", value: number(items.reduce((sum, item) => sum + (item.wal_bytes || 0), 0)) },
       ]) +
       renderTable([
         { key: "name", label: "Database" },
         { key: "metricCount", label: "Metrics" },
+        { key: "eventCount", label: "Events" },
         { key: "openPages", label: "Open Pages" },
         { key: "dataFiles", label: ".dat Files" },
         { key: "dataBytes", label: ".dat Bytes" },
+        { key: "eventFiles", label: "events Files" },
+        { key: "eventBytes", label: "events Bytes" },
         { key: "walFiles", label: ".wal Files" },
         { key: "walBytes", label: ".wal Bytes" },
         { key: "walBuffer", label: "WAL Buffer" },
       ], items.map((item) => ({
-        name: item.name,
+        name: item.error ? (item.name + ' <span class="codeish" style="color:#f88" title="' + item.error.replace(/"/g, '&quot;') + '">(error)</span>') : item.name,
         metricCount: number(item.metric_count),
+        eventCount: number(item.event_count),
         openPages: number(item.open_pages),
         dataFiles: number(item.data_files),
         dataBytes: number(item.data_bytes),
+        eventFiles: number(item.event_files),
+        eventBytes: number(item.event_bytes),
         walFiles: number(item.wal_files),
         walBytes: number(item.wal_bytes),
         walBuffer: number(item.stats && item.stats.WAL && item.stats.WAL.BufferBytes),
@@ -313,6 +320,25 @@
     const result = payload.data && payload.data.result;
     const summary = result && result.summary;
     const metrics = (result && result.metrics) || [];
+    const events = (result && result.events) || [];
+    const eventsEnabled = !!(result && result.events_enabled);
+    const eventsPanel = !eventsEnabled
+      ? '<div class="subpanel"><div class="section-head"><h3>Events</h3><p>Events are not enabled for this database.</p></div></div>'
+      : '<div class="subpanel"><div class="section-head"><h3>Events</h3><p>Event catalog for the selected database (' + number(events.length) + ' event' + (events.length === 1 ? '' : 's') + ').</p></div>' +
+        (events.length === 0
+          ? '<div class="empty">No events recorded yet.</div>'
+          : renderTable([
+              { key: "name", label: "Event" },
+              { key: "id", label: "ID" },
+              { key: "type", label: "Value Type" },
+              { key: "lastTimestamp", label: "Last Captured" },
+            ], events.map((item) => ({
+              name: '<span class="codeish">' + item.name + '</span>',
+              id: number(item.id),
+              type: item.value_type,
+              lastTimestamp: item.last_timestamp || '-',
+            })))) +
+        '</div>';
     databasePane.innerHTML = '<div class="section-head"><h2>Database</h2><p>Manifest defaults, live counters, and metric catalog.</p></div>' +
       renderSummaryCards([
         { label: "Metrics", value: number(summary.metric_count) },
@@ -351,6 +377,7 @@
         lastValue: item.last_value || '-',
         lastTimestamp: item.last_timestamp || '-',
       }))) + '</div>' +
+      eventsPanel +
       '</div>';
   }
 
@@ -428,6 +455,16 @@
       start: page.start_utc,
       end: page.end_utc,
     }))) : '<div class="empty">' + (selectedFile ? 'Selected file has no page frames.' : 'No data files found.') + '</div>';
+    const eventFiles = (result.events) || [];
+    const eventRows = eventFiles.map((item) => ({
+      path: '<span class="codeish">' + escapeHTML(item.path) + '</span>',
+      bytes: number(item.bytes),
+      frames: number(item.frames),
+      records: number(item.records),
+      start: item.min_utc || '-',
+      end: item.max_utc || '-',
+      error: item.scan_error || '',
+    }));
     filesPane.innerHTML = '<div class="section-head"><h2>Files</h2><p>On-disk data and metric partitions, plus selected page inspection.</p></div>' +
       '<div class="stack">' +
       '<div class="subpanel"><div class="section-head"><h3>Data Files</h3><p>Select a .dat file to inspect only its pages.</p></div>' + renderSelectableFilesTable(datRows, selectedPath) + '</div>' +
@@ -442,6 +479,18 @@
         { key: 'end', label: 'End' },
         { key: 'error', label: 'Error' },
       ], metricRows) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Event Files</h3><p>Sealed events-*.dat partitions (header-only scan).</p></div>' +
+        (eventRows.length === 0
+          ? '<div class="empty">No sealed event partitions on disk yet.</div>'
+          : renderTable([
+              { key: 'path', label: 'Path' },
+              { key: 'bytes', label: 'Bytes' },
+              { key: 'frames', label: 'Frames' },
+              { key: 'records', label: 'Records' },
+              { key: 'start', label: 'Start' },
+              { key: 'end', label: 'End' },
+              { key: 'error', label: 'Error' },
+            ], eventRows)) + '</div>' +
       '<div class="subpanel"><div class="section-head"><h3>Pages</h3><p>' + (selectedFile ? '<span class="codeish">' + escapeHTML(selectedFile.path) + '</span>' : 'No file selected.') + '</p></div>' + pagesTable + '</div>' +
       '</div>';
     filesPane.querySelectorAll('.file-select').forEach((button) => {
@@ -579,6 +628,8 @@
         { label: 'Databases', value: number(result.database_count) },
         { label: 'Active DBs', value: number(result.active_database_count) },
         { label: 'Open Pages', value: number(openPages.length) },
+        { label: 'Open Events Pages', value: number((result.open_events_pages || []).length) },
+        { label: 'Events', value: number(result.event_count) },
         { label: 'RSS', value: formatBytes(process.rss_bytes) },
         { label: 'Heap Alloc', value: formatBytes(goMem.heap_alloc_bytes) },
         { label: 'Go Sys', value: formatBytes(goMem.sys_bytes) },
@@ -643,6 +694,26 @@
         age: durationFromNs(page.age_ns),
         full: String(!!page.full),
       }))) + '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Open Events Pages</h3><p>In-memory events pages per database/partition before flush to events-*.dat.</p></div>' +
+        ((result.open_events_pages || []).length === 0
+          ? '<div class="empty">No open events pages.</div>'
+          : renderTable([
+              { key: 'database', label: 'Database' },
+              { key: 'day', label: 'Day' },
+              { key: 'records', label: 'Records' },
+              { key: 'start', label: 'Start' },
+              { key: 'end', label: 'End' },
+              { key: 'age', label: 'Age' },
+              { key: 'maxRecords', label: 'Max Records' },
+            ], (result.open_events_pages || []).map((page) => ({
+              database: '<span class="codeish">' + escapeHTML(page.database || '-') + '</span>',
+              day: page.day,
+              records: number(page.records),
+              start: page.start_timestamp_ns ? new Date(page.start_timestamp_ns / 1e6).toISOString() : '-',
+              end: page.end_timestamp_ns ? new Date(page.end_timestamp_ns / 1e6).toISOString() : '-',
+              age: durationFromNs(page.age_ns),
+              maxRecords: number(page.max_records),
+            })))) + '</div>' +
       '</div>';
   }
 

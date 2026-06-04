@@ -11,6 +11,11 @@
       "id": "temperatures",
       "label": "Temperatures",
       "widgets": ["temperature_snapshot", "temperature_history"]
+    },
+    {
+      "id": "events",
+      "label": "Events",
+      "widgets": ["slow_writes"]
     }
   ],
   "widgets": {
@@ -141,6 +146,19 @@
           "label": "Outdoor",
           "metric": "temp.out_dry.mdeg",
           "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
+        }
+      ]
+    },
+    "slow_writes": {
+      "type": "event_log",
+      "title": "Slow Disk Writes",
+      "refresh_sec": 10,
+      "lookback": "6h",
+      "series": [
+        {
+          "event_name_pattern": "disk.sd_write_probe.slow",
+          "event_limit": 10,
+          "db": "metrics"
         }
       ]
     }

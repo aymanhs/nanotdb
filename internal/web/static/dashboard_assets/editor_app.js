@@ -18,6 +18,7 @@
     draftConfig: null,
     databases: [],
     metricsByDB: new Map(),
+    eventsByDB: new Map(),
     selectedGroupId: "",
     selectedWidgetId: "",
     expandedGroups: new Set(),
@@ -38,6 +39,7 @@
   const defaultDbSelect = document.getElementById("defaultDbSelect");
   const metricOptions = document.getElementById("metricOptions");
   const aggregateOptions = document.getElementById("aggregateOptions");
+  const eventOptions = document.getElementById("eventOptions");
   const existingWidgetSelect = document.getElementById("existingWidgetSelect");
   let aggregateCatalog = { result: [], default: "avg" };
 
@@ -273,12 +275,40 @@
     state.metricsByDB.set(db, items.slice().sort());
   }
 
+  async function loadEventsForDB(db) {
+    if (!db || state.eventsByDB.has(db)) {
+      return;
+    }
+    try {
+      const payload = await fetchJSON(apiURL("/api/v1/events/catalog?db=" + encodeURIComponent(db)));
+      const items = (payload.data && payload.data.result) || [];
+      const names = items.map((it) => it.name).filter(Boolean).sort();
+      state.eventsByDB.set(db, names);
+    } catch (err) {
+      state.eventsByDB.set(db, []);
+    }
+  }
+
+  function populateEventDatalist() {
+    if (!eventOptions) {
+      return;
+    }
+    const all = new Set();
+    state.eventsByDB.forEach((names) => {
+      (names || []).forEach((n) => all.add(n));
+    });
+    const values = Array.from(all).sort();
+    eventOptions.innerHTML = values.map((n) => '<option value="' + escapeHTML(n) + '"></option>').join("");
+  }
+
   async function loadDatabasesAndMetrics() {
     const payload = await fetchJSON(apiURL("/api/v1/databases"));
     const databases = ((payload.data && payload.data.result) || []).slice().sort();
     state.databases = databases;
     await Promise.all(databases.map((db) => loadMetricsForDB(db)));
+    await Promise.all(databases.map((db) => loadEventsForDB(db)));
     populateMetricDatalist();
+    populateEventDatalist();
     populateMetaForm();
   }
 
@@ -572,6 +602,7 @@
     const effectiveWidgetType = widgetChartType(widget);
     const isLineChart = effectiveWidgetType === "line_chart" || effectiveWidgetType === "aggregate_band";
     const isAggregateBand = effectiveWidgetType === "aggregate_band";
+    const isEventLog = widgetType === "event_log";
     const usesAggregateBandShortcut = isAggregateBand && Array.isArray(widget.series) && widget.series.length === 1;
     const isSingleNumber = widgetType === "number";
     const series = Array.isArray(widget.series) ? widget.series : [];
@@ -601,12 +632,19 @@
             '</div>' +
           '</summary>' +
           '<div class="series-body">' +
+            (isEventLog ?
+            '<div class="series-grid-primary">' +
+              '<label>Event Name Pattern<input type="text" list="eventOptions" data-field="event_name_pattern" placeholder="e.g. disk.sd_write_probe.*" value="' + escapeHTML(item.event_name_pattern || "") + '" /><span class="field-hint">Supports wildcards with *. Suggestions from catalog.</span></label>' +
+              '<label>Database<select data-field="db">' + dbOptionsHTML(item.db || item.database || "", true) + '</select></label>' +
+              '<label>Limit<input type="number" min="1" step="1" data-field="event_limit" value="' + escapeHTML(item.event_limit || 10) + '" /></label>' +
+            '</div>' :
             '<div class="series-grid-primary">' +
               '<label>Query<input type="text" list="metricOptions" data-field="query" value="' + escapeHTML(item.query || item.metric || "") + '" /></label>' +
               '<label>Database<select data-field="db">' + dbOptionsHTML(item.db || item.database || "", true) + '</select></label>' +
               (isAggregateBand ? '' : '<label>Label<input type="text" data-field="label" value="' + escapeHTML(item.label || "") + '" /></label>') +
               (isAggregateBand && !usesAggregateBandShortcut ? '<label>Aggregate<input type="text" data-field="aggregate" placeholder="e.g. avg" value="' + escapeHTML(item.aggregate || "") + '" /></label>' : '') +
-            '</div>' +
+            '</div>') +
+            (isEventLog ? '' :
             (!isAggregateBand ?
             '<div class="series-grid-secondary">' +
               '<label>Aggregate<input type="text" list="aggregateOptions" data-field="aggregate" placeholder="e.g. ' + escapeHTML(aggregateCatalog.default || 'avg') + '" value="' + escapeHTML(item.aggregate || "") + '" /></label>' +
@@ -622,8 +660,8 @@
               '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
               '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
               '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /><span class="field-hint">Use <code>{duration}</code> for durations/uptime.</span></label>' +
-            '</div>') +
-            (isLineChart ? '' :
+            '</div>')) +
+            (isEventLog || isLineChart ? '' :
             '<div class="series-grid-thresholds">' +
               '<label>Threshold<select data-field="thresholds.direction">' +
                 '<option value="">None</option>' +
@@ -649,14 +687,15 @@
               '<option value="numbers"' + (widgetType === "numbers" ? ' selected' : '') + '>Snapshot</option>' +
               '<option value="line_chart"' + (widgetType === "line_chart" ? ' selected' : '') + '>Line Chart</option>' +
               '<option value="aggregate_band"' + (widgetType === "aggregate_band" ? ' selected' : '') + '>Aggregate Band</option>' +
+              '<option value="event_log"' + (widgetType === "event_log" ? ' selected' : '') + '>Event Log</option>' +
             '</select></label>' +
             '<label>Refresh Sec<input id="widgetRefreshInput" type="number" min="0" step="1" value="' + escapeHTML(widget.refresh_sec == null ? (cfg.refreshSeconds || 10) : widget.refresh_sec) + '" /></label>' +
             '<label class="toggle-field" title="Toggle automatic refresh"><input id="widgetAutoRefreshInput" type="checkbox"' + (widget.auto_refresh !== false ? ' checked' : '') + ' /><span class="toggle-switch" aria-hidden="true"></span><span class="toggle-label">Auto refresh</span></label>' +
           '</div>' +
-          (isLineChart ?
+          (isLineChart || isEventLog ?
             '<div class="widget-settings-grid">' +
               '<label>Lookback<input id="widgetLookbackInput" type="text" value="' + escapeHTML(widget.lookback || "1h") + '" /></label>' +
-              '<label>' + (isAggregateBand ? 'Band / Interval' : 'Interval') + '<input id="widgetIntervalInput" type="text" value="' + escapeHTML(widget.interval || "30s") + '" /></label>' +
+              (isLineChart ? '<label>' + (isAggregateBand ? 'Band / Interval' : 'Interval') + '<input id="widgetIntervalInput" type="text" value="' + escapeHTML(widget.interval || "30s") + '" /></label>' : '') +
             '</div>' :
             '') +
           (isAggregateBand ? '<p class="editor-note">Aggregate band charts use widget interval as the band window. With one series, just choose the metric. Add more series only if you want manual min/avg/max aggregate control.</p>' : '') +
@@ -691,6 +730,9 @@
       if (widget.type === "line_chart" || widget.type === "aggregate_band") {
         widget.lookback = widget.lookback || "1h";
         widget.interval = widget.interval || "30s";
+      } else if (widget.type === "event_log") {
+        widget.lookback = widget.lookback || "1h";
+        delete widget.interval;
       } else {
         delete widget.lookback;
         delete widget.interval;
@@ -720,12 +762,14 @@
       schedulePreview();
       markDirty();
     });
-    if (isLineChart) {
+    if (isLineChart || isEventLog) {
       widgetEditorEl.querySelector("#widgetLookbackInput").addEventListener("change", (event) => {
         widget.lookback = event.target.value;
         schedulePreview();
         markDirty();
       });
+    }
+    if (isLineChart) {
       widgetEditorEl.querySelector("#widgetIntervalInput").addEventListener("change", (event) => {
         widget.interval = event.target.value;
         syncChartSeries(widget);
@@ -1392,6 +1436,77 @@
       }
       const hasData = renderUPlotChart(plot, widget, seriesItems.filter(Boolean));
       foot.textContent = widgetChartType(widget) === "aggregate_band" ? "" : (hasData ? "preview updated " + new Date().toLocaleTimeString() : "no points");
+      return;
+    }
+
+    if (widget.type === "event_log") {
+      const card = document.createElement("article");
+      card.className = "widget-eventlog";
+      const eventsEl = document.createElement("div");
+      eventsEl.className = "eventlog-rows";
+      const foot = document.createElement("p");
+      foot.className = "widget-foot";
+      foot.textContent = "waiting for data";
+      card.appendChild(createPreviewHeader(widget));
+      card.appendChild(eventsEl);
+      card.appendChild(foot);
+      containerEl.appendChild(card);
+
+      const series = (widget.series || [])[0];
+      const db = series && seriesDB(series, dashboardCfg);
+      const eventNamePattern = series && (series.event_name_pattern || "").trim();
+      if (!db || !eventNamePattern) {
+        foot.textContent = "missing db/event_name_pattern";
+        return;
+      }
+      const lookbackSec = parseDurationSeconds(widget.lookback || "1h", 3600);
+      const end = new Date();
+      const start = new Date(end.getTime() - lookbackSec * 1000);
+      const limit = series && series.event_limit ? series.event_limit : 10;
+      const eventsURL = apiURL(`/api/v1/events?db=${encodeURIComponent(db)}&name=${encodeURIComponent(eventNamePattern)}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}&limit=${limit}`);
+      const payload = await fetchJSON(eventsURL);
+      const events = payload.data && payload.data.result ? payload.data.result : [];
+      if (events.length === 0) {
+        foot.textContent = "no events";
+        return;
+      }
+      events.forEach((evt) => {
+        const row = document.createElement("div");
+        row.className = "eventlog-row";
+        const nameCell = document.createElement("span");
+        nameCell.className = "eventlog-cell eventlog-name";
+        nameCell.textContent = evt.name || evt.N || "?";
+        const timeCell = document.createElement("span");
+        timeCell.className = "eventlog-cell eventlog-time";
+        const tsNs = evt.ts || evt.T;
+        timeCell.textContent = Number.isInteger(tsNs) ? new Date(Math.floor(tsNs / 1000000)).toLocaleTimeString() : "--";
+        const valueCell = document.createElement("span");
+        valueCell.className = "eventlog-cell eventlog-value";
+        const pl = evt.payload || evt.p;
+        let valueText = "";
+        if (evt.value !== undefined && evt.value !== null) {
+          valueText = String(evt.value);
+        } else if (typeof evt.int32 === "number") {
+          valueText = String(evt.int32);
+        } else if (typeof evt.float32 === "number") {
+          valueText = String(evt.float32);
+        } else if (evt.v !== undefined && evt.v !== null) {
+          valueText = String(evt.v);
+        }
+        if (!valueText && pl && typeof pl === "object") {
+          if (typeof pl.latency_ms === "number") {
+            valueText = Math.round(pl.latency_ms) + " ms";
+          } else if (typeof pl.value === "number") {
+            valueText = String(pl.value);
+          }
+        }
+        valueCell.textContent = valueText;
+        row.appendChild(nameCell);
+        row.appendChild(timeCell);
+        row.appendChild(valueCell);
+        eventsEl.appendChild(row);
+      });
+      foot.textContent = "preview updated " + new Date().toLocaleTimeString();
       return;
     }
 

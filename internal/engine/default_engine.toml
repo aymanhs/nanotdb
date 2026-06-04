@@ -83,6 +83,9 @@ raw_ingest_action = "keep"
 [[logging.logger]]
 output = "console"
 level = "info"
+# Optional file-rotation knobs (ignored for output="console"):
+# max_file_bytes = 10485760
+# max_backups = 5
 
 [stats]
 # Enable/disable periodic internal engine metrics emission to the internal DB.

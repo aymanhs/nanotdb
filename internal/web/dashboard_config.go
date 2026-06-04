@@ -40,23 +40,25 @@ type DashboardWidget struct {
 }
 
 type DashboardSeries struct {
-	Label       string               `json:"label,omitempty"`
-	Role        string               `json:"role,omitempty"`
-	DB          string               `json:"db,omitempty"`
-	Database    string               `json:"database,omitempty"`
-	Query       string               `json:"query,omitempty"`
-	Metric      string               `json:"metric,omitempty"`
-	Measurement string               `json:"measurement,omitempty"`
-	Field       string               `json:"field,omitempty"`
-	Aggregate   string               `json:"aggregate,omitempty"`
-	Window      string               `json:"window,omitempty"`
-	Transform   *DashboardTransform  `json:"transform,omitempty"`
-	Thresholds  *DashboardThresholds `json:"thresholds,omitempty"`
-	Scale       *float64             `json:"scale,omitempty"`
-	Offset      *float64             `json:"offset,omitempty"`
-	Unit        string               `json:"unit,omitempty"`
-	Decimals    *int                 `json:"decimals,omitempty"`
-	Format      string               `json:"format,omitempty"`
+	Label            string               `json:"label,omitempty"`
+	Role             string               `json:"role,omitempty"`
+	DB               string               `json:"db,omitempty"`
+	Database         string               `json:"database,omitempty"`
+	Query            string               `json:"query,omitempty"`
+	Metric           string               `json:"metric,omitempty"`
+	Measurement      string               `json:"measurement,omitempty"`
+	Field            string               `json:"field,omitempty"`
+	Aggregate        string               `json:"aggregate,omitempty"`
+	Window           string               `json:"window,omitempty"`
+	EventNamePattern string               `json:"event_name_pattern,omitempty"`
+	EventLimit       int                  `json:"event_limit,omitempty"`
+	Transform        *DashboardTransform  `json:"transform,omitempty"`
+	Thresholds       *DashboardThresholds `json:"thresholds,omitempty"`
+	Scale            *float64             `json:"scale,omitempty"`
+	Offset           *float64             `json:"offset,omitempty"`
+	Unit             string               `json:"unit,omitempty"`
+	Decimals         *int                 `json:"decimals,omitempty"`
+	Format           string               `json:"format,omitempty"`
 }
 
 type DashboardTransform struct {
@@ -186,6 +188,13 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			if !isValidDashboardDuration(widget.Interval) {
 				errs = append(errs, fmt.Sprintf("widget %q has invalid interval %q", widgetID, widget.Interval))
 			}
+		case "event_log":
+			if len(widget.Series) == 0 {
+				errs = append(errs, fmt.Sprintf("widget %q must define at least one series", widgetID))
+			}
+			if !isValidDashboardDuration(widget.Lookback) {
+				errs = append(errs, fmt.Sprintf("widget %q has invalid lookback %q", widgetID, widget.Lookback))
+			}
 		default:
 			errs = append(errs, fmt.Sprintf("widget %q has unsupported type %q", widgetID, widget.Type))
 		}
@@ -202,17 +211,35 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			field := strings.TrimSpace(series.Field)
 			aggregate := strings.TrimSpace(series.Aggregate)
 			window := effectiveDashboardSeriesAggregateWindow(widget, series)
-			if query == "" && metric == "" && (measurement == "" || field == "") {
-				errs = append(errs, fmt.Sprintf("widget %q series[%d] must define query, metric, or measurement+field", widgetID, idx))
-			}
-			if (aggregate == "") != (window == "") && !(aggregateBandShortcut && idx == 0 && aggregate == "" && window != "") {
-				errs = append(errs, fmt.Sprintf("widget %q series[%d] aggregate and window must be set together", widgetID, idx))
-			}
-			if aggregate != "" && !isSupportedDashboardAggregate(aggregate) && !(widgetType == "aggregate_band" && aggregateBandShortcut && idx == 0) {
-				errs = append(errs, fmt.Sprintf("widget %q series[%d] has unsupported aggregate %q", widgetID, idx, aggregate))
-			}
-			if window != "" && !isValidDashboardDuration(window) {
-				errs = append(errs, fmt.Sprintf("widget %q series[%d] has invalid window %q", widgetID, idx, window))
+			eventNamePattern := strings.TrimSpace(series.EventNamePattern)
+
+			if widgetType == "event_log" {
+				// Event widget validation
+				if eventNamePattern == "" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] must define event_name_pattern", widgetID, idx))
+				}
+				// Reject metric-style fields for event widgets
+				if query != "" || metric != "" || measurement != "" || field != "" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] cannot mix event_name_pattern with metric fields (query, metric, measurement, field)", widgetID, idx))
+				}
+			} else {
+				// Metric widget validation
+				if query == "" && metric == "" && (measurement == "" || field == "") {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] must define query, metric, or measurement+field", widgetID, idx))
+				}
+				// Reject event fields for metric widgets
+				if eventNamePattern != "" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] cannot use event_name_pattern in non-event widgets", widgetID, idx))
+				}
+				if (aggregate == "") != (window == "") && !(aggregateBandShortcut && idx == 0 && aggregate == "" && window != "") {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] aggregate and window must be set together", widgetID, idx))
+				}
+				if aggregate != "" && !isSupportedDashboardAggregate(aggregate) && !(widgetType == "aggregate_band" && aggregateBandShortcut && idx == 0) {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] has unsupported aggregate %q", widgetID, idx, aggregate))
+				}
+				if window != "" && !isValidDashboardDuration(window) {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] has invalid window %q", widgetID, idx, window))
+				}
 			}
 			if widgetType == "line_chart" || widgetType == "aggregate_band" {
 				label := effectiveDashboardSeriesLabel(series, idx)

@@ -522,12 +522,53 @@
     syncDashboardRefreshControls();
   }
 
-  function chartLookbackChoices(currentLookback) {
+  function charLookbackChoices(currentLookback) {
     const values = ["15m", "1h", "6h", "12h", "24h", "7d"];
     if (currentLookback && !values.includes(currentLookback)) {
       values.push(currentLookback);
     }
     return values.sort((left, right) => parseDurationSeconds(left, 0) - parseDurationSeconds(right, 0));
+  }
+
+  function formatEventTimestamp(unixNs) {
+    if (!Number.isInteger(unixNs)) {
+      return "--";
+    }
+    const ms = Math.floor(unixNs / 1000000);
+    const date = new Date(ms);
+    return date.toLocaleTimeString();
+  }
+
+  function formatEventPayloadSummary(payload) {
+    if (!payload || typeof payload !== "object") {
+      return "";
+    }
+    if (typeof payload.latency_ms === "number") {
+      return Math.round(payload.latency_ms) + " ms";
+    }
+    if (typeof payload.value === "number") {
+      return String(payload.value);
+    }
+    return "";
+  }
+
+  function extractEventValue(evt) {
+    if (!evt || typeof evt !== "object") {
+      return "";
+    }
+    if (evt.value !== undefined && evt.value !== null) {
+      return String(evt.value);
+    }
+    if (typeof evt.int32 === "number") {
+      return String(evt.int32);
+    }
+    if (typeof evt.float32 === "number") {
+      return String(evt.float32);
+    }
+    if (evt.v !== undefined && evt.v !== null) {
+      return String(evt.v);
+    }
+    return "";
   }
 
   function mountError(containerEl, message) {
@@ -624,7 +665,7 @@
     const lookbackSelect = document.createElement("select");
     lookbackSelect.className = "widget-control-select widget-lookback-select";
     lookbackSelect.setAttribute("aria-label", "Chart lookback");
-    chartLookbackChoices(currentLookback).forEach((value) => {
+    charLookbackChoices(currentLookback).forEach((value) => {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = value;
@@ -644,6 +685,22 @@
     card.appendChild(foot);
     containerEl.appendChild(card);
     return { card, plot, foot, refreshBtn: header.refreshBtn, pauseBtn: header.pauseBtn, lookbackSelect };
+  }
+
+  function createEventLogWidget(widget, containerEl) {
+    const card = document.createElement("article");
+    card.className = "widget-eventlog";
+    const header = createWidgetHeader(widget.title || widget.id, "widget-label");
+    const events = document.createElement("div");
+    events.className = "eventlog-rows";
+    const foot = document.createElement("p");
+    foot.className = "widget-foot";
+    foot.textContent = "waiting for events";
+    card.appendChild(header.header);
+    card.appendChild(events);
+    card.appendChild(foot);
+    containerEl.appendChild(card);
+    return { card, events, foot, refreshBtn: header.refreshBtn, pauseBtn: header.pauseBtn };
   }
 
   function buildWidget(widget, containerEl, dashboardCfg) {
@@ -761,6 +818,59 @@
         void refresher.refreshNow();
       });
       return refresher;
+    }
+
+    if (widget.type === "event_log") {
+      const els = createEventLogWidget(widget, containerEl);
+      const refresh = async () => {
+        const series = (widget.series || [])[0];
+        const db = seriesDB(series, dashboardCfg);
+        const eventNamePattern = series && (series.event_name_pattern || "").trim();
+        if (!db || !eventNamePattern) {
+          els.events.textContent = "";
+          els.foot.textContent = "missing db/event_name_pattern";
+          return;
+        }
+        const lookbackSec = parseDurationSeconds(widget.lookback || "1h", 3600);
+        const end = new Date();
+        const start = new Date(end.getTime() - lookbackSec * 1000);
+        const limit = series && series.event_limit ? series.event_limit : 10;
+        const eventsURL = apiURL(`/api/v1/events?db=${encodeURIComponent(db)}&name=${encodeURIComponent(eventNamePattern)}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}&limit=${limit}`);
+        const payload = await fetchJSON(eventsURL);
+        const events = payload.data && payload.data.result ? payload.data.result : [];
+        els.events.innerHTML = "";
+        if (events.length === 0) {
+          els.foot.textContent = "no events";
+          return;
+        }
+        events.forEach((evt) => {
+          const row = document.createElement("div");
+          row.className = "eventlog-row";
+          const nameCell = document.createElement("span");
+          nameCell.className = "eventlog-cell eventlog-name";
+          nameCell.textContent = evt.name || evt.N || "?";
+          const timeCell = document.createElement("span");
+          timeCell.className = "eventlog-cell eventlog-time";
+          timeCell.textContent = formatEventTimestamp(evt.ts || evt.T);
+          const valueCell = document.createElement("span");
+          valueCell.className = "eventlog-cell eventlog-value";
+          valueCell.textContent = extractEventValue(evt) || formatEventPayloadSummary(evt.payload || evt.p) || "";
+          row.appendChild(nameCell);
+          row.appendChild(timeCell);
+          row.appendChild(valueCell);
+          els.events.appendChild(row);
+        });
+        els.foot.textContent = "updated " + new Date().toLocaleTimeString();
+      };
+      return createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, {
+        autoRefresh,
+        widgetEl: els.card,
+        onError: (err) => {
+          els.events.innerHTML = "";
+          markWidgetRefreshError(els.card, els.foot, err);
+        },
+        onSuccess: () => clearWidgetRefreshError(els.card),
+      });
     }
 
     mountError(containerEl, "unsupported widget type: " + widget.type);

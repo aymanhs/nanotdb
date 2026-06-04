@@ -520,3 +520,172 @@ func TestRegister_DisabledSkipsDashboardRoutes(t *testing.T) {
 		t.Fatalf("status mismatch: got=%d want=404", rec.Code)
 	}
 }
+
+func TestRegister_ValidatesDashboardEventLogWidget(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Events Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"events","label":"Events","widgets":["slow_writes"]}],
+  "widgets": {
+    "slow_writes": {
+      "type": "event_log",
+      "title": "Slow Writes",
+      "lookback": "6h",
+      "series": [
+        {
+          "event_name_pattern": "disk.sd_write_probe.slow",
+          "event_limit": 10,
+          "db": "metrics"
+        }
+      ]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_RejectsEventWidgetWithoutEventNamePattern(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Events Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"events","label":"Events","widgets":["bad"]}],
+  "widgets": {
+    "bad": {
+      "type": "event_log",
+      "title": "Missing Event Pattern",
+      "series": [{"db": "metrics"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("validate status mismatch: got=%d want=400 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `event_name_pattern`) {
+		t.Fatalf("expected event_name_pattern error, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_RejectsEventWidgetWithMetricFields(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Events Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"events","label":"Events","widgets":["bad"]}],
+  "widgets": {
+    "bad": {
+      "type": "event_log",
+      "title": "Mixed Fields",
+      "series": [
+        {
+          "event_name_pattern": "disk.sd_write_probe.slow",
+          "metric": "cpu.busy_pct",
+          "db": "metrics"
+        }
+      ]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("validate status mismatch: got=%d want=400 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `cannot mix`) {
+		t.Fatalf("expected cannot mix error, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_RejectsMetricWidgetWithEventFields(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Mixed Dashboard",
+  "default_db": "metrics",
+  "groups": [{"id":"overview","label":"Overview","widgets":["bad"]}],
+  "widgets": {
+    "bad": {
+      "type": "numbers",
+      "series": [
+        {
+          "metric": "cpu.busy_pct",
+          "event_name_pattern": "disk.sd_write_probe.slow"
+        }
+      ]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("validate status mismatch: got=%d want=400 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `event_name_pattern`) {
+		t.Fatalf("expected event_name_pattern error, got %q", rec.Body.String())
+	}
+}
+
+func TestRegister_AcceptsMixedDashboardWithMetricAndEventWidgets(t *testing.T) {
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+
+	body := strings.NewReader(`{
+  "title": "Mixed Dashboard",
+  "default_db": "metrics",
+  "groups": [
+    {"id":"overview","label":"Overview","widgets":["cpu_widget"]},
+    {"id":"events","label":"Events","widgets":["slow_writes"]}
+  ],
+  "widgets": {
+    "cpu_widget": {
+      "type": "numbers",
+      "series": [{"metric": "cpu.busy_pct"}]
+    },
+    "slow_writes": {
+      "type": "event_log",
+      "lookback": "6h",
+      "series": [{"event_name_pattern": "disk.sd_write_probe.slow"}]
+    }
+  }
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status mismatch: got=%d want=200 body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok response, got %q", rec.Body.String())
+	}
+}

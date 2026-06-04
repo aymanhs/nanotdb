@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -112,7 +114,7 @@ func NewLogger(cfg EngineConfigLogging) (*slog.Logger, func() error, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("logger %d: %w", i, err)
 		}
-		writer, closer, err := openLogOutput(entry.Output)
+		writer, closer, err := openLogOutput(entry)
 		if err != nil {
 			return nil, nil, fmt.Errorf("logger %d: %w", i, err)
 		}
@@ -177,16 +179,134 @@ func slogLevelName(level slog.Level) string {
 	}
 }
 
-func openLogOutput(output string) (*os.File, func() error, error) {
-	output = strings.TrimSpace(output)
+func openLogOutput(entry EngineConfigLogger) (io.Writer, func() error, error) {
+	output := strings.TrimSpace(entry.Output)
 	if output == "console" {
 		return os.Stderr, nil, nil
+	}
+	if entry.MaxFileBytes > 0 {
+		maxBackups := entry.MaxBackups
+		if maxBackups <= 0 {
+			maxBackups = 5
+		}
+		w, err := newRotatingFileWriter(output, entry.MaxFileBytes, maxBackups)
+		if err != nil {
+			return nil, nil, err
+		}
+		return w, w.Close, nil
 	}
 	f, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, nil, err
 	}
 	return f, f.Close, nil
+}
+
+type rotatingFileWriter struct {
+	mu         sync.Mutex
+	path       string
+	file       *os.File
+	size       int64
+	maxBytes   int64
+	maxBackups int
+}
+
+func newRotatingFileWriter(path string, maxBytes int64, maxBackups int) (*rotatingFileWriter, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("log output path cannot be empty")
+	}
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("max_file_bytes must be > 0")
+	}
+	if maxBackups < 0 {
+		return nil, fmt.Errorf("max_backups must be >= 0")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &rotatingFileWriter{
+		path:       path,
+		file:       f,
+		size:       st.Size(),
+		maxBytes:   maxBytes,
+		maxBackups: maxBackups,
+	}, nil
+}
+
+func (w *rotatingFileWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.file == nil {
+		return 0, fmt.Errorf("log writer is closed")
+	}
+
+	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
+		if err := w.rotateLocked(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := w.file.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *rotatingFileWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	return err
+}
+
+func (w *rotatingFileWriter) rotateLocked() error {
+	if w.file != nil {
+		if err := w.file.Close(); err != nil {
+			return err
+		}
+		w.file = nil
+	}
+
+	if w.maxBackups > 0 {
+		oldest := fmt.Sprintf("%s.%d", w.path, w.maxBackups)
+		_ = os.Remove(oldest)
+		for i := w.maxBackups - 1; i >= 1; i-- {
+			src := fmt.Sprintf("%s.%d", w.path, i)
+			dst := fmt.Sprintf("%s.%d", w.path, i+1)
+			if _, err := os.Stat(src); err == nil {
+				if err := os.Rename(src, dst); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := os.Stat(w.path); err == nil {
+			if err := os.Rename(w.path, fmt.Sprintf("%s.1", w.path)); err != nil {
+				return err
+			}
+		}
+	} else {
+		_ = os.Remove(w.path)
+	}
+
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	w.file = f
+	w.size = 0
+	return nil
 }
 
 func (e *Engine) logInfo(msg string, args ...any) {

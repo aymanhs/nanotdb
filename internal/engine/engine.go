@@ -71,12 +71,28 @@ type OpenPageStats struct {
 	Persisted    bool          `json:"persisted"`
 }
 
+// OpenEventsPageStats summarizes one open events page held in memory.
+// Mirrors OpenPageStats for the events storage layer.
+type OpenEventsPageStats struct {
+	Day          string        `json:"day"`
+	Records      int           `json:"records"`
+	StartTS      Timestamp     `json:"start_timestamp_ns"`
+	EndTS        Timestamp     `json:"end_timestamp_ns"`
+	MaxRecords   int           `json:"max_records"`
+	MaxBytes     int           `json:"max_bytes"`
+	MaxAge       time.Duration `json:"max_age_ns"`
+	Age          time.Duration `json:"age_ns"`
+	WALSegmentID uint16        `json:"wal_segment_id"`
+}
+
 type DBRuntimeInspect struct {
-	Database    string          `json:"database"`
-	MetricCount int             `json:"metric_count"`
-	Manifest    DBInfo          `json:"manifest"`
-	Stats       DBStats         `json:"stats"`
-	OpenPages   []OpenPageStats `json:"open_pages"`
+	Database        string                `json:"database"`
+	MetricCount     int                   `json:"metric_count"`
+	EventCount      int                   `json:"event_count"`
+	Manifest        DBInfo                `json:"manifest"`
+	Stats           DBStats               `json:"stats"`
+	OpenPages       []OpenPageStats       `json:"open_pages"`
+	OpenEventsPages []OpenEventsPageStats `json:"open_events_pages"`
 }
 
 type dbRuntime struct {
@@ -202,8 +218,10 @@ type EngineConfigLogging struct {
 }
 
 type EngineConfigLogger struct {
-	Output string `toml:"output"`
-	Level  string `toml:"level"`
+	Output       string `toml:"output"`
+	Level        string `toml:"level"`
+	MaxFileBytes int64  `toml:"max_file_bytes"`
+	MaxBackups   int    `toml:"max_backups"`
 }
 
 type EngineConfigStats struct {
@@ -1449,12 +1467,18 @@ func (e *Engine) InspectDBRuntime(database string) (DBRuntimeInspect, bool) {
 	}
 
 	stats, _ := e.DBStats(database)
+	eventCount := 0
+	if db.eventCatalog != nil {
+		eventCount = len(db.eventCatalog.ListEvents())
+	}
 	inspect := DBRuntimeInspect{
-		Database:    database,
-		MetricCount: len(db.catalog.ListMetrics()),
-		Manifest:    rt.info,
-		Stats:       stats,
-		OpenPages:   make([]OpenPageStats, 0),
+		Database:        database,
+		MetricCount:     len(db.catalog.ListMetrics()),
+		EventCount:      eventCount,
+		Manifest:        rt.info,
+		Stats:           stats,
+		OpenPages:       make([]OpenPageStats, 0),
+		OpenEventsPages: make([]OpenEventsPageStats, 0),
 	}
 
 	for _, openPage := range e.snapshotOpenPages(rt, true) {
@@ -1484,6 +1508,31 @@ func (e *Engine) InspectDBRuntime(database string) (DBRuntimeInspect, bool) {
 			Persisted:    false,
 		})
 	}
+
+	e.writeMu.Lock()
+	evDays := make([]string, 0, len(rt.openEventsDays))
+	for day := range rt.openEventsDays {
+		evDays = append(evDays, day)
+	}
+	sort.Strings(evDays)
+	for _, day := range evDays {
+		ep := rt.openEventsDays[day]
+		if ep == nil {
+			continue
+		}
+		inspect.OpenEventsPages = append(inspect.OpenEventsPages, OpenEventsPageStats{
+			Day:          day,
+			Records:      len(ep.Times),
+			StartTS:      ep.Start,
+			EndTS:        ep.End,
+			MaxRecords:   ep.MaxRecords,
+			MaxBytes:     ep.MaxBytes,
+			MaxAge:       ep.MaxAge,
+			Age:          time.Since(ep.createdAt),
+			WALSegmentID: ep.WALSegmentID,
+		})
+	}
+	e.writeMu.Unlock()
 
 	return inspect, true
 }

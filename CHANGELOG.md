@@ -9,38 +9,40 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 - New `--timestamp-unit ns|us|ms|s` flag on `nanocli query` and `nanocli import parts`, plus the equivalent `timestamp_unit` query parameter on the web API range endpoints; default is `ns`. Bare numeric timestamps are no longer auto-bucketed by magnitude.
-- `engine.ParseDuration` accepts `d` (days) and `w` (weeks) on top of the stdlib units. Used everywhere durations are configured — manifest fields (`grace`, `wal.skip_before`, `page.max_age`, `rollups.*`), the web `window` parameter, and `nanocli` `--start` / `--end` / `--window`.
-- Strict database-name allowlist (`[A-Za-z0-9_.-]`, 1–64 bytes, cannot start with `.` or `-`) enforced at every ingress — line protocol, `AddSample`, HTTP `?db=` parameters, rollup backfill, and offline import/export.
-- HTTP server now sets `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, and `MaxHeaderBytes` in addition to `ReadHeaderTimeout`.
-- Manifest field upper bounds rejected at load time: `max_active_days ≤ 1000`, `retention_days ≤ 36500`, `page.max_records ≤ 65535`, `page.max_bytes ≤ 64 MiB`, `metrics.time_cache_slots ≤ 1M`.
-- Events storage/query surfaces: per-database events catalog + WAL + `events-*.dat` files, engine APIs (`AddEvent`, `QueryEvents`, `ListEvents`), HTTP endpoints (`/api/v1/events`, `/api/v1/events/catalog`, `/api/v1/events/aggregate`), and CLI support (`nanocli events`, `nanocli inspect events`, `nanocli inspect events-catalog`, `nanocli inspect events-wal`).
+- Duration parsing now accepts `d` (days) and `w` (weeks) across config, API, and CLI time/window inputs.
+- Database names are now validated consistently across ingest, API, rollups, and offline import/export.
+- HTTP server timeout and header-size limits are now enabled by default.
+- Manifest validation now enforces upper bounds on key retention, page, and metric-cache settings.
+- First-class events support across storage, query APIs, HTTP endpoints, and `nanocli` inspection/query workflows.
+- Size-based file log rotation with configurable file-size limits and backup retention.
 
 ### Changed
-- Manifests now require `retention.retention_action` to be set explicitly (`keep|delete|archive`). Pre-1.4 manifests without this field will fail to open until the operator chooses a value — this prevents a silent switch to `keep` (no pruning) on upgrade.
-- `nanocli query --end` defaults to `MaxInt64` (unbounded) again, restoring 1.3-era behaviour for future-dated samples (clock skew, backfills, replication lag).
-- Engine API responses no longer leak absolute filesystem paths; data/metric/WAL file paths are returned relative to the engine root, and dashboard `backup_path` is returned as basename only.
-- `Engine.Close()` now flushes/closes every database even when one of them errors, returning a joined error rather than stopping at the first failure.
-- Metric names are now capped at 255 bytes; `/` remains forbidden (1.4 behaviour).
-- Default and per-database manifest shape now includes `[events]`, `[events.page]`, and `[events.wal]` knobs, and retention-family cleanup/archive handling now includes `events-<partition>.dat` alongside raw/metric files.
+- Manifests now require an explicit `retention.retention_action` (`keep|delete|archive`) during upgrade.
+- `nanocli query --end` defaults to an unbounded upper range again, restoring the earlier behaviour for future-dated samples and backfills.
+- Engine API responses now return relative storage paths instead of absolute filesystem paths.
+- `Engine.Close()` now attempts to flush and close every database before returning any combined error.
+- Metric names are now capped at 255 bytes.
+- Default and per-database manifests now include events settings, and retention/archive handling now covers `events-<partition>.dat` files alongside metric storage.
 
 ### Fixed
-- **Crash safety:** WAL replay now skips records whose timestamp is at or below the durable watermark of `data-*.dat`, eliminating a duplicate-frame hazard after a crash between data fsync and WAL truncate.
-- **Replay robustness:** a WAL record whose timestamp would land before the current page's max is now handled by flushing the page and retrying, instead of aborting the entire replay and bricking the database.
-- **Rollup durability:** destination database pages are now flushed before the rollup checkpoint is appended, closing a gap where a crash could leave a checkpoint claiming "interval done" with no data on disk.
-- **Atomic writes:** manifest writes (`engine.toml`, `manifest.toml`, auto-created rollup destination manifest) now use tmp+fsync+rename+dir-fsync. Catalog, V1/V2 metric files, and rollup checkpoint compaction also now call `syncParentDir` after rename. Orphan `.tmp` files are removed on every rename-failure path.
-- **Concurrency:** removed an ABBA deadlock hazard between the inspect/query path and the write path. Lock acquisition order is now documented on the `Engine` struct; the `writeLockHeld bool` flag-parameter was replaced with explicit `*Locked` method variants.
-- **Compression bomb / OOM protection:** every on-disk frame allocation (page frames, V1 metric pages, V2 time-frames, V2 metric-frames) now rejects oversized `PayloadLen` / `DecodedLen` values before allocating the receive buffer.
-- **WAL integrity:** WAL replay no longer silently defaults an unknown value-type byte to `int32` (which previously could misread float bits as int); resolution now requires the catalog and errors out if the metric id is missing.
-- **Catalog integrity:** `catalog.json` is validated on load — rejects empty names, `id=0`, invalid `value_type`, duplicate names, and duplicate ids. Internal `idToName` map now keys on `MetricID` (uint16) instead of `int16`, eliminating a wrap hazard for metric IDs ≥ 32768.
-- **V2 metric files:** fixed three sites where `uint32(TimeOffset + pointCount)` could silently wrap and return a truncated sample slice.
-- **Sample-formatting helpers:** unified `engine.ValueTypeName`, `FormatSampleValue`, `FormatLPValue`, `ParseLPValue`. Online ingest (`parseLineProtocol`) and offline import/export now share the same definition of a valid LP sample.
-- **Reader interface:** new `MetricFileReader` abstraction over V1/V2; every callsite that previously switched on the version byte (summary, frame walk, sample walk, single-metric and multi-metric collect, raw-vs-metric compare) now goes through one interface.
-- **Query path:** `QueryRange` is now the n=1 special case of `QueryRangeMany`; the three-deep `os.IsNotExist` ladder is consolidated.
-- Path traversal via `?db=../etc` on the engine UI is rejected (new database-name allowlist + `HasPrefix(rootDir)` guard).
-- `Engine.ExportFile` now surfaces buffered-write/Sync failures from the output file instead of silently dropping them via `defer Close()`.
-- LP import scanners (`engine.ImportFile`, `ImportOfflineLPToMetricParts`) raised from the 64 KiB default to a 1 MiB line cap; longer lines surface as errors rather than silently truncating.
-- `Aggregator.Compute` interface dropped two unused `Timestamp` parameters; tests and call sites updated.
-- Events ingest/runtime now fully honors per-DB events config instead of hardcoded limits: payload cap enforcement (`events.max_payload_bytes`), in-memory/page flush thresholds (`events.max_in_memory_bytes`, `events.page.*`), and events WAL settings (`events.wal.max_segment_size`, `events.wal.fsync_policy`) are threaded through manifest defaults, DB manifests, open/replay, and write paths.
+- WAL replay now skips already-durable records after crash recovery, avoiding duplicate-frame replays.
+- Replay now recovers from certain out-of-order WAL records by flushing and retrying instead of aborting database open.
+- Rollup checkpoint writes now wait until destination data is safely flushed.
+- Manifest and related metadata writes are now fully atomic.
+- Fixed a deadlock hazard between read/inspect paths and the write path.
+- Oversized on-disk frames are now rejected before allocation to reduce OOM risk.
+- WAL replay now fails cleanly on unknown or invalid metric type information instead of guessing.
+- `catalog.json` validation now catches empty names, invalid IDs, invalid value types, and duplicates on load.
+- Fixed several overflow/truncation edge cases in V2 metric-file reads.
+- Line protocol parsing and sample formatting are now consistent across online ingest and offline import/export.
+- Metric-file read paths now share a single version-aware reader abstraction.
+- Query-range internals were simplified and consolidated.
+- Engine UI database path traversal is now rejected.
+- `Engine.ExportFile` now surfaces buffered-write and sync failures correctly.
+- Line-protocol import now supports lines up to 1 MiB instead of silently truncating longer input.
+- Removed two unused `Timestamp` parameters from `Aggregator.Compute`.
+- Events now fully honor per-database payload, page, and WAL settings during ingest and recovery.
+- Local deploy helper now handles config-only drip updates more cleanly, restarting services only when needed and preserving config file permissions during remote updates.
 
 ### Deferred
 - HTTP authentication on the engine endpoints — tracked for a dedicated release.

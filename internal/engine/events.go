@@ -107,6 +107,13 @@ type EventInfo struct {
 	Name      string
 	EventID   EventID
 	ValueType byte
+
+	// LastTS / LastValid mirror EventEntry runtime state. LastValid is
+	// false until the first accepted append. Useful for inspect/UI to
+	// answer "is anything coming in for this event?" without scanning
+	// storage.
+	LastTS    Timestamp
+	LastValid bool
 }
 
 // EventEntry is the in-memory catalog record for one event. It holds the

@@ -250,6 +250,8 @@ func (c *EventCatalog) ListEvents() []EventInfo {
 			Name:      name,
 			EventID:   entry.EventID,
 			ValueType: entry.ValueType,
+			LastTS:    entry.LastTS,
+			LastValid: entry.LastValid,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

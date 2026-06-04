@@ -176,10 +176,12 @@ Config shape summary:
 - `default_db` sets the database used when a series does not override it.
 - `groups[]` defines dashboard tabs/sections in display order.
 - `groups[].widgets[]` references widget ids from the top-level `widgets` map.
-- `widgets.<id>.type` currently supports `number`, `numbers`, `line_chart`, and `aggregate_band`.
+- `widgets.<id>.type` currently supports `number`, `numbers`, `line_chart`, `aggregate_band`, and `event_log`.
 - Each widget must define at least one series.
-- A series must define either `metric` or `measurement` + `field`.
+- A metric series must define either `metric` or `measurement` + `field`.
+- An event series must define `event_name_pattern` (wildcard patterns supported with `*`).
 - `line_chart` and `aggregate_band` widgets require valid duration strings for `lookback` and `interval`.
+- `event_log` widgets require a valid duration string for `lookback`.
 - `line_chart` and `aggregate_band` widgets must not contain duplicate effective labels. A duplicate
   label is any repeated explicit `label`, or repeated fallback label derived
   from `metric` or `measurement.field`.
@@ -201,6 +203,34 @@ Series support:
   thresholds are set.
 - Thresholds only affect number and numbers widgets. Chart widgets render the
   transformed values but do not apply severity coloring.
+- `event_limit` sets the maximum number of recent events to display in an event_log widget (default: 10).
+
+## Event Widgets
+
+The `event_log` widget type displays recent events from the event stream. Events
+are queried using wildcardable event name patterns.
+
+Example event_log widget:
+
+```json
+{
+  "type": "event_log",
+  "title": "Slow Disk Writes",
+  "refresh_sec": 10,
+  "lookback": "6h",
+  "series": [
+    {
+      "event_name_pattern": "disk.sd_write_probe.slow",
+      "event_limit": 10,
+      "db": "metrics"
+    }
+  ]
+}
+```
+
+Rows display event name, timestamp, and event value. If the event payload
+contains `latency_ms`, it is shown as the value; otherwise, the top-level
+numeric `value` field is used if present.
 
 ## Editor
 

@@ -140,6 +140,11 @@
   min-width: 0;
 }
 
+.widget-eventlog {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
 @keyframes widgetFadeIn {
   from {
     opacity: 0;
@@ -174,6 +179,7 @@
 .widget-number,
 .widget-numbers,
 .widget-chart,
+.widget-eventlog,
 .widget-error {
   position: relative;
   isolation: isolate;
@@ -189,6 +195,7 @@
 .widget-number::before,
 .widget-numbers::before,
 .widget-chart::before,
+.widget-eventlog::before,
 .widget-error::before {
   content: "";
   position: absolute;
@@ -204,6 +211,7 @@
 .widget-value,
 .numbers-list,
 .chart-plot,
+.eventlog-rows,
 .widget-foot {
   position: relative;
   z-index: 1;
@@ -211,7 +219,8 @@
 
 .widget-number:hover,
 .widget-numbers:hover,
-.widget-chart:hover {
+.widget-chart:hover,
+.widget-eventlog:hover {
   transform: translateY(-2px);
   border-color: var(--accent);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4), 0 0 12px color-mix(in srgb, var(--accent) 15%, transparent);
@@ -219,34 +228,80 @@
 
 .widget-number.widget-refreshing,
 .widget-numbers.widget-refreshing,
-.widget-chart.widget-refreshing {
+.widget-chart.widget-refreshing,
+.widget-eventlog.widget-refreshing {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.36), 0 0 14px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .widget-number.widget-refreshing::before,
 .widget-numbers.widget-refreshing::before,
-.widget-chart.widget-refreshing::before {
+.widget-chart.widget-refreshing::before,
+.widget-eventlog.widget-refreshing::before {
   opacity: 1;
   animation: widgetRefreshSweep 0.95s cubic-bezier(0.22, 1, 0.36, 1) 1;
 }
 
 .widget-number.widget-refreshing .widget-foot,
 .widget-numbers.widget-refreshing .widget-foot,
-.widget-chart.widget-refreshing .widget-foot {
+.widget-chart.widget-refreshing .widget-foot,
+.widget-eventlog.widget-refreshing .widget-foot {
   color: color-mix(in srgb, var(--accent) 55%, var(--muted));
 }
 
 .widget-number.widget-refreshing .widget-control-btn,
 .widget-numbers.widget-refreshing .widget-control-btn,
-.widget-chart.widget-refreshing .widget-control-btn {
+.widget-chart.widget-refreshing .widget-control-btn,
+.widget-eventlog.widget-refreshing .widget-control-btn {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
 
 .widget-number,
 .widget-numbers,
+.widget-eventlog,
 .widget-error {
   padding: 18px;
+}
+
+.eventlog-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.eventlog-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  font-size: 0.9em;
+}
+
+.eventlog-cell.eventlog-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eventlog-cell.eventlog-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.eventlog-cell.eventlog-value {
+  color: color-mix(in srgb, var(--accent) 80%, var(--text));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .widget-chart {
@@ -423,7 +478,8 @@
 
 .widget-number.widget-refresh-error,
 .widget-numbers.widget-refresh-error,
-.widget-chart.widget-refresh-error {
+.widget-chart.widget-refresh-error,
+.widget-eventlog.widget-refresh-error {
   border-color: color-mix(in srgb, #ef4444 70%, var(--border));
 }
 

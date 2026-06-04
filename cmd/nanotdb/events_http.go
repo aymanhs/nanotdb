@@ -390,9 +390,11 @@ func formatEventPayloadForResponse(raw []byte) json.RawMessage {
 // /api/v1/metrics?details=true.
 func handleEventsCatalog(eng *engine.Engine) http.HandlerFunc {
 	type entry struct {
-		Name      string `json:"name"`
-		ID        uint16 `json:"id"`
-		ValueType string `json:"value_type"`
+		Name            string `json:"name"`
+		ID              uint16 `json:"id"`
+		ValueType       string `json:"value_type"`
+		LastTimestamp   string `json:"last_timestamp,omitempty"`
+		LastTimestampNS int64  `json:"last_timestamp_ns,omitempty"`
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -421,11 +423,16 @@ func handleEventsCatalog(eng *engine.Engine) http.HandlerFunc {
 		}
 		out := make([]entry, 0, len(events))
 		for _, e := range events {
-			out = append(out, entry{
+			item := entry{
 				Name:      e.Name,
 				ID:        uint16(e.EventID),
 				ValueType: engine.EventValueTypeName(e.ValueType),
-			})
+			}
+			if e.LastValid {
+				item.LastTimestampNS = int64(e.LastTS)
+				item.LastTimestamp = engine.FormatTimestamp(e.LastTS)
+			}
+			out = append(out, item)
 		}
 		writeJSON(w, http.StatusOK, vmResponse{
 			Status: "success",
