@@ -7,7 +7,8 @@ NanoTDB is a small, append-only, embedded time-series database designed for:
 - simple durability and correctness guarantees
 - easy reasoning and crash safety
 
-This document summarizes the architecture decisions for v0.
+This document summarizes the long-term architecture decisions. For
+release-specific behavior, see [../CHANGELOG.md](../CHANGELOG.md).
 
 ---
 
@@ -445,25 +446,28 @@ Reader cache requirements:
   - `retention_days`: how long to keep historical data
   - `max_active_days`: maximum number of simultaneous open partition files (default 2)
   - `partition`: partition mode (`day|month|year|forever`)
-  - `grace`: grace period for out-of-order sample tolerance (v0 placeholder)
+  - `grace`: grace window used by rollups and out-of-order tolerance checks
   - `rollups`: source-defined rollup jobs + checkpoint settings, including selector-based jobs with wildcard exclusions and per-DB defaults
 - Auto-created rollup destination manifests are specialized from normal DB defaults: WAL disabled, coarser partitions (`month` for sub-daily, `year` for daily-or-larger), and longer page age to reduce sparse tiny files.
 
 ---
 
-## Write Path Overview (v0)
+## Write Path Overview
 
-1. Insert request arrives
-2. API metric string is resolved to `MetricID` via catalog
-3. Unknown metric strings are created in catalog with a new `MetricID`
-4. Value type must match metric type; mismatched writes are rejected
-5. If the metric id space is exhausted, insert fails by rejection
-6. Target UTC partition file (`data-<partition>.dat`) is selected from sample timestamp + partition mode
-7. Sample is appended to the active in-memory page buffer for that database-partition stream
-8. On page seal (size/time policy), write one page frame to the selected partition `.dat` file
-9. Optional batching/fsync policy is applied
+1. Insert request arrives.
+2. API metric string is resolved to `MetricID` via the catalog.
+3. Unknown metric strings are created in the catalog with a new `MetricID`.
+4. Value type must match metric type; mismatched writes are rejected.
+5. If the metric id space is exhausted, insert fails by rejection.
+6. Target UTC partition file (`data-<partition>.dat`) is selected from the
+   sample timestamp + partition mode.
+7. Sample is appended to the WAL, then to the active in-memory page buffer
+   for that database/partition stream.
+8. On page seal (size/byte/age policy from `[page]`), write one page frame
+   to the selected partition `.dat` file.
+9. The WAL fsync and page/catalog fsync policies are applied as configured.
 
-Out-of-order inserts for a metric are rejected in v0.
+Out-of-order inserts for a metric are rejected.
 
 ---
 
@@ -491,11 +495,22 @@ Out-of-order inserts for a metric are rejected in v0.
 
 ---
 
-## Durability & Acknowledgment (v0)
+## Durability & Acknowledgment
 
-- v0 accepts potential data loss after acknowledgment
-- Acknowledged writes may be lost after process or OS crash depending on flush/fsync timing
-- The design goal is simplicity first; stronger durability can be added later
+- The strength of an acknowledged write depends on the configured WAL fsync
+  policy (`wal.fsync_policy = segment|always`) and the durability profile
+  (`durability.profile = strict|balanced|throughput`).
+- With `wal.fsync_policy = always`, an acknowledged sample is fsync'd to the
+  WAL before the write returns; with `segment`, fsync happens at WAL reset
+  after a page flush, and a crash may lose the in-flight tail since the last
+  flush.
+- The page/catalog fsync side is controlled by `durability.profile`:
+  `strict` fsyncs both, `balanced` fsyncs the page file only, `throughput`
+  fsyncs neither.
+- The conservative configuration (`always` + `strict`) is appropriate for
+  power-loss-prone edge boxes; the throughput configuration is appropriate
+  for host-class machines on UPS. See [RECOVERY.md](RECOVERY.md) for the
+  full discussion.
 
 ---
 
@@ -520,11 +535,11 @@ Benefits:
 
 - Full-day scans are the dominant query pattern
 - Day-file scan cost is expected to be negligible for target workloads
-- For narrower lookups, all matching frames are decompressed (no index-based skipping in v0)
+- For narrower lookups against raw `data-*.dat`, all matching frames are decompressed (header-only filtering skips frames whose time range is outside the query window, but there is no sub-frame index). Queries against `metric-*.dat` use the per-metric and shared-time-frame indexes inside the file.
 
 ---
 
-## Engine API (v0)
+## Engine API
 
 ### Ingest
 
@@ -622,14 +637,16 @@ Notes:
 
 ---
 
-## Non-Goals (v0)
+## Non-Goals
 
-- No separate external index file
-- No WAL durability guarantees
-- No compaction implementation
-- No background collection
-- No distributed operation
-- No transactional semantics beyond stated crash behavior
+- No separate external index file for raw ingest data (`metric-*.dat` files
+  have internal indexes; raw `data-*.dat` files do not).
+- No background collection (the engine never ingests on its own; collectors
+  like `drip` push samples in).
+- No distributed operation.
+- No transactional semantics beyond stated crash behavior.
+- No support for arbitrary out-of-order writes per metric. Late samples
+  outside the open page horizon are rejected by design.
 
 ---
 
@@ -642,10 +659,10 @@ NanoTDB prioritizes clarity, predictability, and operational simplicity over fea
 NanoTDB supports multiple databases.
 
 A **Database** is an isolated storage unit consisting of:
-- its own partitioned `data-<partition>.dat` files
+- its own partitioned `data-<partition>.dat` files (and optional `metric-<partition>.dat` / `raw-<partition>.dat`)
 - its own source metric catalog file
 - operational manifest metadata file
-- optional WAL files (future)
+- a WAL file (`<db>.wal`) used for crash recovery
 
 Properties:
 - Databases do not share data, WAL state, or catalog mappings

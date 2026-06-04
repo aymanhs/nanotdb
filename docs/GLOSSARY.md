@@ -10,10 +10,11 @@ These terms are foundational. Their meanings must not drift.
 A **Database** is an isolated namespace within NanoTDB.
 
 Properties:
-- Contains its own metrics, daily data files (`data-YYYY-MM-DD.dat`), catalog file, and operational manifest
+- Contains its own metrics, partitioned data files (`data-<partition>.dat`), catalog file, manifest, and WAL
 - Represents a unit of retention, lifecycle, and failure isolation
 - Metrics do not cross database boundaries
-- No index file exists; queries scan data files directly
+- Partition granularity (`day|month|year|forever`) is per-database via the manifest
+- No external sidecar index file exists; raw ingest queries scan data files directly
 
 ---
 
@@ -95,16 +96,45 @@ Properties:
 
 ---
 
-## Daily Data File (`data-YYYY-MM-DD.dat`)
+## Partition Data File (`data-<partition>.dat`)
 
-A **Daily Data File** is the append-only storage for one database and one UTC day.
+A **Partition Data File** is the append-only raw ingest storage for one
+database and one UTC partition window.
 
 Properties:
-- Named as `data-YYYY-MM-DD.dat`
-- Contains one or more compressed page frames
+- Named by partition mode: `data-YYYY-MM-DD.dat` (day), `data-YYYY-MM.dat` (month), `data-YYYY.dat` (year), or `data-forever.dat`
+- Contains one or more compressed page frames in write order
+- Frames may interleave samples from multiple metrics
 - All frames are immutable once written
-- Grows monotonically until next day
-- Retention is enforced by deleting old day files
+- Grows monotonically until the next partition window opens
+- Retention is enforced by deleting old partition files
+
+---
+
+## Metric File (`metric-<partition>.dat`)
+
+A **Metric File** is the optional query-optimized rewrite of a sealed
+partition's raw data, grouping samples by metric instead of by ingest order.
+
+Properties:
+- Same logical content as the source `data-<partition>.dat` for the partition
+- Layout is read-optimized: one frame per metric, plus shared timestamp frames in `v2`
+- Built when `[metrics].enabled = true` on partition seal, or manually with `nanocli build metric`
+- Read first by `QueryRange` whenever a `metric-<partition>.dat` exists; raw files are the fallback
+- Carries an internal header, time-frame/metric-frame indexes, and an EOF footer
+
+---
+
+## Renamed Raw File (`raw-<partition>.dat`)
+
+A **Renamed Raw File** is the source `data-<partition>.dat` after a
+successful `metric-<partition>.dat` build under `[metrics].raw_ingest_action = "rename"`.
+
+Properties:
+- Same bytes as the original `data-<partition>.dat`
+- Still readable by inspect, query, and rebuild paths
+- Lets metric files become the primary read path while keeping the raw
+  ingest layout available for verification or rebuild
 
 ---
 
@@ -154,16 +184,34 @@ Properties:
 
 ---
 
-## Compaction
+## Rollup
 
-**Compaction** is the process of producing new, lower-resolution metrics
-from existing data.
+A **Rollup** is a downsampling job that reads a source database's metrics
+and writes lower-resolution aggregate metrics (`min|max|sum|avg|count`)
+into a destination database.
 
 Properties:
-- Reads only durable data
-- Writes new pages via the normal write path
-- Never modifies existing pages
-- Not implemented in v1
+- Reads only durable, already-flushed data
+- Writes destination samples via the normal engine write path
+- Never modifies existing source pages
+- Defined in the source database's `manifest.toml` under `[rollups]`
+- Tracked by a per-source checkpoint log (`rollup.checkpoints.log` by default)
+- Can be chained (e.g. raw → 1h → 1d) by defining rollups on a destination DB
+- Backfillable offline via `nanocli rollup` or online via `POST /api/v1/rollup/backfill`
+
+---
+
+## Metric File Build
+
+A **Metric File Build** is the process of rewriting one sealed partition's
+raw data into a query-optimized `metric-<partition>.dat`.
+
+Properties:
+- Reads only durable, sealed partition data
+- Produces a new file via temp + atomic rename
+- Never modifies existing raw pages
+- After success, handles the raw source according to `[metrics].raw_ingest_action` (`keep|rename|delete`)
+- Runs automatically on partition seal when `[metrics].enabled = true`, or on demand via `nanocli build metric`
 
 ---
 

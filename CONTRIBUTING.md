@@ -16,11 +16,13 @@ Tags:
 ## Current Release Policy
 
 Current release lines:
-- `release/1.3`: safe maintenance line for the `1.3.x` series.
+- `release/1.4`: safe maintenance line for the `1.4.x` series.
+- `release/1.3`: older maintenance line, accepting only critical fixes.
 - `main`: active integration branch for the next planned minor release.
 
 Branch intent:
-- `release/1.3` accepts only low-risk fixes, docs fixes, packaging fixes, and critical regressions.
+- `release/1.4` accepts only low-risk fixes, docs fixes, packaging fixes, and critical regressions.
+- `release/1.3` is kept open for critical regressions only.
 - `main` is the active integration branch for the next release until feature scope is frozen.
 - When the next minor release is frozen, cut a `release/X.Y` branch from `main` and allow only stabilization work there.
 - New feature work should go to `main` or a `feature/...` branch and then be included in the release branch when that branch is refreshed or cut from `main`.
@@ -75,7 +77,8 @@ To keep a release line safe:
 ## Notes For This Repo
 
 For the current release cycle:
-- `v1.3.0` is the latest shipped minor release anchor
-- `release/1.3` is the safe line for any `1.3.x` follow-up fixes
-- `main` is the active merge and regression line for the next minor release
-- cut `release/1.4` from `main` when feature scope is frozen and move to stabilization there
+- `v1.4.0` is the latest shipped minor release anchor (released 2026-05-28).
+- `release/1.4` is the safe line for any `1.4.x` follow-up fixes.
+- `release/1.3` remains open for critical-only fixes against `1.3.x`.
+- `main` is the active merge and regression line for the next minor release.
+- Cut the next `release/X.Y` from `main` when feature scope is frozen and move to stabilization there.

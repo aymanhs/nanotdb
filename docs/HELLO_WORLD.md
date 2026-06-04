@@ -102,5 +102,5 @@ more useful than either:
 
 Next steps:
 
-- See [../GETTING_STARTED.md](../GETTING_STARTED.md) for installation and longer examples.
+- See [GETTING_STARTED.md](GETTING_STARTED.md) for installation and longer examples.
 - See [RUN_AS_A_SERVICE.md](RUN_AS_A_SERVICE.md) if you want to keep it running under systemd.

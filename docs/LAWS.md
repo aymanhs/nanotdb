@@ -116,17 +116,21 @@ Purpose:
 
 ---
 
-## LAW 7 - No Separate Index File
+## LAW 7 - No Separate Index File for Raw Ingest
 
-NanoTDB never uses a separate index file. Queries must operate directly on data files.
+NanoTDB never uses a separate external index file. Queries against raw
+ingest data operate directly on the `data-<partition>.dat` frames.
 
 Formally:
-- Full correctness is derived from `.dat` frames and catalog only
-- No separate index file is ever created, read, or maintained
-- No in-file footer index or auxiliary index structures are used
+- Full correctness for raw ingest is derived from `data-*.dat` frames and the catalog only
+- No separate external index file is ever created, read, or maintained
+- The optional query-optimized `metric-<partition>.dat` files carry their
+  own internal indexes (a header, time-frame and metric-frame indexes,
+  and an EOF footer). These are part of the file itself and never
+  separate sidecar artifacts, so the "no external index" property holds
 
 Purpose:
-- Minimal write-path complexity
+- Minimal write-path complexity for the always-on ingest layout
 - Fewer crash-consistency surfaces
 - Permanent architectural simplicity
 
@@ -161,31 +165,38 @@ Purpose:
 
 ---
 
-## LAW 10 - Acknowledgment Does Not Imply Immediate Stable-Storage Durability
+## LAW 10 - Acknowledgment Durability Is Governed by Configured Policy
 
-In v0, acknowledged writes may be lost after crash.
+The durability of an acknowledged write is determined by the configured
+WAL fsync policy and durability profile, not by the acknowledgment itself.
 
 Formally:
 - An acknowledgment means accepted by the write path
-- WAL replay provides crash recovery for unflushed pages, but durability still depends on WAL/file-system flush behavior
+- WAL replay provides crash recovery for unflushed pages, but per-append
+  stable-storage durability requires `wal.fsync_policy = always`
+- Page/catalog stable-storage durability depends on the active
+  `durability.profile` (`strict|balanced|throughput`)
 
 Purpose:
-- Makes durability contract explicit
-- Avoids accidental over-promising before WAL/durability features are implemented
+- Makes the durability contract explicit
+- Documents the operator's tradeoff between throughput, SD wear, and
+  per-append durability rather than hiding it
 
 ---
 
 ## LAW 11 - WAL Replay Is Mandatory When WAL Data Exists
 
-WAL behavior is not part of v0 correctness.
+WAL replay is part of the engine's correctness contract.
 
 Formally:
-- If WAL contains valid records, startup must replay them
-- WAL may only be reset after associated in-memory page data is flushed and no open pages remain
+- If the WAL contains valid records, startup must replay them
+- WAL may only be reset after associated in-memory page data is flushed and no open pages still depend on it
+- Replay must reject records whose value type does not match the catalog,
+  rather than silently coercing to a default type
 
 Purpose:
-- Preserve future extensibility
-- Keep v0 semantics unambiguous
+- Deterministic and lossless recovery of WAL-protected samples
+- Prevents type-coercion hazards (e.g. reading float bits as int)
 
 
 ---

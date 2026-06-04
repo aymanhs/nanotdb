@@ -4,6 +4,8 @@ NanoTDB can build optional query-optimized `metric-<partition>.dat` files alongs
 
 Raw files preserve ingest order and are the write-path source of truth. Metric files rewrite one partition into a query-optimized layout so range queries can scan one metric at a time instead of walking interleaved ingest pages.
 
+For a friendlier walkthrough of `data-*.dat` vs `metric-*.dat` and why both exist, see [CONCEPTS.md](CONCEPTS.md).
+
 Current status:
 - `v2` shared-time metric files are the default format for auto-builds and `nanocli build metric`
 - `v1` remains available only as an explicit comparison format via `nanocli build metric --format v1`
@@ -138,9 +140,45 @@ Inspect with per-frame detail:
 
 Verbose mode validates full frame payloads for both `v1` and `v2` files.
 
+### Real example output
+
+12 consecutive days from a Raspberry Pi running `drip` with a few DS18B20
+temperature sensors at 10-second cadence:
+
+```text
+file                   version    bytes  time_frames  frames  metrics  points  avg_payload  start                          duration
+---------------------  -------  -------  -----------  ------  -------  ------  -----------  -----------------------------  -------------------
+metric-2026-05-22.dat  v2        757333            1      83       83  693091         8194  2026-05-22 00:00:00.123729620  23h59m53.412213026s
+metric-2026-05-23.dat  v2        934576            2      83       83  717036         9495  2026-05-23 00:00:03.532091224  23h59m50.000001492s
+metric-2026-05-24.dat  v2        995881            2      83       83  722348        10221  2026-05-24 00:00:03.532063520  23h59m50.001017682s
+metric-2026-05-25.dat  v2       1015062            3      83       83  725986         9599  2026-05-25 00:00:03.535678595  23h59m49.998717691s
+metric-2026-05-26.dat  v2        982213            3      83       83  716709         9235  2026-05-26 00:00:03.533068272  23h59m49.998960179s
+metric-2026-05-27.dat  v2        897436            2      83       83  716708         9047  2026-05-27 00:00:03.536247225  23h59m49.999707029s
+metric-2026-05-28.dat  v2        968119            3      91       91  773136         8255  2026-05-28 00:00:03.540659717  23h59m49.994709538s
+metric-2026-05-29.dat  v2        831474            2      91       91  785971         7518  2026-05-29 00:00:03.534321135  23h59m50.001948548s
+metric-2026-05-30.dat  v2        982267            4      91       91  784799         7757  2026-05-30 00:00:03.531937430  23h59m54.245181179s
+metric-2026-05-31.dat  v2        884780            3      91       91  779780         7872  2026-05-31 00:00:07.773104306  23h59m49.999991218s
+metric-2026-06-01.dat  v2        924581            3      91       91  784533         7907  2026-06-01 00:00:07.776704409  23h59m49.996399274s
+metric-2026-06-02.dat  v2        906812            3      91       91  785882         7586  2026-06-02 00:00:07.777071278  23h59m49.999358852s
+```
+
+Reading the columns:
+
+- `bytes` — total file size on disk after S2/zstd compression
+- `time_frames` — number of shared time vectors (the v2-over-v1 size win)
+- `frames` / `metrics` — one frame per metric per file in this workload
+- `points` — total samples in the file (700k–785k per day here)
+- `avg_payload` — average compressed bytes per per-metric frame
+- `start` / `duration` — wall-clock coverage of the partition
+
+Translation: ~1 MB per day to store 700k–785k samples across 83–91 metrics.
+That's under 1.3 bytes per point after compression. A 32 GB SD card holds
+roughly 90 *years* of this kind of workload before retention even has to
+do anything.
+
 ## Benchmark On Your Own Data
 
-Use [scripts/benchmark_metric_files.sh](/home/ayman/code/nanotdb/scripts/benchmark_metric_files.sh) with a prebuilt `nanocli` binary. This does not require Go.
+Use [scripts/benchmark_metric_files.sh](../scripts/benchmark_metric_files.sh) with a prebuilt `nanocli` binary. This does not require Go.
 
 Example:
 
@@ -174,5 +212,5 @@ If your workload is query-heavy and rebuilds are rare, `zstd_default` may win. I
 
 ## Related Tools
 
-- [scripts/regenerate_metric_files.sh](/home/ayman/code/nanotdb/scripts/regenerate_metric_files.sh): rebuild all partitions for one database with `nanocli`
-- [docs/DESIGN.md](/home/ayman/code/nanotdb/docs/DESIGN.md): on-disk metric file format and config mapping
+- [../scripts/regenerate_metric_files.sh](../scripts/regenerate_metric_files.sh): rebuild all partitions for one database with `nanocli`
+- [DESIGN.md](DESIGN.md): on-disk metric file format and config mapping

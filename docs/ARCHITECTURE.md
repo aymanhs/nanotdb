@@ -1,7 +1,8 @@
 # NanoTDB Architecture
 
 This page contains the deeper storage and query walkthrough that used to live on
-the main README.
+the main README. For a friendlier, mental-model-first introduction to the same
+material, see [CONCEPTS.md](CONCEPTS.md).
 
 ## Architecture Overview
 
@@ -33,7 +34,8 @@ AddLine("prod/room.temp 21.5 1715000000000000000")
   ├─ parse line protocol  →  dbName="prod"  metric="room.temp"  ts=…  value=21.5
   ├─ getOrCreateDB        →  open or reuse prod Database
   ├─ WAL append           →  write compact record to prod.wal  (crash-safe)
-  ├─ addToOpenDay         →  append to in-memory Page for today's bucket
+  ├─ append to open page  →  in-memory Page for the current partition
+  │                          window (day/month/year/forever per manifest)
   └─ if page full         →  compress + write page frame to data-<partition>.dat
                               reset WAL (replay no longer needed)
 ```
@@ -53,11 +55,13 @@ new writes.
 ```text
 QueryRange("prod", "room.temp", fromTS, toTS, stride, callback)
   │
-  ├─ iterate UTC days in [fromTS, toTS]
-  │    ├─ open data-<partition>.dat  →  scan page frame headers
+  ├─ iterate UTC partition windows in [fromTS, toTS]
+  │    ├─ prefer metric-<partition>.dat if it exists
+  │    │    use internal indexes to locate per-metric frames directly
+  │    ├─ else open data-<partition>.dat → scan page frame headers
   │    │    skip frames outside time window (no decompression)
   │    │    decompress + scan matching frames
-  │    └─ check in-memory page for today's data
+  │    └─ check the in-memory page for the current partition window
   └─ call callback for each sample (every Nth if stride > 1)
 ```
 
@@ -114,13 +118,20 @@ Offset  Size  Field
 
 ```text
 <root>/
-  engine.toml            — engine configuration (auto-created on first start)
+  engine.toml              — engine configuration (auto-created on first start)
   <db>/
-    catalog.json         — metric registry: name → id + type
-    manifest.toml        — per-database settings (retention, WAL, page limits)
-    <db>.wal             — write-ahead log (single reusable file)
-    data-<partition>.dat — compressed page frames for completed partitions
+    catalog.json           — metric registry: name → id + type
+    manifest.toml          — per-database settings (retention, WAL, page limits, rollups)
+    <db>.wal               — write-ahead log (single reusable file)
+    data-<partition>.dat   — raw ingest: compressed page frames in write order
+    metric-<partition>.dat — optional query-optimized layout (when built)
+    raw-<partition>.dat    — renamed source raw file after a metric-file build
+                             (only with [metrics].raw_ingest_action = "rename")
 ```
+
+See [METRIC_FILES.md](METRIC_FILES.md) for the metric-file layout and
+[CONCEPTS.md](CONCEPTS.md) for a friendlier walkthrough of why both
+`data-*.dat` and `metric-*.dat` exist.
 
 Data files are append-only sequences of page frames:
 
