@@ -88,6 +88,12 @@ func runInspect(args []string) error {
 		return runInspectMetric(subArgs)
 	case "wal":
 		return runInspectWAL(subArgs)
+	case "events":
+		return runInspectEvents(subArgs)
+	case "events-catalog":
+		return runInspectEventsCatalog(subArgs)
+	case "events-wal":
+		return runInspectEventsWAL(subArgs)
 	default:
 		return fmt.Errorf("unknown inspect subcommand: %s", sub)
 	}

@@ -13,6 +13,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - Strict database-name allowlist (`[A-Za-z0-9_.-]`, 1–64 bytes, cannot start with `.` or `-`) enforced at every ingress — line protocol, `AddSample`, HTTP `?db=` parameters, rollup backfill, and offline import/export.
 - HTTP server now sets `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, and `MaxHeaderBytes` in addition to `ReadHeaderTimeout`.
 - Manifest field upper bounds rejected at load time: `max_active_days ≤ 1000`, `retention_days ≤ 36500`, `page.max_records ≤ 65535`, `page.max_bytes ≤ 64 MiB`, `metrics.time_cache_slots ≤ 1M`.
+- Events storage/query surfaces: per-database events catalog + WAL + `events-*.dat` files, engine APIs (`AddEvent`, `QueryEvents`, `ListEvents`), HTTP endpoints (`/api/v1/events`, `/api/v1/events/catalog`, `/api/v1/events/aggregate`), and CLI support (`nanocli events`, `nanocli inspect events`, `nanocli inspect events-catalog`, `nanocli inspect events-wal`).
 
 ### Changed
 - Manifests now require `retention.retention_action` to be set explicitly (`keep|delete|archive`). Pre-1.4 manifests without this field will fail to open until the operator chooses a value — this prevents a silent switch to `keep` (no pruning) on upgrade.
@@ -20,6 +21,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - Engine API responses no longer leak absolute filesystem paths; data/metric/WAL file paths are returned relative to the engine root, and dashboard `backup_path` is returned as basename only.
 - `Engine.Close()` now flushes/closes every database even when one of them errors, returning a joined error rather than stopping at the first failure.
 - Metric names are now capped at 255 bytes; `/` remains forbidden (1.4 behaviour).
+- Default and per-database manifest shape now includes `[events]`, `[events.page]`, and `[events.wal]` knobs, and retention-family cleanup/archive handling now includes `events-<partition>.dat` alongside raw/metric files.
 
 ### Fixed
 - **Crash safety:** WAL replay now skips records whose timestamp is at or below the durable watermark of `data-*.dat`, eliminating a duplicate-frame hazard after a crash between data fsync and WAL truncate.
@@ -38,6 +40,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - `Engine.ExportFile` now surfaces buffered-write/Sync failures from the output file instead of silently dropping them via `defer Close()`.
 - LP import scanners (`engine.ImportFile`, `ImportOfflineLPToMetricParts`) raised from the 64 KiB default to a 1 MiB line cap; longer lines surface as errors rather than silently truncating.
 - `Aggregator.Compute` interface dropped two unused `Timestamp` parameters; tests and call sites updated.
+- Events ingest/runtime now fully honors per-DB events config instead of hardcoded limits: payload cap enforcement (`events.max_payload_bytes`), in-memory/page flush thresholds (`events.max_in_memory_bytes`, `events.page.*`), and events WAL settings (`events.wal.max_segment_size`, `events.wal.fsync_policy`) are threaded through manifest defaults, DB manifests, open/replay, and write paths.
 
 ### Deferred
 - HTTP authentication on the engine endpoints — tracked for a dedicated release.

@@ -139,6 +139,7 @@ together:
 - `data-<partition>.dat`
 - `raw-<partition>.dat`
 - `metric-<partition>.dat`
+- `events-<partition>.dat`
 
 Archive bucket names follow the partition mode:
 
@@ -165,6 +166,25 @@ lands in durable `.dat` files.
 
 Downsampling job definitions. See [ROLLUPS.md](ROLLUPS.md) for the full
 reference.
+
+### `[events]`
+
+Per-database events storage is opt-in and has independent page/WAL tuning.
+
+- `enabled` — enable events for this DB.
+- `max_payload_bytes` — per-event payload cap.
+- `max_in_memory_bytes` — spike-protection ceiling that force-flushes the open events page.
+
+Nested page knobs:
+
+- `[events.page].max_records`
+- `[events.page].max_bytes`
+- `[events.page].max_age`
+
+Nested events WAL knobs:
+
+- `[events.wal].max_segment_size`
+- `[events.wal].fsync_policy` (`segment` or `always`)
 
 ---
 

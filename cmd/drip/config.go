@@ -76,11 +76,13 @@ type OneWireCollectorConfig struct {
 }
 
 type SDWriteProbeCollectorConfig struct {
-	Enabled      bool   `toml:"enabled"`
-	Directory    string `toml:"directory"`
-	Bytes        int    `toml:"bytes"`
-	EveryNCycles int    `toml:"every_n_cycles"`
-	Metric       string `toml:"metric"`
+	Enabled         bool   `toml:"enabled"`
+	Directory       string `toml:"directory"`
+	Bytes           int    `toml:"bytes"`
+	EveryNCycles    int    `toml:"every_n_cycles"`
+	Metric          string `toml:"metric"`
+	EventWhenOverMS int    `toml:"event_when_over_ms"`
+	EventName       string `toml:"event_name"`
 }
 
 func defaultConfig() Config {
@@ -108,11 +110,13 @@ func defaultConfig() Config {
 				MaxValidMdeg: 85000,
 			},
 			SDWriteProbe: SDWriteProbeCollectorConfig{
-				Enabled:      false,
-				Directory:    "/tmp",
-				Bytes:        1024 * 256,
-				EveryNCycles: 6,
-				Metric:       "disk.sd_write_probe_ms",
+				Enabled:         false,
+				Directory:       "/tmp",
+				Bytes:           1024 * 256,
+				EveryNCycles:    6,
+				Metric:          "disk.sd_write_probe_ms",
+				EventWhenOverMS: 0,
+				EventName:       "disk.sd_write_probe.slow",
 			},
 		},
 	}
@@ -152,6 +156,9 @@ func validateConfig(cfg Config) error {
 		}
 		if cfg.Collectors.SDWriteProbe.EveryNCycles <= 0 {
 			return fmt.Errorf("collectors.sd_write_probe.every_n_cycles must be > 0")
+		}
+		if cfg.Collectors.SDWriteProbe.EventWhenOverMS < 0 {
+			return fmt.Errorf("collectors.sd_write_probe.event_when_over_ms must be >= 0")
 		}
 	}
 	if cfg.Collectors.Process.Enabled && len(cfg.Collectors.Process.ExeNames) == 0 {

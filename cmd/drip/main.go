@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -42,11 +44,12 @@ func main() {
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	importURL := strings.TrimRight(cfg.Drip.ServerURL, "/") + "/api/v1/import"
+	eventsURL := strings.TrimRight(cfg.Drip.ServerURL, "/") + "/api/v1/events"
 	interval := time.Duration(cfg.Drip.CollectionIntervalMS) * time.Millisecond
 	timeout := time.Duration(cfg.Drip.TimeoutMS) * time.Millisecond
 
 	if *once {
-		runCycle(cfg.Drip.Database, cs, timeout, httpClient, importURL, *debug)
+		runCycle(cfg.Drip.Database, cs, timeout, httpClient, importURL, eventsURL, *debug)
 		return
 	}
 
@@ -63,7 +66,7 @@ func main() {
 			log.Println("drip: shutting down")
 			return
 		case <-ticker.C:
-			runCycle(cfg.Drip.Database, cs, timeout, httpClient, importURL, *debug)
+			runCycle(cfg.Drip.Database, cs, timeout, httpClient, importURL, eventsURL, *debug)
 		}
 	}
 }
@@ -106,6 +109,8 @@ func buildCollectors(cfg Config) []Collector {
 			cfg.Collectors.SDWriteProbe.Bytes,
 			cfg.Collectors.SDWriteProbe.EveryNCycles,
 			cfg.Collectors.SDWriteProbe.Metric,
+			cfg.Collectors.SDWriteProbe.EventWhenOverMS,
+			cfg.Collectors.SDWriteProbe.EventName,
 		))
 	}
 	return cs
@@ -114,7 +119,7 @@ func buildCollectors(cfg Config) []Collector {
 // runCycle launches all collectors, waits up to timeout, gathers results,
 // sorts by metric name, then POSTs as line protocol to nanotdb.
 // If debug is true, LP lines are also printed to stdout.
-func runCycle(database string, cs []Collector, timeout time.Duration, client *http.Client, importURL string, debug bool) {
+func runCycle(database string, cs []Collector, timeout time.Duration, client *http.Client, importURL, eventsURL string, debug bool) {
 	cycleStart := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -147,30 +152,71 @@ func runCycle(database string, cs []Collector, timeout time.Duration, client *ht
 		log.Printf("drip: cycle collected 0 metrics (elapsed=%s)", collectElapsed)
 		return
 	}
+	tsNS := cycleStart.UnixNano()
+
+	regularMetrics := make([]Metric, 0, len(metrics))
+	eventBatch := make([]eventRecord, 0)
+	for _, m := range metrics {
+		if m.EmitAsEvent {
+			name := strings.TrimSpace(m.EventName)
+			if name == "" {
+				name = m.Name
+			}
+			eventBatch = append(eventBatch, eventRecord{
+				DB:      database,
+				Name:    name,
+				TS:      tsNS,
+				Value:   m.Value,
+				Payload: m.EventPayload,
+			})
+			continue
+		}
+		regularMetrics = append(regularMetrics, m)
+	}
 
 	// Sort by name for better nanotdb WAL/page compression locality.
-	sort.Slice(metrics, func(i, j int) bool {
-		return metrics[i].Name < metrics[j].Name
+	sort.Slice(regularMetrics, func(i, j int) bool {
+		return regularMetrics[i].Name < regularMetrics[j].Name
+	})
+	sort.Slice(eventBatch, func(i, j int) bool {
+		return eventBatch[i].Name < eventBatch[j].Name
 	})
 
-	tsNS := cycleStart.UnixNano()
-	lp := formatLP(database, metrics, tsNS)
+	lp := formatLP(database, regularMetrics, tsNS)
 
 	if debug {
-		fmt.Print(lp)
+		if lp != "" {
+			fmt.Print(lp)
+		}
 	}
 
 	sendStart := time.Now()
-	if err := sendLP(client, importURL, lp); err != nil {
-		log.Printf("drip: send failed (%d metrics): %v", len(metrics), err)
-		return
+	if lp != "" {
+		if err := sendLP(client, importURL, lp); err != nil {
+			log.Printf("drip: metric send failed (%d metrics): %v", len(regularMetrics), err)
+			return
+		}
+	}
+	if len(eventBatch) > 0 {
+		if err := sendEvents(client, eventsURL, eventBatch); err != nil {
+			log.Printf("drip: event send failed (%d events): %v", len(eventBatch), err)
+			return
+		}
 	}
 	sendElapsed := time.Since(sendStart)
 
 	if debug {
-		log.Printf("drip: cycle: collected %d metrics in %s, sent in %s (total %s)",
-			len(metrics), collectElapsed, sendElapsed, time.Since(cycleStart))
+		log.Printf("drip: cycle: collected %d samples (%d metrics, %d events) in %s, sent in %s (total %s)",
+			len(metrics), len(regularMetrics), len(eventBatch), collectElapsed, sendElapsed, time.Since(cycleStart))
 	}
+}
+
+type eventRecord struct {
+	DB      string `json:"db"`
+	Name    string `json:"name"`
+	TS      int64  `json:"ts"`
+	Value   any    `json:"value,omitempty"`
+	Payload any    `json:"payload,omitempty"`
 }
 
 // formatLP serialises metrics as nanotdb line protocol lines:
@@ -200,6 +246,22 @@ func sendLP(client *http.Client, url string, lp string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("server returned %s", resp.Status)
+	}
+	return nil
+}
+
+func sendEvents(client *http.Client, url string, records []eventRecord) error {
+	body, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("marshal events: %w", err)
+	}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body)) //nolint:noctx
+	if err != nil {
+		return fmt.Errorf("post events: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("events server returned %s", resp.Status)
 	}
 	return nil
 }

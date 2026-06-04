@@ -7,6 +7,13 @@ import "context"
 type Metric struct {
 	Name  string // e.g., "cpu.usage.user"
 	Value any    // int32 | float32
+
+	// EmitAsEvent marks this sample for event ingestion instead of metric
+	// line-protocol ingestion. When true, main sends an event payload to
+	// /api/v1/events and skips this sample in the metric batch.
+	EmitAsEvent  bool
+	EventName    string
+	EventPayload any
 }
 
 // Collector defines the interface for metric collectors.

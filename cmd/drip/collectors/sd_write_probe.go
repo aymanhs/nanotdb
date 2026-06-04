@@ -13,10 +13,12 @@ import (
 // SDWriteProbeCollector measures write+fsync latency in milliseconds by writing
 // a small probe file periodically. It emits the latest measured value each cycle.
 type SDWriteProbeCollector struct {
-	directory    string
-	bytes        int
-	everyNCycles int
-	metric       string
+	directory       string
+	bytes           int
+	everyNCycles    int
+	metric          string
+	eventWhenOverMS float32
+	eventName       string
 
 	mu       sync.Mutex
 	cycle    int
@@ -26,7 +28,7 @@ type SDWriteProbeCollector struct {
 	fileName string
 }
 
-func NewSDWriteProbeCollector(directory string, bytes int, everyNCycles int, metric string) *SDWriteProbeCollector {
+func NewSDWriteProbeCollector(directory string, bytes int, everyNCycles int, metric string, eventWhenOverMS int, eventName string) *SDWriteProbeCollector {
 	dir := strings.TrimSpace(directory)
 	if dir == "" {
 		dir = "/tmp"
@@ -41,13 +43,22 @@ func NewSDWriteProbeCollector(directory string, bytes int, everyNCycles int, met
 	if metric == "" {
 		metric = "disk.sd_write_probe_ms"
 	}
+	eventName = strings.TrimSpace(eventName)
+	if eventName == "" {
+		eventName = metric + ".slow"
+	}
+	if eventWhenOverMS < 0 {
+		eventWhenOverMS = 0
+	}
 	return &SDWriteProbeCollector{
-		directory:    dir,
-		bytes:        bytes,
-		everyNCycles: everyNCycles,
-		metric:       metric,
-		payload:      make([]byte, bytes),
-		fileName:     ".drip-sd-write-probe.tmp",
+		directory:       dir,
+		bytes:           bytes,
+		everyNCycles:    everyNCycles,
+		metric:          metric,
+		eventWhenOverMS: float32(eventWhenOverMS),
+		eventName:       eventName,
+		payload:         make([]byte, bytes),
+		fileName:        ".drip-sd-write-probe.tmp",
 	}
 }
 
@@ -91,6 +102,20 @@ func (c *SDWriteProbeCollector) Collect(ctx context.Context, ch chan<- Metric) {
 	}
 
 	if !hasLast {
+		return
+	}
+	if c.eventWhenOverMS > 0 && last > c.eventWhenOverMS {
+		ch <- Metric{
+			Name:        c.metric,
+			Value:       last,
+			EmitAsEvent: true,
+			EventName:   c.eventName,
+			EventPayload: map[string]any{
+				"metric":            c.metric,
+				"latency_ms":        last,
+				"threshold_over_ms": c.eventWhenOverMS,
+			},
+		}
 		return
 	}
 	// Channel is buffered and only closed after this collector returns.

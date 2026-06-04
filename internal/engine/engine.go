@@ -37,6 +37,22 @@ type DBInfo struct {
 	PageMaxBytes    int               `json:"page_max_bytes" toml:"page_max_bytes"`
 	PageMaxAge      string            `json:"page_max_age" toml:"page_max_age"`
 	Rollups         DBManifestRollups `json:"rollups" toml:"rollups"`
+
+	// EventsEnabled opts this database into the events storage layer.
+	// When false (default), no events.json, <db>.events.wal, or
+	// events-*.dat files are created for this DB, and Engine.AddEvent /
+	// Engine.QueryEvents return ErrEventsDisabled for it. See
+	// docs/EVENTS.md for the full lifecycle.
+	EventsEnabled bool `json:"events_enabled" toml:"events_enabled"`
+
+	// Events ingest/runtime tuning knobs.
+	EventsMaxPayloadBytes   int    `json:"events_max_payload_bytes" toml:"events_max_payload_bytes"`
+	EventsMaxInMemoryBytes  int    `json:"events_max_in_memory_bytes" toml:"events_max_in_memory_bytes"`
+	EventsPageMaxRecords    int    `json:"events_page_max_records" toml:"events_page_max_records"`
+	EventsPageMaxBytes      int    `json:"events_page_max_bytes" toml:"events_page_max_bytes"`
+	EventsPageMaxAge        string `json:"events_page_max_age" toml:"events_page_max_age"`
+	EventsWALMaxSegmentSize int64  `json:"events_wal_max_segment_size" toml:"events_wal_max_segment_size"`
+	EventsWALFsyncPolicy    string `json:"events_wal_fsync_policy" toml:"events_wal_fsync_policy"`
 }
 type OpenPageStats struct {
 	Day          string        `json:"day"`
@@ -64,11 +80,17 @@ type DBRuntimeInspect struct {
 }
 
 type dbRuntime struct {
-	info          DBInfo
-	walSkipBefore time.Duration
-	pageMaxAge    time.Duration
-	openDays      map[string]*Page
-	sealedDays    map[string]struct{}
+	info             DBInfo
+	walSkipBefore    time.Duration
+	pageMaxAge       time.Duration
+	eventsPageMaxAge time.Duration
+	openDays         map[string]*Page
+	sealedDays       map[string]struct{}
+
+	// openEventsDays holds the in-memory events page per partition for
+	// this database. Nil/empty when [events].enabled is false. Mirrors
+	// openDays for the events storage layer.
+	openEventsDays map[string]*EventsPage
 }
 
 type DBManifestTOML struct {
@@ -76,6 +98,30 @@ type DBManifestTOML struct {
 	WAL       DBManifestWAL       `toml:"wal"`
 	Page      DBManifestPage      `toml:"page"`
 	Rollups   DBManifestRollups   `toml:"rollups"`
+	Events    DBManifestEvents    `toml:"events"`
+}
+
+// DBManifestEvents is the per-database events configuration block. v1
+// exposes just the enable flag; finer-grained tuning (max_payload_bytes,
+// max_in_memory_bytes, page thresholds, WAL segment cap) is planned but
+// hardcoded to the constants in events_page.go / events_wal.go for now.
+type DBManifestEvents struct {
+	Enabled          bool                 `toml:"enabled"`
+	MaxPayloadBytes  int                  `toml:"max_payload_bytes"`
+	MaxInMemoryBytes int                  `toml:"max_in_memory_bytes"`
+	Page             DBManifestEventsPage `toml:"page"`
+	WAL              DBManifestEventsWAL  `toml:"wal"`
+}
+
+type DBManifestEventsPage struct {
+	MaxRecords int    `toml:"max_records"`
+	MaxBytes   int    `toml:"max_bytes"`
+	MaxAge     string `toml:"max_age"`
+}
+
+type DBManifestEventsWAL struct {
+	MaxSegmentSize int64  `toml:"max_segment_size"`
+	FsyncPolicy    string `toml:"fsync_policy"`
 }
 
 type DBManifestRetention struct {
@@ -174,6 +220,7 @@ type EngineConfigManifestDefaults struct {
 	WAL       DBManifestWAL       `toml:"wal"`
 	Page      DBManifestPage      `toml:"page"`
 	Rollups   DBManifestRollups   `toml:"rollups"`
+	Events    DBManifestEvents    `toml:"events"`
 }
 
 const (
@@ -279,16 +326,24 @@ var pageCompressedBufferPool = sync.Pool{
 
 func defaultDBInfo() DBInfo {
 	return DBInfo{
-		Grace:           "5m",
-		RetentionDays:   30,
-		RetentionAction: RetentionActionKeep,
-		MaxActiveDays:   2,
-		Partition:       "day",
-		WALEnabled:      true,
-		WALSkipBefore:   "1h",
-		PageMaxRecords:  PageMaxRecords,
-		PageMaxBytes:    PageMaxBytes,
-		PageMaxAge:      PageMaxAge.String(),
+		Grace:                   "5m",
+		RetentionDays:           30,
+		RetentionAction:         RetentionActionKeep,
+		MaxActiveDays:           2,
+		Partition:               "day",
+		WALEnabled:              true,
+		WALSkipBefore:           "1h",
+		PageMaxRecords:          PageMaxRecords,
+		PageMaxBytes:            PageMaxBytes,
+		PageMaxAge:              PageMaxAge.String(),
+		EventsEnabled:           false,
+		EventsMaxPayloadBytes:   4096,
+		EventsMaxInMemoryBytes:  1024 * 1024,
+		EventsPageMaxRecords:    EventsPageMaxRecords,
+		EventsPageMaxBytes:      EventsPageMaxBytes,
+		EventsPageMaxAge:        EventsPageMaxAge.String(),
+		EventsWALMaxSegmentSize: 16 * 1024 * 1024,
+		EventsWALFsyncPolicy:    WALFsyncPolicySegment,
 		Rollups: DBManifestRollups{
 			Enabled:               false,
 			CheckpointFile:        defaultRollupCheckpointFile,
@@ -382,6 +437,20 @@ func engineConfigManifestDefaultsFromInfo(info DBInfo) EngineConfigManifestDefau
 			MaxAge:     info.PageMaxAge,
 		},
 		Rollups: info.Rollups,
+		Events: DBManifestEvents{
+			Enabled:          info.EventsEnabled,
+			MaxPayloadBytes:  info.EventsMaxPayloadBytes,
+			MaxInMemoryBytes: info.EventsMaxInMemoryBytes,
+			Page: DBManifestEventsPage{
+				MaxRecords: info.EventsPageMaxRecords,
+				MaxBytes:   info.EventsPageMaxBytes,
+				MaxAge:     info.EventsPageMaxAge,
+			},
+			WAL: DBManifestEventsWAL{
+				MaxSegmentSize: info.EventsWALMaxSegmentSize,
+				FsyncPolicy:    info.EventsWALFsyncPolicy,
+			},
+		},
 	}
 }
 
@@ -589,6 +658,9 @@ func (e *Engine) Close() error {
 				// the fd in an unusable state, but we must release the WAL.
 			}
 		}
+		if err := writeEventCatalogIfDirty(db); err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("write events catalog for database %q: %w", name, err))
+		}
 		if err := db.Close(); err != nil {
 			closeErrs = append(closeErrs, fmt.Errorf("close database %q: %w", name, err))
 			continue
@@ -659,6 +731,18 @@ func (e *Engine) flushDatabasesLocked(databaseNames []string) error {
 		if db.catalog != nil && db.catalog.IsDirty() {
 			if err := db.catalog.WriteCatalog(); err != nil {
 				return fmt.Errorf("write catalog for database %q: %w", name, err)
+			}
+		}
+		// Events layer: flush open pages, persist catalog, reset WAL.
+		// Sequencing is critical (crash-safety contract rule 1):
+		// pages must be on disk and the catalog must be persisted
+		// before the events WAL can be reset.
+		if rt.info.EventsEnabled {
+			if err := e.flushOpenEventsPages(db, rt, name); err != nil {
+				return fmt.Errorf("flush events pages for database %q: %w", name, err)
+			}
+			if err := e.maybeResetEventsWAL(db, rt, name); err != nil {
+				return fmt.Errorf("reset events wal for database %q: %w", name, err)
 			}
 		}
 	}
@@ -1517,9 +1601,9 @@ func (e *Engine) queryRangeLocked(database, metric string, fromTS, toTS Timestam
 
 // queryRangeMany scans samples for one or more metrics within a time range.
 // For each partition it:
-//   1. Tries the columnar metric-*.dat file first (if PreferMetricFiles).
-//   2. Falls back to the raw data-*.dat file when the metric file is absent.
-//   3. Layers in the in-memory open page for the current partition (if any).
+//  1. Tries the columnar metric-*.dat file first (if PreferMetricFiles).
+//  2. Falls back to the raw data-*.dat file when the metric file is absent.
+//  3. Layers in the in-memory open page for the current partition (if any).
 //
 // queryRange is the n=1 alias; both share queryRangeManyImpl. Callers that
 // already hold writeMu must use queryRangeLocked / queryRangeManyLocked
@@ -2019,7 +2103,19 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid page_max_age for database %q: %w", database, err)
 	}
-	rt = &dbRuntime{info: info, walSkipBefore: walSkipBefore, pageMaxAge: pageMaxAge, openDays: make(map[string]*Page), sealedDays: make(map[string]struct{})}
+	eventsPageMaxAge, err := ParseDuration(info.EventsPageMaxAge)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid events.page.max_age for database %q: %w", database, err)
+	}
+	rt = &dbRuntime{
+		info:             info,
+		walSkipBefore:    walSkipBefore,
+		pageMaxAge:       pageMaxAge,
+		eventsPageMaxAge: eventsPageMaxAge,
+		openDays:         make(map[string]*Page),
+		sealedDays:       make(map[string]struct{}),
+		openEventsDays:   make(map[string]*EventsPage),
+	}
 	if info.WALEnabled {
 		if err := e.replayWALIntoRuntime(db, rt, database); err != nil {
 			e.recordWALReplayMetrics(database, replayRecords, replayBytes, false)
@@ -2031,6 +2127,20 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 			e.recordWALReplayMetrics(database, replayRecords, replayBytes, false)
 			_ = db.Close()
 			return nil, nil, fmt.Errorf("reset disabled wal for database %q: %w", database, err)
+		}
+	}
+	// Events layer is opt-in via the manifest. When enabled, open the
+	// events catalog + WAL and replay any in-flight events from the WAL
+	// into the in-memory events page. Mirrors the metric WAL replay
+	// path; see docs/EVENTS.md crash-safety contract.
+	if info.EventsEnabled {
+		if err := db.OpenEventsForDatabase(info.EventsWALMaxSegmentSize, info.EventsWALFsyncPolicy); err != nil {
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("open events for database %q: %w", database, err)
+		}
+		if err := e.replayEventsWALIntoRuntime(db, rt, database); err != nil {
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("replay events wal for database %q: %w", database, err)
 		}
 	}
 	if database != internalStatsDatabase {
@@ -2391,6 +2501,12 @@ func maybeResetWAL(db *Database, rt *dbRuntime) error {
 			return err
 		}
 	}
+	// Same "catalog before WAL reset" rule applies to the events layer
+	// (crash-safety contract rule 1 in docs/EVENTS.md). No-op when
+	// events are disabled or the events catalog is clean.
+	if err := writeEventCatalogIfDirty(db); err != nil {
+		return err
+	}
 	return db.wal.Reset()
 }
 
@@ -2476,6 +2592,13 @@ func writePageWithOptions(db *Database, day string, page *Page, syncDataFile boo
 			return pageFlushStats{}, err
 		}
 	}
+	// Same durability profile applies to the events catalog. No-op
+	// when events are disabled or the catalog has no pending writes.
+	if syncCatalog {
+		if err := writeEventCatalogIfDirty(db); err != nil {
+			return pageFlushStats{}, err
+		}
+	}
 	return st, nil
 }
 
@@ -2512,6 +2635,8 @@ func (e *Engine) cleanupRetention(db *Database, rt *dbRuntime, nowTS Timestamp) 
 			part = strings.TrimSuffix(strings.TrimPrefix(name, "raw-"), ".dat")
 		case strings.HasPrefix(name, "metric-"):
 			part = strings.TrimSuffix(strings.TrimPrefix(name, "metric-"), ".dat")
+		case strings.HasPrefix(name, "events-"):
+			part = strings.TrimSuffix(strings.TrimPrefix(name, "events-"), ".dat")
 		default:
 			continue
 		}
@@ -2748,11 +2873,16 @@ func partitionKey(rt *dbRuntime, ts Timestamp) string {
 // integer overflow downstream. The ceilings are far above any realistic
 // production setting.
 const (
-	maxMaxActiveDays    = 1000           // open day-pages held simultaneously
-	maxRetentionDays    = 36500          // ~100 years of calendar days
-	maxPageMaxRecords   = 65535          // PageHeader.NumRecords is uint16
-	maxPageMaxBytes     = 64 * 1024 * 1024 // 64 MiB, half the on-disk frame cap
-	maxTimeCacheSlots   = 1 << 20         // 1M cache entries — already absurd
+	maxMaxActiveDays              = 1000             // open day-pages held simultaneously
+	maxRetentionDays              = 36500            // ~100 years of calendar days
+	maxPageMaxRecords             = 65535            // PageHeader.NumRecords is uint16
+	maxPageMaxBytes               = 64 * 1024 * 1024 // 64 MiB, half the on-disk frame cap
+	maxTimeCacheSlots             = 1 << 20          // 1M cache entries — already absurd
+	maxEventsPayloadBytes         = 16 * 1024 * 1024
+	maxEventsInMemoryBytes        = 256 * 1024 * 1024
+	maxEventsPageMaxRecords       = 1 << 20
+	maxEventsPageMaxBytes         = 64 * 1024 * 1024
+	maxEventsWALSegmentSize int64 = 4 * 1024 * 1024 * 1024
 )
 
 func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
@@ -2793,6 +2923,49 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	if strings.TrimSpace(info.PageMaxAge) == "" {
 		info.PageMaxAge = def.PageMaxAge
 	}
+	if info.EventsMaxPayloadBytes <= 0 {
+		info.EventsMaxPayloadBytes = def.EventsMaxPayloadBytes
+	}
+	if info.EventsMaxPayloadBytes <= 0 || info.EventsMaxPayloadBytes > maxEventsPayloadBytes {
+		return DBInfo{}, fmt.Errorf("invalid events.max_payload_bytes: %d (max %d)", info.EventsMaxPayloadBytes, maxEventsPayloadBytes)
+	}
+	if info.EventsMaxInMemoryBytes <= 0 {
+		info.EventsMaxInMemoryBytes = def.EventsMaxInMemoryBytes
+	}
+	if info.EventsMaxInMemoryBytes <= 0 || info.EventsMaxInMemoryBytes > maxEventsInMemoryBytes {
+		return DBInfo{}, fmt.Errorf("invalid events.max_in_memory_bytes: %d (max %d)", info.EventsMaxInMemoryBytes, maxEventsInMemoryBytes)
+	}
+	if info.EventsPageMaxRecords <= 0 {
+		info.EventsPageMaxRecords = def.EventsPageMaxRecords
+	}
+	if info.EventsPageMaxRecords <= 0 || info.EventsPageMaxRecords > maxEventsPageMaxRecords {
+		return DBInfo{}, fmt.Errorf("invalid events.page.max_records: %d (max %d)", info.EventsPageMaxRecords, maxEventsPageMaxRecords)
+	}
+	if info.EventsPageMaxBytes <= 0 {
+		info.EventsPageMaxBytes = def.EventsPageMaxBytes
+	}
+	if info.EventsPageMaxBytes <= 0 || info.EventsPageMaxBytes > maxEventsPageMaxBytes {
+		return DBInfo{}, fmt.Errorf("invalid events.page.max_bytes: %d (max %d)", info.EventsPageMaxBytes, maxEventsPageMaxBytes)
+	}
+	if strings.TrimSpace(info.EventsPageMaxAge) == "" {
+		info.EventsPageMaxAge = def.EventsPageMaxAge
+	}
+	if info.EventsWALMaxSegmentSize <= 0 {
+		info.EventsWALMaxSegmentSize = def.EventsWALMaxSegmentSize
+	}
+	if info.EventsWALMaxSegmentSize <= 0 || info.EventsWALMaxSegmentSize > maxEventsWALSegmentSize {
+		return DBInfo{}, fmt.Errorf("invalid events.wal.max_segment_size: %d (max %d)", info.EventsWALMaxSegmentSize, maxEventsWALSegmentSize)
+	}
+	info.EventsWALFsyncPolicy = strings.ToLower(strings.TrimSpace(info.EventsWALFsyncPolicy))
+	if info.EventsWALFsyncPolicy == "" {
+		info.EventsWALFsyncPolicy = strings.ToLower(strings.TrimSpace(def.EventsWALFsyncPolicy))
+	}
+	if info.EventsWALFsyncPolicy == "" {
+		info.EventsWALFsyncPolicy = WALFsyncPolicySegment
+	}
+	if info.EventsWALFsyncPolicy != WALFsyncPolicySegment && info.EventsWALFsyncPolicy != WALFsyncPolicyAlways {
+		return DBInfo{}, fmt.Errorf("invalid events.wal.fsync_policy: %q (expected segment|always)", info.EventsWALFsyncPolicy)
+	}
 	if strings.TrimSpace(info.Partition) == "" {
 		info.Partition = def.Partition
 	}
@@ -2826,6 +2999,9 @@ func normalizeDBInfo(info DBInfo, defaults DBInfo) (DBInfo, error) {
 	}
 	if _, err := ParseDuration(info.PageMaxAge); err != nil {
 		return DBInfo{}, fmt.Errorf("invalid page_max_age: %w", err)
+	}
+	if _, err := ParseDuration(info.EventsPageMaxAge); err != nil {
+		return DBInfo{}, fmt.Errorf("invalid events.page.max_age: %w", err)
 	}
 	info.Partition = strings.ToLower(strings.TrimSpace(info.Partition))
 	if info.Partition == "" {
@@ -2964,22 +3140,44 @@ func dbManifestFromInfo(info DBInfo) DBManifestTOML {
 			MaxAge:     info.PageMaxAge,
 		},
 		Rollups: info.Rollups,
+		Events: DBManifestEvents{
+			Enabled:          info.EventsEnabled,
+			MaxPayloadBytes:  info.EventsMaxPayloadBytes,
+			MaxInMemoryBytes: info.EventsMaxInMemoryBytes,
+			Page: DBManifestEventsPage{
+				MaxRecords: info.EventsPageMaxRecords,
+				MaxBytes:   info.EventsPageMaxBytes,
+				MaxAge:     info.EventsPageMaxAge,
+			},
+			WAL: DBManifestEventsWAL{
+				MaxSegmentSize: info.EventsWALMaxSegmentSize,
+				FsyncPolicy:    info.EventsWALFsyncPolicy,
+			},
+		},
 	}
 }
 
 func dbInfoFromManifest(man DBManifestTOML) DBInfo {
 	return DBInfo{
-		Grace:           man.Retention.Grace,
-		RetentionDays:   man.Retention.RetentionDays,
-		RetentionAction: man.Retention.RetentionAction,
-		MaxActiveDays:   man.Retention.MaxActiveDays,
-		Partition:       man.Retention.Partition,
-		WALEnabled:      man.WAL.Enabled,
-		WALSkipBefore:   man.WAL.SkipBefore,
-		PageMaxRecords:  man.Page.MaxRecords,
-		PageMaxBytes:    man.Page.MaxBytes,
-		PageMaxAge:      man.Page.MaxAge,
-		Rollups:         man.Rollups,
+		Grace:                   man.Retention.Grace,
+		RetentionDays:           man.Retention.RetentionDays,
+		RetentionAction:         man.Retention.RetentionAction,
+		MaxActiveDays:           man.Retention.MaxActiveDays,
+		Partition:               man.Retention.Partition,
+		WALEnabled:              man.WAL.Enabled,
+		WALSkipBefore:           man.WAL.SkipBefore,
+		PageMaxRecords:          man.Page.MaxRecords,
+		PageMaxBytes:            man.Page.MaxBytes,
+		PageMaxAge:              man.Page.MaxAge,
+		Rollups:                 man.Rollups,
+		EventsEnabled:           man.Events.Enabled,
+		EventsMaxPayloadBytes:   man.Events.MaxPayloadBytes,
+		EventsMaxInMemoryBytes:  man.Events.MaxInMemoryBytes,
+		EventsPageMaxRecords:    man.Events.Page.MaxRecords,
+		EventsPageMaxBytes:      man.Events.Page.MaxBytes,
+		EventsPageMaxAge:        man.Events.Page.MaxAge,
+		EventsWALMaxSegmentSize: man.Events.WAL.MaxSegmentSize,
+		EventsWALFsyncPolicy:    man.Events.WAL.FsyncPolicy,
 	}
 }
 

@@ -163,6 +163,28 @@ default_aggregates = []
 # Wildcard patterns excluded from selector-based jobs (supports *).
 global_exclude_patterns = []
 
+[manifest_defaults.events]
+# Enable/disable the events storage layer by default for newly created DBs.
+enabled = false
+# Maximum payload bytes accepted per event record.
+max_payload_bytes = 4096
+# Force-flush threshold for in-memory events pages.
+max_in_memory_bytes = 1048576
+
+[manifest_defaults.events.page]
+# Max event records per in-memory events page before flush.
+max_records = 1000
+# Approximate max encoded bytes per in-memory events page before flush.
+max_bytes = 65536
+# Max wall-clock age for an open events page before rollover.
+max_age = "1h"
+
+[manifest_defaults.events.wal]
+# Per-database events WAL segment cap.
+max_segment_size = 16777216
+# events WAL fsync behavior: segment | always
+fsync_policy = "segment"
+
 # ------------------------------------------------------------------------------
 # Sample per-database rollup config (put in <root>/<db>/manifest.toml)
 # ------------------------------------------------------------------------------

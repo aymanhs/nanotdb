@@ -40,6 +40,8 @@ func main() {
 	switch cmd {
 	case "inspect":
 		runErr = runInspect(args)
+	case "events":
+		runErr = runEvents(args)
 	case "import":
 		runErr = runImport(args)
 	case "csv2nlp":
@@ -82,6 +84,10 @@ func printUsage(w *os.File) {
 	fmt.Fprintln(w, "  nanocli inspect dat --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli inspect metric --root <root-dir> --db <database> [--verbose] [--json]")
 	fmt.Fprintln(w, "  nanocli inspect wal --root <root-dir> --db <database> [--verbose] [--json]")
+	fmt.Fprintln(w, "  nanocli inspect events --root <root-dir> --db <database> [--verbose] [--json]")
+	fmt.Fprintln(w, "  nanocli inspect events-catalog --root <root-dir> --db <database> [--json]")
+	fmt.Fprintln(w, "  nanocli inspect events-wal --root <root-dir> --db <database> [--verbose] [--json]")
+	fmt.Fprintln(w, "  nanocli events --root <root-dir> --db <database> [--name <pattern>] [--start <time|duration>] [--end <time>] [--limit <n>] [--aggregate count --window <duration>] [--format table|json]")
 	fmt.Fprintln(w, "  nanocli import --root <root-dir> --in <line-protocol-file> [--db <database>] [--json]")
 	fmt.Fprintln(w, "  nanocli import parts --in <line-protocol-file> --partition-mode <day|month|year> [--catalog <catalog.json>] [--out-dir <dir>] [--json]")
 	fmt.Fprintln(w, "  nanocli csv2nlp --in-dir <csv-dir> --out <line-protocol-file> --db <database> [--meta <json>] [--json]")

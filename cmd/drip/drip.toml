@@ -56,7 +56,9 @@ enabled = true
 
 [collectors.sd_write_probe]
 # Measures write+fsync latency by writing a probe file.
-# Emits: disk.sd_write_probe_ms (or custom metric name)
+# Emits metric: disk.sd_write_probe_ms (or custom metric name)
+# Optionally emits an event instead of a metric when latency exceeds
+# event_when_over_ms.
 enabled = true
 # Directory on the target storage (set to an SD-card-backed path on RPi).
 directory = "/tmp"
@@ -66,6 +68,11 @@ bytes = 32000
 every_n_cycles = 6
 # Metric name to emit.
 metric = "disk.sd_write_probe_ms"
+# If > 0 and the measured latency is strictly above this threshold,
+# drip emits only an event (no metric sample) for that cycle.
+event_when_over_ms = 500
+# Event name to emit when over threshold.
+event_name = "disk.sd_write_probe.slow"
 
 [collectors.network]
 # Reads /proc/net/dev per-interface byte/packet counters.

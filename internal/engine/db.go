@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -31,13 +32,23 @@ const (
 
 // Database represents one named time-series database on disk.
 // Each database has its own WAL, catalog, and set of daily data files.
-// Use Engine.AddLine / Engine.QueryRange for typical access; Database is
-// exposed for low-level tooling (nanocli inspect, export, etc.).
+// When events are enabled (via [events] in the manifest), it also has
+// its own events catalog, events WAL, and set of events-<partition>.dat
+// files — independent of the metric storage layer.
+// Use Engine.AddLine / Engine.QueryRange / Engine.AddEvent / Engine.QueryEvents
+// for typical access; Database is exposed for low-level tooling (nanocli
+// inspect, export, etc.).
 type Database struct {
 	Name        string
 	RootDataDir string
 	wal         *WAL
 	catalog     *Catalog
+
+	// Events layer. Both nil when [events].enabled is false for this DB.
+	// Opened together (or not at all) by NewDatabaseWithWALConfig / the
+	// engine's open path when the manifest opts in.
+	eventsWAL    *EventsWAL
+	eventCatalog *EventCatalog
 
 	page *Page // single active page for all metrics
 }
@@ -76,6 +87,57 @@ func resolveDBPaths(name string) (rootDir, baseName, catPath, walPath string) {
 	catPath = filepath.Join(rootDir, "catalog.json")
 	walPath = filepath.Join(rootDir, baseName+".wal")
 	return
+}
+
+// resolveEventsPaths returns the two file paths used by the events layer
+// for a database. eventsCatalogPath is the events.json sibling of
+// catalog.json; eventsWALPath is the <db>.events.wal sibling of <db>.wal.
+func resolveEventsPaths(rootDir, baseName string) (eventsCatalogPath, eventsWALPath string) {
+	eventsCatalogPath = filepath.Join(rootDir, "events.json")
+	eventsWALPath = filepath.Join(rootDir, baseName+".events.wal")
+	return
+}
+
+// OpenEventsForDatabase opens (creating if missing) the events catalog
+// and events WAL files for db, attaching them to the receiver. Idempotent:
+// calling on a database whose events resources are already open is a
+// no-op. Mirrors NewDatabaseWithWALConfig's WAL+catalog setup pattern but
+// is split out because events are an opt-in lifecycle the engine drives
+// only when the manifest's [events].enabled is true.
+func (db *Database) OpenEventsForDatabase(walMaxSegSize int64, fsyncPolicy string) error {
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if db.eventCatalog != nil && db.eventsWAL != nil {
+		return nil
+	}
+	if db.RootDataDir == "" || db.Name == "" {
+		return fmt.Errorf("database paths not initialized")
+	}
+	catPath, walPath := resolveEventsPaths(db.RootDataDir, db.Name)
+
+	if db.eventCatalog == nil {
+		cat, err := LoadEventCatalog(catPath)
+		if err != nil {
+			return fmt.Errorf("open events catalog: %w", err)
+		}
+		db.eventCatalog = cat
+	}
+	if db.eventsWAL == nil {
+		wal, err := OpenAndRecoverEventsWAL(walPath, fsyncPolicy)
+		if err != nil {
+			// If we successfully opened the catalog this call but the WAL
+			// failed, release the catalog so we don't leak the fd.
+			if db.eventCatalog != nil {
+				_ = db.eventCatalog.Close()
+				db.eventCatalog = nil
+			}
+			return fmt.Errorf("open events wal: %w", err)
+		}
+		wal.maxSegSize = walMaxSegSize
+		db.eventsWAL = wal
+	}
+	return nil
 }
 
 // OpenDatabase opens an existing database by base path (no WAL size limit).
@@ -136,15 +198,29 @@ func NewDatabaseWithWALConfig(name string, walMaxSegSize int64, fsyncPolicy stri
 }
 
 func (db *Database) Close() error {
+	var errs []error
 	if db.wal != nil {
 		if err := db.wal.Close(); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("close metric wal: %w", err))
+		}
+	}
+	if db.eventsWAL != nil {
+		if err := db.eventsWAL.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close events wal: %w", err))
 		}
 	}
 	if db.catalog != nil && db.catalog.file != nil {
 		if err := db.catalog.file.Close(); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("close metric catalog: %w", err))
 		}
+	}
+	if db.eventCatalog != nil {
+		if err := db.eventCatalog.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close events catalog: %w", err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	return nil
 }
