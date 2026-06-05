@@ -19,8 +19,10 @@ Each NanoTDB database is an independent failure and storage domain.
 
 Formally:
 - Each database has its own partitioned raw `.dat` files and source metric catalog
-- No data or catalog state is shared across databases
+- When events are enabled, each database also has its own `events.json`, `<db>.events.wal`, and partitioned `events-<partition>.dat` files
+- No data or catalog state — metric or event — is shared across databases
 - Crash recovery is performed independently per database
+- The metric and events layers within one database are independent of each other: disabling events leaves the metric storage untouched, and corruption of one events file does not propagate to metric storage (or vice versa)
 
 Purpose:
 - Failure isolation
@@ -34,9 +36,10 @@ Purpose:
 Persisted raw data is partitioned deterministically by configured UTC partition granularity.
 
 Formally:
-- For a sample with timestamp `T`, target file is determined only by `(partition mode, UTC(T))`
+- For a sample or event with timestamp `T`, target file is determined only by `(partition mode, UTC(T))`
 - Supported partition modes are `day|month|year|forever`
-- Retention boundaries are partition-file boundaries, not per-record tombstones
+- Both metric (`data-*.dat`) and event (`events-*.dat`) storage use the same per-database partition mode; they never split
+- Retention boundaries are partition-file boundaries, not per-record tombstones; the events file for an expired partition is treated as part of the same partition family as the matching `data-`/`raw-`/`metric-` files
 
 Purpose:
 - Deterministic storage placement
@@ -44,18 +47,24 @@ Purpose:
 
 ---
 
-## LAW 2 - Ordered Inserts per Metric
+## LAW 2 - Ordered Inserts per Stream
 
-Samples for a given metric must be time-ordered.
+Samples for a given metric — and occurrences of a given event name — must be time-ordered within their stream.
 
 Formally:
 - For a metric `M`, incoming samples must have timestamp `>=` the last accepted timestamp for `M`
-- Samples with timestamp `<` last accepted timestamp are rejected
+- For an event name `E`, incoming occurrences must have timestamp `>=` the last accepted timestamp for `E`
+- Out-of-range timestamps are rejected for both layers
 - Equal timestamps are valid and preserve append order
 
+Cross-stream order is not constrained:
+- Different metrics in the same database may interleave freely (the page-wide monotonic rule applies per partition, not across metrics)
+- Different event names in the same partition page may interleave with reordered timestamps; the per-name rule is enforced at the events catalog (`EventCatalog.LastTS`) rather than at the page level
+
 Purpose:
-- Eliminates reordering complexity
+- Eliminates reordering complexity within a stream
 - Simplifies write and read logic
+- Permits the events layer to accept arrival-order multi-name batches without expensive page rotations
 
 ---
 
@@ -106,9 +115,11 @@ Purpose:
 After a crash, in-memory state is discarded and rebuilt from durable files.
 
 Formally:
-- Recovery reconstructs state from source metric catalog, daily raw `.dat` files, and WAL
-- Startup WAL replay reconstructs unflushed in-memory page state
-- Recovery scans `.dat` sequentially and discards/truncates invalid trailing tail
+- Metric recovery reconstructs state from the metric catalog, `data-*.dat` files, and the metric WAL
+- Events recovery (when the layer is enabled) reconstructs state from `events.json`, `events-*.dat` files, and the events WAL; the two recoveries run side-by-side and do not share state
+- Startup WAL replay reconstructs unflushed in-memory page state for both layers independently
+- Recovery scans `.dat` and `events-*.dat` files sequentially and discards/truncates invalid trailing tail
+- A newEvent record in the events WAL re-creates its in-memory catalog entry on replay — `events.json` need not exist beforehand
 
 Purpose:
 - Deterministic restart behavior
@@ -138,26 +149,31 @@ Purpose:
 
 ## LAW 8 - Retention Is Filesystem-Scoped Deletion
 
-Retention is enforced by deleting old UTC partition files.
+Retention is enforced by deleting (or archiving) old UTC partition files.
 
 Formally:
-- Retention operations remove old `data-<partition>.dat` files; they do not rewrite surviving `.dat` content
+- Retention operations remove old partition files; they do not rewrite surviving content
+- A partition's family is treated atomically: `data-<partition>.dat`, `raw-<partition>.dat`, `metric-<partition>.dat`, and `events-<partition>.dat` for the same partition are processed together by the configured `retention_action`
+- `keep` leaves everything in place; `delete` removes the family; `archive` folds the family into a tar bucket and removes the originals
 
 Purpose:
 - Operational simplicity
 - Preserves append-only semantics
+- Keeps metric and event data for the same time window on the same lifecycle
 
 ---
 
-## LAW 9 - MetricID Mapping Is Persistent and Monotonic
+## LAW 9 - Identifier Mappings Are Persistent and Monotonic
 
-Metric identity is API-string based and storage-id based.
+Both metric identity and event identity are API-string based and storage-id based.
 
 Formally:
-- Each database maintains a persistent mapping from metric identifier string to source metric id in range `1..1023`
-- New metric strings are assigned a new source metric id within `1..1023`
-- If no source metric id remains available, metric creation is rejected
-- Assigned source metric ids are never deleted and never reused
+- Each database maintains a persistent mapping from metric identifier string to `MetricID` in `1..65535`
+- Each database maintains a persistent mapping from event identifier string to `EventID` in `1..1023`
+- New identifier strings (metric or event) are assigned a new id within their respective range
+- If no id remains available in either space, registration of a new identifier is rejected
+- Assigned ids are never deleted and never reused
+- The two id spaces are independent: a metric and an event may carry the same string name without collision
 
 Purpose:
 - Stable on-disk identity
@@ -186,17 +202,23 @@ Purpose:
 
 ## LAW 11 - WAL Replay Is Mandatory When WAL Data Exists
 
-WAL replay is part of the engine's correctness contract.
+WAL replay is part of the engine's correctness contract. Applies to both
+the metric WAL (`<db>.wal`) and the events WAL (`<db>.events.wal`)
+independently.
 
 Formally:
 - If the WAL contains valid records, startup must replay them
-- WAL may only be reset after associated in-memory page data is flushed and no open pages still depend on it
-- Replay must reject records whose value type does not match the catalog,
-  rather than silently coercing to a default type
+- WAL may only be reset after the associated catalog (metric or event) is durable AND the associated in-memory page is flushed AND no open pages still depend on the WAL
+- Replay must reject records whose value type does not match the catalog, rather than silently coercing to a default type
+- For the events WAL, a non-newEvent record referencing an unknown `EventID` is a hard error — no silent drop, no default type
+- For the events WAL, a newEvent record whose inline `(name, value_type)` disagrees with an existing catalog entry is a hard error
 
 Purpose:
-- Deterministic and lossless recovery of WAL-protected samples
+- Deterministic and lossless recovery of WAL-protected samples and events
 - Prevents type-coercion hazards (e.g. reading float bits as int)
+- Asserts the catalog-before-WAL-reset invariant that
+  [scripts/events_chaos.py](../scripts/events_chaos.py) verifies at every
+  graceful checkpoint
 
 
 ---

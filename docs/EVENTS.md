@@ -9,12 +9,14 @@ partition cadence, same retention, same operational properties — while
 covering a different shape of data. Where a metric is dense, regular, and
 single-valued, an event is sparse, irregular, and may carry context.
 
-This document is the design source-of-truth before implementation. The
-storage layout, on-disk byte shapes, catalog rules, and crash-recovery
-invariants below are all part of the v1 contract.
+This document is the canonical reference for the events layer's storage
+layout, on-disk byte shapes, catalog rules, crash-recovery invariants,
+HTTP / engine APIs, and `nanocli` surface. Phases 1, 2, and 3 are shipped
+(see the "Phased delivery" section). Phase 4 (handler registry) is
+designed-for-only.
 
 For the friendly intro to where events fit alongside metrics, see
-[CONCEPTS.md](CONCEPTS.md) (to be extended once events ship).
+[CONCEPTS.md](CONCEPTS.md).
 
 ---
 
@@ -163,8 +165,8 @@ folded into the same tar bucket. `keep` leaves everything in place.
 
 ### Why a separate WAL
 
-Yesterday's design decision: events get their own `<db>.events.wal`
-rather than sharing the metric WAL. Rationale:
+Events get their own `<db>.events.wal` rather than sharing the metric WAL.
+Rationale:
 
 - The existing WAL has no header / version / magic bytes on disk. A new
   record kind or stolen flag bit would be a forward-compatibility break
@@ -188,11 +190,9 @@ WALs are written in the same batch.
 ```text
 [uvarint: record_len]
   EventID      uint16 LE
-  TS           int64  LE
-  Flags        uint8           bit 7 = newEvent (name + value_type follow)
-                                bit 6 = newBaseline (8-byte baseline TS follows)
-  [if Flags & newBaseline]
-    BaselineTS int64 LE
+  TS           int64  LE       (full 8-byte timestamp; no delta encoding in v1)
+  Flags        uint8           bit 7 = newEvent (name + value_type follow inline)
+                                bits 0..6 reserved (must be zero in v1)
   [if Flags & newEvent]
     NameLen    uint8           (≤ 255)
     Name       NameLen bytes
@@ -202,6 +202,10 @@ WALs are written in the same batch.
   PayloadLen   uvarint
   Payload      PayloadLen bytes
 ```
+
+The constants are `walEventNewEvent = 0x80` and `walEventReservedBits = 0x7F`
+in [events_wal.go](../internal/engine/events_wal.go). Any reserved-bit set in
+the flag byte is a hard parse error at replay (forward-compat guard).
 
 **Hot-path size** (known event, has int32 value, no payload):
 
@@ -229,10 +233,10 @@ Comparable in spirit to the metric WAL's ~11-byte hot-path record.
   catalog. Mirrors [wal.go:611-623](../internal/engine/wal.go#L611-L623).
 - `Value` is present **iff the catalog `value_type` for this event is not
   `none`**. A `none`-typed event records only `(EventID, TS, Payload)`.
-- Optional TS-delta compression (mirroring the metric WAL's 3-byte delta +
-  baseline scheme) can be added in a later WAL revision if event volumes
-  justify it. Initial implementation uses the full 8-byte TS for
-  simplicity; events are sparse so the savings are limited anyway.
+- TS-delta compression (mirroring the metric WAL's 3-byte delta + baseline
+  scheme) is deliberately not in v1. Events are sparse, so the metric WAL's
+  per-record savings would rarely outweigh the baseline overhead. A future
+  WAL revision can revisit if real event volumes justify it.
 
 ### Replay invariant
 
@@ -241,9 +245,11 @@ whose name+type was introduced by a `newEvent` record. This is the
 recovery story for "crashed after WAL append, before catalog write."
 
 If a non-`newEvent` record references an EventID not in the (in-memory or
-on-disk) catalog at replay time, that is a **hard error** — same rule as
-the metric WAL's catalog-required policy ([CHANGELOG.md](../CHANGELOG.md)
-"WAL integrity" fix from `1.4` Unreleased).
+on-disk) catalog at replay time, that is a **hard error**, surfaced as
+the `ErrEventsWALUnknownEventID` sentinel — same discipline as the
+metric WAL's catalog-required policy (the 1.4 fix "WAL replay now
+fails cleanly on unknown or invalid metric type information instead of
+guessing").
 
 ### Crash-tail policy
 
@@ -278,19 +284,19 @@ In-memory flow when a new event is registered:
    assignment and catalog rewrite.*
 5. In-memory page accumulates the event.
 
-The events catalog is then persisted at the same **four checkpoint
-sites** the metric catalog uses today (see
-[engine.go:586,660,2389,2475](../internal/engine/engine.go#L586) for the
-metric-catalog calls — events will sit alongside each one):
+The events catalog is persisted at the same checkpoint sites as the
+metric catalog. The shipped engine uses a `writeEventCatalogIfDirty(db)`
+helper at every site where `db.catalog.WriteCatalog()` runs:
 
-| Checkpoint                              | Why                                                                 |
-|-----------------------------------------|---------------------------------------------------------------------|
-| `Engine.Close()`                        | Clean shutdown                                                      |
-| Engine-wide page flush + WAL reset prep | Catalog must be durable before any WAL reset                        |
-| Per-DB WAL-reset-eligibility path       | Same rule, narrower scope                                           |
-| Per-DB flush/reset path                 | Same rule, narrower scope                                           |
+| Checkpoint                              | Where (engine.go)                                | Why                                                       |
+|-----------------------------------------|--------------------------------------------------|-----------------------------------------------------------|
+| `Engine.Close()`                        | catalog write block in the close path             | Clean shutdown                                            |
+| Engine-wide flush + WAL reset prep      | `flushDatabasesLocked`                           | Catalog must be durable before any WAL reset              |
+| Per-DB WAL-reset-eligibility path       | `maybeResetWAL` / `maybeResetEventsWAL`           | Same rule, narrower scope                                 |
+| Per-DB partition flush path             | `writePageWithOptions` / events page-flush path  | Same rule, narrower scope                                 |
 
-At each site, immediately before any `db.eventsWAL.Reset()`:
+The helper has the same temp+fsync+rename+dir-fsync discipline as
+`Catalog.WriteCatalog()`:
 
 ```go
 if db.eventCatalog != nil && db.eventCatalog.IsDirty() {
@@ -300,8 +306,11 @@ if db.eventCatalog != nil && db.eventCatalog.IsDirty() {
 }
 ```
 
-Same temp+fsync+rename+dir-fsync discipline as the metric catalog —
-inherited automatically by cloning the catalog implementation.
+This is the property `scripts/events_chaos.py` asserts after every
+graceful checkpoint shutdown: the `<db>.events.wal` must be empty
+and `events.json` must be non-empty before the engine returns from
+`Close()`. A regression here is what surfaced and was fixed during the
+chaos-test introduction.
 
 ---
 
@@ -313,24 +322,32 @@ One open page per `(database, partition)` pair. Accumulates events in
 write order. Flushes when **any** of these thresholds are crossed:
 
 - `events.page.max_records`
-- `events.page.max_bytes` (total compressed-payload estimate)
+- `events.page.max_bytes` (rough uncompressed in-memory byte estimate:
+  `len(records) × ~15 + sum(payload_bytes)`)
 - `events.page.max_age` (wall-clock age of the page)
 - `events.max_in_memory_bytes` (spike-protection ceiling; see below)
 
 ### `events-<partition>.dat` frame layout
 
+A frame is exactly **152 bytes of fixed header** followed by the
+S2-compressed payload and a 4-byte CRC32 trailer. The header is NOT
+length-prefixed — its size is a compile-time constant
+(`EventsFrameHeaderBytes` in
+[events_page.go](../internal/engine/events_page.go)).
+
 ```text
 Frame:
-  FrameHeader (variable, length-prefixed):
-    start_ts            int64 LE
-    end_ts              int64 LE
-    record_count        uint32 LE
-    event_id_bitmap     128 bytes        — 1 bit per EventID in 1..1023
-    compressed_len      uint32 LE
+  FrameHeader (fixed 152 bytes):
+    start_ts            int64 LE    (8 bytes)
+    end_ts              int64 LE    (8 bytes)
+    record_count        uint32 LE   (4 bytes)
+    event_id_bitmap     128 bytes   (1 bit per EventID slot in 0..1023;
+                                     bit 0 is always 0 since EventID 0 is reserved)
+    compressed_len      uint32 LE   (4 bytes)
   Payload:
-    compressed block    S2 or zstd (codec per [events] config)
+    compressed block    S2-compressed (codec is hardcoded to S2 in v1)
   Trailer:
-    payload_crc32       uint32 LE
+    payload_crc32       uint32 LE   (4 bytes)
 ```
 
 Decoded payload is a flat sequence of records using the same shape as the
@@ -397,10 +414,13 @@ Behavior under flood:
    accepting more. This back-pressures the flood through normal
    page-flush mechanics rather than dropping, OOMing, or accepting
    silently.
-4. **Stats counters** — emitted to the internal stats DB:
-   `internal/nanotdb/<db>/events/wal_appends`,
-   `events/payload_rejected_oversized`,
-   `events/page_force_flushes`. An operator can *see* the flood.
+4. **Visibility.** Spike conditions surface through the existing engine
+   inspection routes (engine-view, `nanocli inspect events`,
+   `nanocli inspect events-wal`) rather than dedicated stats counters in
+   v1. A future change is tracked in [TODO.md](TODO.md) to emit
+   per-DB events counters into the internal stats database
+   (`internal/nanotdb/<db>/events/*`) so the flood is observable from
+   the metrics surface too.
 
 Deliberately **not** included by default:
 
@@ -414,7 +434,12 @@ Deliberately **not** included by default:
 
 ### `POST /api/v1/events`
 
-**JSON form** (preferred for non-trivial payloads):
+Body is a JSON array (or a single object) of event records. The endpoint
+accepts `Content-Type: application/json` (or any `application/json;...`
+variant), and also accepts requests with no `Content-Type` header at all
+for convenience. Any other content type is rejected. There is no
+line-protocol form for events ingest — the LP wire format wouldn't
+unambiguously carry the payload field, so we use JSON instead.
 
 ```http
 POST /api/v1/events
@@ -430,32 +455,22 @@ Content-Type: application/json
 Field rules:
 
 - `db` and `name` required.
-- `ts` optional; defaults to server-side `time.Now()` Unix ns.
-- `value` optional; type pinned at first write per event name.
-- `payload` optional. Encoded into bytes as `json.Marshal(payload)` for
-  the JSON form. Capped by `max_payload_bytes` after encoding.
+- `ts` optional; missing/null → engine substitutes `time.Now()` Unix ns.
+- `value` optional. Missing/null → none-typed event. JSON integer → `int32`
+  (whole numbers within int32 range). JSON number with a fractional or
+  exponent part → `float32`. JSON strings, booleans, arrays, and objects
+  are rejected — strings belong in the payload.
+- `payload` optional. Encoded as `json.Marshal(payload)` and handed to
+  the engine as opaque bytes. Capped by `max_payload_bytes` after
+  encoding.
 
-**Line-protocol form** (for shell-friendly emitters):
+The endpoint returns a `vmResponse` with `data.imported` set to the count
+of accepted events. The batch is all-or-nothing: any per-event error
+returns a 4xx and aborts the import without partially applying any
+earlier records.
 
-```text
-sensors/disc.write.slow 542
-sensors/disc.write.slow 542 1717238400000000000
-sensors/disc.write.slow 542 1717238400000000000 {"path":"/tmp"}
-sensors/heartbeat
-```
-
-Parser rules:
-
-- First token: `db/name`.
-- Second token (optional): the numeric value, if the catalog
-  `value_type` is `int32` or `float32`. Forbidden if `value_type = none`.
-- Third token (optional): timestamp in Unix ns.
-- Everything after the third token (optional): raw payload, taken
-  verbatim from the start of the payload byte to the end of the line.
-
-To keep the parser unambiguous: if a payload is present, a timestamp must
-be present. If you want "now" with a payload, supply `0` as the ts and
-the engine substitutes the current time on accept.
+A request whose target database does not have `[events].enabled = true`
+returns HTTP 409 with `ErrEventsDisabled`.
 
 ### Engine method (for embedders)
 
@@ -471,11 +486,16 @@ e.AddEvent(
 
 Errors:
 
+- `ErrEventsDisabled` — target database does not have `[events].enabled = true`.
 - `ErrTooManyEvents` — registered event count has hit the `MaxEventsPerDatabase` cap (1023).
 - `ErrEventTypeMismatch` — value type doesn't match catalog.
 - `ErrEventPayloadTooLarge` — payload exceeds `max_payload_bytes`.
-- `ErrEventTimestampTooOld` — ts < last accepted ts for this event name
-  (mirrors the per-metric monotonic rule).
+- `ErrEventNameEmpty` / `ErrEventNameTooLong` — name fails the
+  `1..MaxEventNameLen` byte range check.
+- Per-event-name monotonic-ts violation surfaces as an inline error
+  (`stale event rejected for <db>/<name>: ts=… < last=…`), mirroring the
+  metric-side stale-sample rejection. Not a sentinel — the message
+  carries the diagnostic values directly.
 
 ---
 
@@ -483,16 +503,19 @@ Errors:
 
 ### `GET /api/v1/events`
 
-Range query with optional name filter and pagination.
+Range query with optional name filter. Cursor-based pagination is not
+implemented in v1 — the response is bounded by `limit` (default 100,
+hard cap 1000). When you hit the cap, narrow the window or filter by
+name; bumping the cap is a future change.
 
 ```http
 GET /api/v1/events
     ?db=sensors
-    &name=disc.*           (optional; wildcard pattern; default = all events)
+    &name=disc.*           (optional; exact match OR wildcard pattern)
     &start=2026-06-01T00:00:00Z
     &end=2026-06-02T00:00:00Z
     &limit=100              (optional; default 100, hard cap 1000)
-    &cursor=<opaque>        (optional; from previous response)
+    &timestamp_unit=ns      (optional; ns | us | ms | s; default ns)
 ```
 
 Response:
@@ -505,45 +528,79 @@ Response:
     "result": [
       {
         "name": "disc.write.slow",
+        "id":   1,
         "ts":   1717238412000000000,
-        "value": 542,
+        "value_type": "int32",
+        "int32": 542,
         "payload": {"path": "/tmp"}
       },
       {
         "name": "disc.write.slow",
+        "id":   1,
         "ts":   1717238531000000000,
-        "value": 870
+        "value_type": "int32",
+        "int32": 870
       }
-    ],
-    "next_cursor": "..."
+    ]
   }
 }
 ```
 
 Response shape rules:
 
-- `value` field omitted when the event's `value_type = none`.
+- The typed-value field is named for its type (`int32` or `float32`) so
+  consumers don't have to redo the polymorphism client-side. It's
+  omitted when `value_type = none`.
+- `value_type` is always present and is one of `none`, `int32`, `float32`.
 - `payload` field omitted when no payload was stored.
-- `payload` returned as parsed JSON if it parses cleanly; as
-  `{"raw_base64": "..."}` otherwise. (Keeps the response valid JSON
-  even when payloads happen to be non-JSON bytes.)
-- `next_cursor` present when more results exist; absent on the final page.
+- `payload` returned as parsed JSON if the stored bytes parse cleanly;
+  otherwise as `{"raw_base64": "..."}` so the wrapping response stays
+  valid JSON regardless of what bytes the producer stored.
 
-### `GET /api/v1/events/aggregate` *(Phase 2)*
+### `GET /api/v1/events/aggregate`
 
-Time-bucketed count of matching events. Response shape mirrors the
-metric `query_range` aggregate response so the dashboard can chart it
-with the existing line-chart widget.
+Time-bucketed **count** of matching events. v1 supports `count` only —
+the endpoint has no `aggregate` parameter; the count semantic is
+hardcoded. (Numeric aggregates over event values are listed in the
+"Aggregate semantics" table below as future work.)
 
 ```http
 GET /api/v1/events/aggregate
     ?db=sensors
-    &name=disc.*
+    &name=disc.*               (optional; exact match OR wildcard pattern)
     &start=2026-06-01T00:00:00Z
-    &end=2026-06-02T00:00:00Z
-    &window=1h
-    &aggregate=count            (count only in v1; see Aggregate semantics below)
+    &end=2026-06-02T00:00:00Z   (optional; defaults to now)
+    &window=1h                  (required; bucket size)
+    &timestamp_unit=ns          (optional; ns | us | ms | s; default ns)
 ```
+
+Response:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "resultType": "events_aggregate",
+    "db": "sensors",
+    "window": "1h0m0s",
+    "result": [
+      {"ts": 1717238400000000000, "count": 12},
+      {"ts": 1717242000000000000, "count": 7}
+    ]
+  }
+}
+```
+
+Bucket TS is the **bucket start** (`floor(event_ts / window) * window`).
+Buckets with zero matching events are omitted from the result — clients
+that want a dense series should fill gaps client-side. This is a
+deliberate v1 simplification; the metric `query_range` aggregate
+response shape (`result: [{metric: {...}, values: [[ts,val],...]}]`) is
+not used here.
+
+`name` supports both exact match and shell-style wildcards (`*`, `?`,
+`[abc]`). Without a `name` parameter, every event in the time window
+contributes to the count.
 
 ### `GET /api/v1/events/catalog`
 
@@ -586,87 +643,164 @@ nanocli events                  --root <dir> --db <name>
 
 ## Dashboard integration
 
-### Numeric-valued events as line-chart series
+Three event integrations are shipped on the dashboard side:
 
-Numeric (`int32`/`float32`) events plot naturally as a discrete series
-where each event is one point. No new widget type needed — extend the
-existing `line_chart` series shape:
+1. **`event_log` widget** — tabular live feed of recent events.
+2. **Event-backed line-chart series** — each numeric event becomes one
+   scatter point on a `line_chart` widget.
+3. **`event_overlays` on metric line-charts** — vertical markers at
+   event timestamps drawn on top of metric series.
+
+### `event_log` widget
+
+A tabular live feed of recent events, filtered by name pattern. Each
+series under the widget is one log channel:
 
 ```json
 {
-  "type": "line_chart",
-  "title": "Slow-write latency events",
+  "type": "event_log",
+  "title": "Slow Disk Writes",
+  "refresh_sec": 10,
+  "lookback": "6h",
   "series": [
-    {"label": "ms", "event": "disc.write.slow"}
+    {
+      "db": "metrics",
+      "event_name_pattern": "disk.sd_write_probe.slow",
+      "event_limit": 10
+    }
   ]
 }
 ```
 
-The `event` field, when present, makes the series event-backed:
-y-coordinate is the event's typed value, x-coordinate is its timestamp.
-Defaults to scatter-point style (not connected lines) because events are
-sparse occurrences, not a continuous signal.
+Field rules (enforced by `validateDashboardConfig` in
+[internal/web/dashboard_config.go](../internal/web/dashboard_config.go)):
 
-For event counts, use the aggregate-event-backed form:
+- `type` must be `event_log`.
+- Widget-level `lookback` is required and must be a valid duration
+  (parsed via `engine.ParseDuration`).
+- Each series **must** define `event_name_pattern` (an exact name OR a
+  wildcard pattern with `*`, `?`, `[abc]`).
+- Each series **may not** mix `event_name_pattern` with the metric-side
+  fields (`query`, `metric`, `measurement`, `field`).
+- `event_limit` caps the row count returned per series (default 100,
+  hard cap 1000 — same as `GET /api/v1/events`).
+- `db` overrides `default_db` for this series.
+
+### Event-backed line-chart series
+
+A `line_chart` series whose `event_name_pattern` is set is event-backed
+rather than metric-backed. Each int32/float32 event in the time window
+becomes one scatter point at `(event.ts, event.value)`. `none`-typed
+events have no value to plot and are silently skipped.
 
 ```json
 {
-  "label": "Slow writes / h",
-  "event": "disc.write.slow",
-  "aggregate": "count",
-  "window": "1h"
+  "type": "line_chart",
+  "title": "Slow Disk Write Latencies",
+  "lookback": "6h",
+  "interval": "30s",
+  "series": [
+    {
+      "label": "ms",
+      "db": "metrics",
+      "event_name_pattern": "disk.sd_write_probe.slow",
+      "event_limit": 1000
+    }
+  ]
 }
 ```
 
-### Event overlays on metric charts *(Phase 3)*
+Field rules for event-backed line-chart series:
 
-Optional `event_overlays` field on `line_chart` widgets renders vertical
-markers at each event timestamp. Hover surfaces the name, ts, value,
-and payload.
+- `event_name_pattern` activates event-backing. Cannot mix with
+  `query`/`metric`/`measurement`/`field` — the validator rejects mixed
+  shapes.
+- `aggregate` and `window` are **not** supported on event-backed series.
+  Use the `GET /api/v1/events/aggregate` endpoint via a separate
+  visualization if you need event counts. (Per-event-value numeric
+  aggregates are designed but not built — see the "Aggregate semantics"
+  table.)
+- `transform` (factor / offset / unit / decimals / format) is honored
+  the same way as on metric series: the raw int32/float32 value is run
+  through the transform before plotting.
+- Each event-backed series renders as scatter points (no connecting
+  line) because events are sparse occurrences, not a continuous signal.
+- A single `line_chart` widget may freely mix metric-backed and
+  event-backed series.
+
+### Event overlays on metric charts
+
+`event_overlays` is an optional widget-level array on `line_chart`
+widgets. Each entry renders one layer of vertical dashed markers at
+event timestamps over the chart. Multiple overlays compose; the
+chart's y-scale is determined entirely by the underlying metric series.
 
 ```json
 {
   "type": "line_chart",
   "title": "CPU temp with overheat events",
+  "lookback": "6h",
+  "interval": "1m",
   "series": [{"label": "CPU", "metric": "temp.cpu"}],
   "event_overlays": [
-    {"name": "temp.office.overheat", "color": "#c00"}
+    {
+      "event_name_pattern": "temp.office.overheat*",
+      "color": "#c00",
+      "label": "Overheat",
+      "event_limit": 200
+    },
+    {
+      "event_name_pattern": "deploy.completed",
+      "color": "blue"
+    }
   ]
 }
 ```
 
-### Event-log widget *(Phase 3)*
+Field rules for `event_overlays` (validated at save time):
 
-New widget type `event_log` for a tabular live feed:
-
-```json
-{
-  "type": "event_log",
-  "title": "Recent events",
-  "lookback": "24h",
-  "name_pattern": "*",
-  "limit": 50
-}
-```
+- Only allowed on `line_chart` widgets — `event_log`, `aggregate_band`,
+  `numbers`, `number` reject the field.
+- Each overlay **must** define a non-empty `event_name_pattern`.
+- `color` is optional. Accepts CSS hex (`#rgb`, `#rrggbb`, `#rrggbbaa`,
+  with or without alpha) or a short ASCII named color (`red`,
+  `crimson`, etc.). When omitted, a stable palette color is picked
+  deterministically from the layer's label/pattern.
+- `event_limit` caps the marker count per layer (default 200, hard cap
+  1000). The cap mostly matters on busy event streams; a render with
+  thousands of markers becomes visually unusable anyway.
+- Duplicate effective labels (the resolved `label` or, falling back,
+  the `event_name_pattern`) are rejected at save time — they would be
+  indistinguishable in the chart legend.
+- A widget that produced no metric/event series points renders nothing,
+  even if overlays have markers. Overlays decorate a chart; without a
+  chart there's nothing to overlay on.
 
 ---
 
 ## Aggregate semantics
 
-For Phase 2, only `count` is universal:
+**v1 implements `count` only.** The aggregate endpoint has no
+`aggregate` parameter; the count semantic is hardcoded. The table below
+documents the *planned* aggregate matrix once value-aware aggregates
+ship — concretely, the design intent is for numeric aggregates to apply
+to typed events the same way they apply to metrics. None of the
+non-`count` rows are queryable today.
 
-| Aggregate              | `none` value | `int32` value | `float32` value |
-|------------------------|--------------|---------------|-----------------|
-| `count`                | yes          | yes           | yes             |
-| `min` / `max`          | rejected     | yes           | yes             |
-| `avg` / `sum`          | rejected     | yes           | yes             |
-| `median` / `p50/95/99` | rejected     | yes           | yes             |
+| Aggregate              | `none` value | `int32` value | `float32` value | Status   |
+|------------------------|--------------|---------------|-----------------|----------|
+| `count`                | yes          | yes           | yes             | shipped  |
+| `min` / `max`          | rejected     | yes           | yes             | planned  |
+| `avg` / `sum`          | rejected     | yes           | yes             | planned  |
+| `median` / `p50/95/99` | rejected     | yes           | yes             | planned  |
 
-For value-typed events, the numeric aggregate set matches the metric
-aggregate set, so the query and dashboard surfaces are uniform.
+When the numeric aggregates ship, the contract is:
 
-For `none`-typed events, only `count` is meaningful. Any other aggregate
-returns a clean error rather than silently zero-filling.
+- For value-typed events, the numeric aggregate set matches the metric
+  aggregate set, so the query and dashboard surfaces stay uniform.
+- For `none`-typed events, only `count` will be meaningful — any other
+  aggregate is expected to return a clean error rather than silently
+  zero-filling.
 
 ---
 
@@ -713,22 +847,33 @@ ship the implementation.
 
 Each phase is independently shippable and useful.
 
-**Phase 1 — Storage + ingest + basic query.** Catalog, events WAL with
-replay, `events-*.dat` page format with id-set header, `POST/GET
-/api/v1/events`, `GET /api/v1/events/catalog`, `nanocli inspect events`,
-`nanocli inspect events-wal`, `nanocli inspect events-catalog`, retention
-joins events files to the partition family. *Phase 1 alone is "I can log
-events and look at them later."*
+**Phase 1 — Storage + ingest + basic query. SHIPPED.** Catalog, events
+WAL with replay, `events-*.dat` page format with id-set header,
+`POST /api/v1/events`, `GET /api/v1/events`, `GET /api/v1/events/catalog`,
+`nanocli inspect events`, `nanocli inspect events-wal`,
+`nanocli inspect events-catalog`, `nanocli events` range query, retention
+joins events files to the partition family, `drip` opt-in event emission
+for the SD-write-probe threshold. Crash-safety exercised by
+[scripts/events_chaos.py](../scripts/events_chaos.py).
 
-**Phase 2 — Aggregate counts.** `GET /api/v1/events/aggregate`,
-`nanocli events --aggregate count`, numeric-valued events as line-chart
-series in dashboards.
+**Phase 2 — Aggregate counts. SHIPPED (count only).**
+`GET /api/v1/events/aggregate` with hardcoded count semantic over a
+`window` bucket; `nanocli events --aggregate count --window`. Value-aware
+numeric aggregates (avg/min/max/sum/median/percentiles on
+`int32`/`float32` events) are designed but not built — see the
+"Aggregate semantics" table above.
 
-**Phase 3 — Dashboard richness.** `event_overlays` field on `line_chart`,
-new `event_log` widget type, editor support, validation.
+**Phase 3 — Dashboard richness. SHIPPED.** The `event_log` widget type,
+event-backed `line_chart` series (each numeric event becomes one scatter
+point), widget-level `event_overlays` on metric line-charts (vertical
+markers), editor pickers and toggle UI for both, and the engine view's
+event-catalog / events-WAL / events-file inspection panels are all
+live. See the Dashboard integration section above for the JSON shapes
+and validation rules.
 
-**Phase 4 — Handler registry.** `RegisterEventHandler`, async dispatch,
-the first built-in handler (threshold→event), drop-counter telemetry.
+**Phase 4 — Handler registry. DESIGNED, not built.** `RegisterEventHandler`,
+async dispatch, the first built-in handler (threshold→event),
+drop-counter telemetry.
 
 ---
 
@@ -750,10 +895,15 @@ max_bytes = 65536
 max_age = "1h"
 
 [manifest_defaults.events.wal]
-enabled = true
 max_segment_size = 16777216    # 16 MiB — smaller than metric WAL
-# fsync_policy inherits from [wal].fsync_policy unless set
+fsync_policy     = "segment"   # "segment" or "always"; no inheritance from [wal]
 ```
+
+The events WAL has no separate `enabled` field — it is implicitly active
+whenever `[events].enabled = true`. The fsync policy defaults to
+`"segment"` and must be set explicitly to `"always"` if you want
+per-append fsync; there is no automatic inheritance from the metric
+`[wal].fsync_policy`.
 
 The 1023 cap on registered event names per database is a hard
 architectural constant (`MaxEventsPerDatabase`), not a config knob.
@@ -775,7 +925,7 @@ existing databases are not retroactively rewritten when defaults change
 | `[events].max_in_memory_bytes`      | `1 MiB` | Spike back-pressure ceiling.                    |
 | `[events.page].max_age`             | `1h`    | Longer than metrics — events are sparse.        |
 | `[events.wal].max_segment_size`     | `16 MiB`| Smaller than metric WAL — events are sparse.    |
-| `[events.wal].fsync_policy`         | inherit | Inherits from `[wal].fsync_policy`.             |
+| `[events.wal].fsync_policy`         | `segment` | `segment` or `always`. No inheritance from `[wal].fsync_policy` — set explicitly per layer. |
 | Event ordering rule                 | monotonic per name | Mirrors per-metric rule. Equal ts allowed. |
 | Event WAL value-type carry          | new-event records only | Mirrors metric WAL new-metric records. |
 | Value types supported               | `none, int32, float32` | Strings live in payload.            |
@@ -813,9 +963,14 @@ These properties must hold:
    threads, and a page-wide monotonic rule would force expensive
    flush-and-retry rotations on every interleaving.
 
-Phase 1 test plan extends `scripts/first_test_chaos.py` (or adds an
-`events_chaos.py`) to interleave events with metrics, kill -9 at random
-points, restart, and assert all five properties above.
+All five properties are asserted by
+[scripts/events_chaos.py](../scripts/events_chaos.py): mixed-type events
+(int32 / float32 / none), random batches, SIGKILL at jittered intervals,
+restart, validate per-event-name monotonic ts, no phantom events, no
+type drift, and a post-graceful-checkpoint assertion that the
+`<db>.events.wal` is empty and `events.json` is non-empty (crash-safety
+rule 1). A run of 50 iterations producing ~200 events lost zero events
+and detected zero corruption.
 
 ---
 
@@ -839,42 +994,18 @@ Phase 1–3:
 
 ---
 
-## File touch list for Phase 1
+## Implementation reference
 
-For the implementation review:
+For maintainers tracing the design to code, the shipped surface lives in:
 
-**New files**
-
-- `internal/engine/events.go` — `Event`, `EventID`, errors.
-- `internal/engine/events_catalog.go` — `EventCatalog`, `WriteCatalog`,
-  `WriteCatalogTo`, load+validation.
-- `internal/engine/events_wal.go` — record format, append, replay.
-- `internal/engine/events_page.go` — in-memory accumulator + flush rules.
-- `internal/engine/events_file.go` — `events-<partition>.dat` writer and
-  reader, frame header with event-id bitmap, payload CRC.
-
-**Modified files**
-
-- `internal/engine/engine.go` — `AddEvent`, `QueryEvents`, four
-  catalog-checkpoint sites grow a sibling `eventCatalog.WriteCatalog()`
-  call, `Engine.Close()` flushes both WALs, partition seal also seals
-  the events page, retention scans include `events-*.dat`.
-- `internal/engine/config*.go` — `EngineConfigEvents`,
-  `EngineConfigEventsPage`, `EngineConfigEventsWAL`,
-  `manifest_defaults.events.*` mapping.
-- `internal/web/...` (or `internal/server/...`) — `POST /api/v1/events`,
-  `GET /api/v1/events`, `GET /api/v1/events/catalog`.
-- `cmd/nanocli/...` — `inspect events`, `inspect events-wal`,
-  `inspect events-catalog`, `events` query command.
-- `docs/CONFIGURATION.md` — `[events]` and `[events.wal]` sections.
-- `docs/HTTP_API.md` — new endpoints.
-- `docs/NANOCLI.md` — new inspect + query commands.
-- `docs/ARCHITECTURE.md` — on-disk layout block.
-- `docs/GLOSSARY.md` — `Event`, `EventID`, `Event Catalog`, `Events WAL`,
-  `Events Page File`.
-- `docs/LAWS.md` — extend LAW 0/1/2 to cover events.
-- `docs/CONCEPTS.md` — friendly walkthrough section after metrics.
-- `CHANGELOG.md` — Unreleased / Added.
+- [internal/engine/events.go](../internal/engine/events.go) — `Event`, `EventID`, error sentinels, value-type byte codes.
+- [internal/engine/events_catalog.go](../internal/engine/events_catalog.go) — `EventCatalog`, `WriteCatalog`, `LoadEventCatalog`, validation.
+- [internal/engine/events_wal.go](../internal/engine/events_wal.go) — record format, `AppendEvent` / `AppendEventWithName`, `RecordsWithCatalog`, replay.
+- [internal/engine/events_page.go](../internal/engine/events_page.go) — in-memory accumulator + frame encode/decode.
+- [internal/engine/events_file.go](../internal/engine/events_file.go) — `events-<partition>.dat` writer/reader + frame walker.
+- [internal/engine/events_engine.go](../internal/engine/events_engine.go) — `Engine.AddEvent`, `Engine.QueryEvents`, `Engine.ListEvents`, WAL replay, flush + reset wiring.
+- [cmd/nanotdb/events_http.go](../cmd/nanotdb/events_http.go) — HTTP handlers for `/api/v1/events*`.
+- [cmd/nanocli/events.go](../cmd/nanocli/events.go) and [cmd/nanocli/inspect_events.go](../cmd/nanocli/inspect_events.go) — CLI commands.
 
 ---
 
@@ -887,8 +1018,7 @@ For the implementation review:
   same fsync policy and durability profile apply to the events WAL.
 - [CONFIGURATION.md](CONFIGURATION.md) — `engine.toml` and
   `manifest.toml` reference.
-- [GLOSSARY.md](GLOSSARY.md) — canonical terms (will gain event entries
-  in Phase 1).
+- [GLOSSARY.md](GLOSSARY.md) — canonical terms (including event entries).
 - Metric catalog reference points used during this design:
   [catalog.go](../internal/engine/catalog.go),
   [wal.go](../internal/engine/wal.go),

@@ -11,9 +11,10 @@ A **Database** is an isolated namespace within NanoTDB.
 
 Properties:
 - Contains its own metrics, partitioned data files (`data-<partition>.dat`), catalog file, manifest, and WAL
+- When `[events].enabled = true`, also contains its own event catalog (`events.json`), events WAL (`<db>.events.wal`), and partitioned event files (`events-<partition>.dat`)
 - Represents a unit of retention, lifecycle, and failure isolation
-- Metrics do not cross database boundaries
-- Partition granularity (`day|month|year|forever`) is per-database via the manifest
+- Metrics and events do not cross database boundaries
+- Partition granularity (`day|month|year|forever`) is per-database via the manifest and applies to both metrics and events
 - No external sidecar index file exists; raw ingest queries scan data files directly
 
 ---
@@ -181,6 +182,108 @@ A **Sealed Page** is a page that has been fully written to disk.
 Properties:
 - Immutable
 - WAL protection no longer required
+
+---
+
+## Event
+
+An **Event** is a discrete, named occurrence with an optional typed value
+and an optional opaque payload.
+
+Properties:
+- One `(timestamp, value?, payload?)` tuple per occurrence
+- Has a fixed value type set at first write: `none`, `int32`, or `float32`
+- Payload is opaque bytes the engine never parses (typically JSON)
+- Per-event-name timestamps are monotonically non-decreasing
+- Stored independently from metrics; events do not appear in metric pages
+- Opt-in per database via `[events].enabled` in the manifest
+
+Examples:
+- `disc.write.slow` (int32 value: latency in ms)
+- `temp.office.overheat` (float32 value: temperature in C)
+- `heartbeat` (no value)
+
+---
+
+## Event Identifier (API)
+
+An **Event Identifier** is the API-visible string name for an event.
+
+Properties:
+- Chosen by caller and provided on write/query requests
+- Mapped to an internal `EventID` within a database
+- Unique within a database namespace
+- Independent of the `Metric Identifier` space — a database may have a
+  metric and an event with the same string name
+
+---
+
+## EventID (Storage)
+
+An **EventID** is the internal 2-byte identifier for an event (`uint16`).
+
+Properties:
+- Assigned automatically when a new event identifier is first seen
+- Persisted in the per-database event catalog file
+- Never deleted
+- Never reused
+- Constrained to `1..1023` — a hard architectural constant, not a
+  config knob, because the page header's event-id presence bitmap is
+  sized for exactly that range (128 bytes)
+- Independent of `MetricID`; the two spaces never collide
+
+---
+
+## Event Catalog (`events.json`)
+
+The **Event Catalog** stores per-database event registry state.
+
+Properties:
+- Contains event definitions and event ids
+- Contains event identifier -> `EventID` mapping
+- Stores fixed event value type per event (`none|int32|float32` as a
+  human-readable string)
+- Scoped per database; lives alongside `catalog.json`
+- Must be persisted to disk before the events WAL is reset (crash-safety
+  rule 1 in [EVENTS.md](EVENTS.md))
+
+---
+
+## Events WAL (`<db>.events.wal`)
+
+The **Events WAL** is the write-ahead log for the events layer.
+
+Properties:
+- Independent of the metric WAL — separate file, separate format
+- Append-only with a per-record uvarint length prefix
+- Carries a `newEvent` flag bit on first occurrence of each event name
+  so the events catalog can be rebuilt from the WAL alone after a crash
+- Reset only after the in-memory events page is flushed and the events
+  catalog has been written
+- Honors the same fsync policy and segment-cap discipline as the metric
+  WAL, but its segment cap defaults smaller (16 MiB) because events are
+  sparse
+
+---
+
+## Events Page File (`events-<partition>.dat`)
+
+An **Events Page File** is the append-only durable storage for one
+database, one events stream, and one UTC partition window.
+
+Properties:
+- Named by partition mode: `events-YYYY-MM-DD.dat` (day),
+  `events-YYYY-MM.dat` (month), etc.
+- Contains one or more frames; each frame has a 152-byte fixed header
+  including a 128-byte event-id presence bitmap, plus an S2-compressed
+  payload and a CRC32 trailer
+- The bitmap lets name-filtered queries skip whole frames without
+  decompressing
+- Decoding requires the events catalog (the on-disk record omits
+  `ValueType`; per-event value width is resolved by catalog lookup)
+- Joins the partition family for retention (`keep|delete|archive`
+  treats `events-<partition>.dat` alongside the matching
+  `data-`/`raw-`/`metric-` files)
 
 ---
 

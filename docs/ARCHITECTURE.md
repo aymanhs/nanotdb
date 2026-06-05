@@ -16,13 +16,21 @@ Engine
 The `Engine` is the single entry point. It owns a collection of named databases
 and routes ingested samples to the right one based on the line-protocol prefix.
 
-Each `Database` has three storage layers:
+Each `Database` has up to **six** storage layers, three for metrics (always
+present) and three for events (present when `[events].enabled = true`):
 
 | Layer | File | Purpose |
 |---|---|---|
-| WAL | `<db>.wal` | Crash-safety: records every sample before it enters the page |
-| Catalog | `catalog.json` | Maps metric names ↔ compact MetricIDs + value types |
-| Data files | `data-<partition>.dat` | Immutable compressed pages flushed from memory |
+| Metric WAL | `<db>.wal` | Crash-safety: records every sample before it enters the page |
+| Metric Catalog | `catalog.json` | Maps metric names ↔ compact MetricIDs + value types |
+| Metric Data files | `data-<partition>.dat` | Immutable compressed pages flushed from memory |
+| Events WAL | `<db>.events.wal` | Crash-safety for the events layer; independent of the metric WAL |
+| Events Catalog | `events.json` | Maps event names ↔ compact EventIDs + value types |
+| Events Data files | `events-<partition>.dat` | Immutable compressed event pages, one per partition window |
+
+The metric and event layers share the database's partition mode and
+retention policy but have independent catalogs, WALs, and page files.
+Disabling events on a database leaves the metric storage untouched.
 
 ## Data Flow
 
@@ -64,6 +72,51 @@ QueryRange("prod", "room.temp", fromTS, toTS, stride, callback)
   │    └─ check the in-memory page for the current partition window
   └─ call callback for each sample (every Nth if stride > 1)
 ```
+
+### Events: ingest, replay, query
+
+The events layer follows the same write→WAL→page→file→retention shape as
+metrics, but uses its own files, its own catalog, and a different
+on-disk record format. See [EVENTS.md](EVENTS.md) for the byte-level
+spec; the data-flow shape is:
+
+```text
+AddEvent("prod", "disc.write.slow", ts, value, payload)
+  │
+  ├─ resolve or assign EventID via events catalog
+  ├─ events WAL append (newEvent flag on first occurrence carries
+  │    the name + value_type inline so the catalog is reconstructible
+  │    from the WAL alone)
+  ├─ append to open events page  →  in-memory EventsPage for the
+  │                                  current partition window
+  └─ if page full / MustForceFlush → compress + write frame to
+                                      events-<partition>.dat
+                                      reset events WAL when safe
+```
+
+Per-event-name timestamps are monotonic-non-decreasing. Different event
+names in the same partition page may interleave with reordered
+timestamps (the rule is enforced at the catalog level, not per page —
+see [LAWS.md](LAWS.md) LAW 2).
+
+```text
+QueryEvents("prod", "disc.*", fromTS, toTS, callback)
+  │
+  ├─ resolve name pattern to an EventID set via the events catalog
+  ├─ iterate UTC partition windows in [fromTS, toTS]
+  │    ├─ open events-<partition>.dat → scan frame headers
+  │    │    AND the query EventID set with the per-frame 128-byte
+  │    │    bitmap → skip frames that don't intersect, no decompress
+  │    │    decompress + scan matching frames
+  │    └─ check the in-memory events page for the current partition
+  └─ call callback for each matching event
+```
+
+Replay on engine open: events WAL replay reconstructs the in-memory
+events catalog (from `newEvent` records' inline `(name, value_type)`)
+and the in-memory events page, in parallel with metric WAL replay. The
+two replays never share state — corruption in one cannot poison the
+other.
 
 ## Line Protocol
 
@@ -121,19 +174,22 @@ Offset  Size  Field
   engine.toml              — engine configuration (auto-created on first start)
   <db>/
     catalog.json           — metric registry: name → id + type
-    manifest.toml          — per-database settings (retention, WAL, page limits, rollups)
-    <db>.wal               — write-ahead log (single reusable file)
-    data-<partition>.dat   — raw ingest: compressed page frames in write order
-    metric-<partition>.dat — optional query-optimized layout (when built)
+    manifest.toml          — per-database settings (retention, WAL, page limits, rollups, events)
+    <db>.wal               — metric write-ahead log (single reusable file)
+    data-<partition>.dat   — raw metric ingest: compressed page frames in write order
+    metric-<partition>.dat — optional query-optimized metric layout (when built)
     raw-<partition>.dat    — renamed source raw file after a metric-file build
                              (only with [metrics].raw_ingest_action = "rename")
+    events.json            — event registry: name → id + type           (when [events].enabled = true)
+    <db>.events.wal        — events write-ahead log (single reusable file)
+    events-<partition>.dat — events: compressed page frames, one per partition window
 ```
 
-See [METRIC_FILES.md](METRIC_FILES.md) for the metric-file layout and
-[CONCEPTS.md](CONCEPTS.md) for a friendlier walkthrough of why both
-`data-*.dat` and `metric-*.dat` exist.
+See [METRIC_FILES.md](METRIC_FILES.md) for the metric-file layout,
+[EVENTS.md](EVENTS.md) for the events-file byte spec, and
+[CONCEPTS.md](CONCEPTS.md) for a friendlier walkthrough.
 
-Data files are append-only sequences of page frames:
+Metric data files are append-only sequences of page frames:
 
 ```text
 Frame = PageHeader(18 bytes) + compressed_len(uvarint) + S2-compressed payload + CRC32(4 bytes)
@@ -142,3 +198,17 @@ Frame = PageHeader(18 bytes) + compressed_len(uvarint) + S2-compressed payload +
 The payload is a flat array of interleaved `(MetricID, Timestamp, Value)` triples,
 sorted by timestamp. S2 compression typically achieves 3–4x on realistic sensor
 data.
+
+Events data files use a different frame shape — fixed-size header
+including a per-frame event-id presence bitmap for skip-without-decompress
+on name-filtered queries:
+
+```text
+Frame = EventsFrameHeader(152 bytes) + S2-compressed payload + CRC32(4 bytes)
+
+EventsFrameHeader = start_ts(8) + end_ts(8) + record_count(4)
+                  + event_id_bitmap(128) + compressed_len(4)
+```
+
+See [EVENTS.md](EVENTS.md) for the inner record layout and the
+bitmap-skip optimization.

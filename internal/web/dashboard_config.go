@@ -37,6 +37,27 @@ type DashboardWidget struct {
 	Interval     string            `json:"interval,omitempty"`
 	Presentation string            `json:"presentation,omitempty"`
 	Series       []DashboardSeries `json:"series,omitempty"`
+
+	// EventOverlays renders vertical markers at event timestamps on top
+	// of a line_chart's metric series. Each overlay is queried
+	// independently via GET /api/v1/events; the hover surface carries
+	// the event name, timestamp, value (if any), and payload. Only
+	// valid on line_chart widgets.
+	EventOverlays []DashboardEventOverlay `json:"event_overlays,omitempty"`
+}
+
+// DashboardEventOverlay configures one vertical-marker layer over a
+// metric chart. event_name_pattern accepts the same exact-or-wildcard
+// shape as event_log series. db falls back to the dashboard's
+// default_db. color is a CSS-color string (hex like "#c00" or named
+// like "red"); when empty the renderer picks a default.
+type DashboardEventOverlay struct {
+	Label            string `json:"label,omitempty"`
+	DB               string `json:"db,omitempty"`
+	Database         string `json:"database,omitempty"`
+	EventNamePattern string `json:"event_name_pattern,omitempty"`
+	Color            string `json:"color,omitempty"`
+	EventLimit       int    `json:"event_limit,omitempty"`
 }
 
 type DashboardSeries struct {
@@ -201,6 +222,38 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 		if widget.RefreshSec < 0 {
 			errs = append(errs, fmt.Sprintf("widget %q has invalid refresh_sec %d", widgetID, widget.RefreshSec))
 		}
+
+		// event_overlays are only meaningful on line_chart. They live at
+		// the widget level (one query per overlay) so they can be
+		// composited over any number of metric series in the same chart.
+		if len(widget.EventOverlays) > 0 {
+			if widgetType != "line_chart" {
+				errs = append(errs, fmt.Sprintf("widget %q event_overlays only supported on line_chart widgets", widgetID))
+			}
+			seenOverlayLabels := make(map[string]int, len(widget.EventOverlays))
+			for oi, ov := range widget.EventOverlays {
+				pattern := strings.TrimSpace(ov.EventNamePattern)
+				if pattern == "" {
+					errs = append(errs, fmt.Sprintf("widget %q event_overlays[%d] must define event_name_pattern", widgetID, oi))
+				}
+				if ov.EventLimit < 0 {
+					errs = append(errs, fmt.Sprintf("widget %q event_overlays[%d] has invalid event_limit %d", widgetID, oi, ov.EventLimit))
+				}
+				if color := strings.TrimSpace(ov.Color); color != "" && !isValidOverlayColor(color) {
+					errs = append(errs, fmt.Sprintf("widget %q event_overlays[%d] has invalid color %q (use a hex like \"#c00\" or a CSS named color)", widgetID, oi, color))
+				}
+				label := strings.TrimSpace(ov.Label)
+				if label == "" {
+					label = pattern
+				}
+				if prev, ok := seenOverlayLabels[label]; ok && label != "" {
+					errs = append(errs, fmt.Sprintf("widget %q event_overlays has duplicate label %q at [%d] and [%d]", widgetID, label, prev, oi))
+				} else if label != "" {
+					seenOverlayLabels[label] = oi
+				}
+			}
+		}
+
 		aggregateBandRoles := make(map[string]int)
 		aggregateBandKey := ""
 		aggregateBandShortcut := usesAggregateBandShortcut(widget)
@@ -213,22 +266,35 @@ func validateDashboardConfig(cfg DashboardConfigDocument) []string {
 			window := effectiveDashboardSeriesAggregateWindow(widget, series)
 			eventNamePattern := strings.TrimSpace(series.EventNamePattern)
 
-			if widgetType == "event_log" {
-				// Event widget validation
-				if eventNamePattern == "" {
+			seriesIsEventBacked := eventNamePattern != ""
+			switch {
+			case widgetType == "event_log":
+				// Event_log series must be event-backed.
+				if !seriesIsEventBacked {
 					errs = append(errs, fmt.Sprintf("widget %q series[%d] must define event_name_pattern", widgetID, idx))
 				}
-				// Reject metric-style fields for event widgets
 				if query != "" || metric != "" || measurement != "" || field != "" {
 					errs = append(errs, fmt.Sprintf("widget %q series[%d] cannot mix event_name_pattern with metric fields (query, metric, measurement, field)", widgetID, idx))
 				}
-			} else {
+			case widgetType == "line_chart" && seriesIsEventBacked:
+				// Event-backed line-chart series: plot each event as one
+				// scatter point. Cannot mix with metric fields. Aggregate
+				// + window are not supported on event-backed series in
+				// v1 (numeric-aggregate-over-events is designed but not
+				// built — see EVENTS.md).
+				if query != "" || metric != "" || measurement != "" || field != "" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] cannot mix event_name_pattern with metric fields (query, metric, measurement, field)", widgetID, idx))
+				}
+				if aggregate != "" || window != "" {
+					errs = append(errs, fmt.Sprintf("widget %q series[%d] event-backed line-chart series does not support aggregate/window (use a metric series for aggregation)", widgetID, idx))
+				}
+			default:
 				// Metric widget validation
 				if query == "" && metric == "" && (measurement == "" || field == "") {
 					errs = append(errs, fmt.Sprintf("widget %q series[%d] must define query, metric, or measurement+field", widgetID, idx))
 				}
-				// Reject event fields for metric widgets
-				if eventNamePattern != "" {
+				// Reject event fields for non-event-capable widgets.
+				if seriesIsEventBacked {
 					errs = append(errs, fmt.Sprintf("widget %q series[%d] cannot use event_name_pattern in non-event widgets", widgetID, idx))
 				}
 				if (aggregate == "") != (window == "") && !(aggregateBandShortcut && idx == 0 && aggregate == "" && window != "") {
@@ -431,6 +497,51 @@ func isValidDashboardDuration(value string) bool {
 	}
 	for _, ch := range value[:len(value)-1] {
 		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidOverlayColor lightly validates a CSS color string. Accepts:
+//   - hex form: "#rgb", "#rgba", "#rrggbb", "#rrggbbaa"
+//   - simple named colors: 1..32 ASCII letters
+//
+// We deliberately do NOT enumerate every CSS named color — the browser
+// is the authority. If it doesn't recognize the value it will ignore the
+// stroke; the dashboard still renders correctly. We just want to catch
+// obvious garbage (whitespace, slashes, SQL fragments) before it lands
+// in a saved dashboard.json.
+func isValidOverlayColor(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if value[0] == '#' {
+		hex := value[1:]
+		switch len(hex) {
+		case 3, 4, 6, 8:
+		default:
+			return false
+		}
+		for _, ch := range hex {
+			isDigit := ch >= '0' && ch <= '9'
+			isUpper := ch >= 'A' && ch <= 'F'
+			isLower := ch >= 'a' && ch <= 'f'
+			if !isDigit && !isUpper && !isLower {
+				return false
+			}
+		}
+		return true
+	}
+	// Named color: bounded length, ASCII letters only.
+	if len(value) > 32 {
+		return false
+	}
+	for _, ch := range value {
+		isUpper := ch >= 'A' && ch <= 'Z'
+		isLower := ch >= 'a' && ch <= 'z'
+		if !isUpper && !isLower {
 			return false
 		}
 	}

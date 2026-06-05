@@ -71,6 +71,17 @@
 
   function chartSeriesStyle(item, idx, presentation) {
     if (presentation !== "aggregate_band") {
+      // Event-backed series render as scatter points (no connecting line):
+      // events are sparse occurrences, not a continuous signal, so a line
+      // would imply intermediate values that don't exist.
+      if (item && item.role === "event") {
+        return {
+          stroke: item.color || pickSeriesColor(idx),
+          width: 0,
+          dash: [],
+          points: { show: true, size: 8, width: 2 },
+        };
+      }
       return {
         stroke: pickSeriesColor(idx),
         width: 2,
@@ -207,14 +218,18 @@
     };
   }
 
-  function renderUPlotChart(plotEl, widget, seriesItems) {
+  function renderUPlotChart(plotEl, widget, seriesItems, overlayLayers) {
     if (typeof uPlot !== "function") {
       throw new Error("uPlot not loaded");
     }
 
     const presentation = widgetChartType(widget);
     const items = orderChartSeriesItems(Array.isArray(seriesItems) ? seriesItems : [], presentation);
+    const overlays = Array.isArray(overlayLayers) ? overlayLayers : [];
     const data = buildUPlotData(items);
+    // Overlays decorate a chart — they don't stand alone. If the metric
+    // and event-backed series produced no points, drop the render even
+    // if overlays have markers; there's no Y-axis to position them on.
     if (!data[0] || data[0].length === 0) {
       const existing = chartState.get(widget.id);
       if (existing) {
@@ -263,6 +278,9 @@
     if (presentation === "aggregate_band") {
       Object.assign(opts, aggregateBandHooks(items));
     }
+    if (presentation === "line_chart" && overlays.length > 0) {
+      opts.hooks = mergeUPlotHooks(opts.hooks, eventOverlayHooks(overlays));
+    }
     const existing = chartState.get(widget.id);
     if (existing) {
       existing.destroy();
@@ -272,6 +290,91 @@
     chartState.set(widget.id, instance);
 
     return true;
+  }
+
+  // mergeUPlotHooks composes hook objects without losing arrays from
+  // either side. aggregate_band already uses opts.hooks; the overlay
+  // path must concatenate rather than overwrite.
+  function mergeUPlotHooks(a, b) {
+    const out = {};
+    const keys = new Set(Object.keys(a || {}).concat(Object.keys(b || {})));
+    keys.forEach((k) => {
+      const aHooks = (a && a[k]) || [];
+      const bHooks = (b && b[k]) || [];
+      out[k] = aHooks.concat(bHooks);
+    });
+    return out;
+  }
+
+  // eventOverlayHooks returns uPlot hook callbacks that draw a vertical
+  // marker at each event timestamp after the main chart has rendered.
+  // Cursor enters/leaves drive a small overlay-summary tooltip element
+  // attached to the plot's parent.
+  function eventOverlayHooks(overlays) {
+    return {
+      draw: [
+        (u) => {
+          const ctx = u.ctx;
+          const plotTop = u.bbox.top;
+          const plotBottom = u.bbox.top + u.bbox.height;
+          ctx.save();
+          for (const layer of overlays) {
+            const stroke = isValidCssColorBasic(layer.color) ? layer.color : overlayDefaultColor(layer.label);
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 3]);
+            for (const m of (layer.markers || [])) {
+              const xPx = u.valToPos(m.x, "x", true);
+              if (!Number.isFinite(xPx) || xPx < u.bbox.left || xPx > u.bbox.left + u.bbox.width) {
+                continue;
+              }
+              ctx.beginPath();
+              ctx.moveTo(Math.round(xPx) + 0.5, plotTop);
+              ctx.lineTo(Math.round(xPx) + 0.5, plotBottom);
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+        },
+      ],
+    };
+  }
+
+  // isValidCssColorBasic mirrors the backend's color allow-shape (hex
+  // form or a short ASCII identifier). We re-check on the client side
+  // because the renderer is given untrusted dashboard JSON in dev — we
+  // don't want a typo to land an invalid stroke style and freeze the
+  // chart.
+  function isValidCssColorBasic(value) {
+    if (!value || typeof value !== "string") {
+      return false;
+    }
+    const v = value.trim();
+    if (v.length === 0) {
+      return false;
+    }
+    if (v[0] === "#") {
+      const hex = v.slice(1);
+      if (hex.length !== 3 && hex.length !== 4 && hex.length !== 6 && hex.length !== 8) {
+        return false;
+      }
+      return /^[0-9a-fA-F]+$/.test(hex);
+    }
+    return v.length <= 32 && /^[A-Za-z]+$/.test(v);
+  }
+
+  // overlayDefaultColor maps a layer's stable identifier (label or
+  // pattern) to one of a small fixed palette, so dashboards stay visually
+  // consistent across reloads without the operator having to assign a
+  // color in JSON.
+  function overlayDefaultColor(key) {
+    const palette = ["#fb923c", "#a78bfa", "#22d3ee", "#f87171", "#f472b6", "#facc15"];
+    let h = 0;
+    const s = String(key || "");
+    for (let i = 0; i < s.length; i++) {
+      h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    }
+    return palette[h % palette.length];
   }
 
   async function fetchLast(db, series, lookbackSec) {
@@ -305,6 +408,95 @@
       return [];
     }
     return item.values.map((v) => ({ x: Number(v[0]), y: Number(v[1]) })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  }
+
+  // fetchEventSeriesPoints turns a chart series whose `event_name_pattern`
+  // is set into an array of {x, y} chart points. Only numeric-typed
+  // events (int32/float32) contribute; none-typed events are silently
+  // skipped — they have no value to plot. x is in seconds (uPlot's time
+  // scale), y goes through the same transformValue pipeline metric
+  // points use so units/decimals/scale composability stays consistent.
+  async function fetchEventSeriesPoints(db, series, lookbackSec) {
+    const pattern = series && (series.event_name_pattern || "").trim();
+    if (!db || !pattern) {
+      return [];
+    }
+    const end = new Date();
+    const start = new Date(end.getTime() - lookbackSec * 1000);
+    const limit = (series && series.event_limit) ? Math.max(1, Math.min(1000, Number(series.event_limit) || 1000)) : 1000;
+    const eventsURL = apiURL(
+      "/api/v1/events?db=" + encodeURIComponent(db) +
+      "&name=" + encodeURIComponent(pattern) +
+      "&start=" + encodeURIComponent(start.toISOString()) +
+      "&end=" + encodeURIComponent(end.toISOString()) +
+      "&limit=" + limit
+    );
+    const payload = await fetchJSON(eventsURL);
+    const events = (payload.data && payload.data.result) ? payload.data.result : [];
+    const out = [];
+    for (const evt of events) {
+      const ts = Number(evt && evt.ts);
+      if (!Number.isFinite(ts)) {
+        continue;
+      }
+      let raw;
+      if (typeof evt.int32 === "number") {
+        raw = evt.int32;
+      } else if (typeof evt.float32 === "number") {
+        raw = evt.float32;
+      } else {
+        // none-typed event; can't plot.
+        continue;
+      }
+      const y = transformValue(series, raw);
+      if (!Number.isFinite(y)) {
+        continue;
+      }
+      // ts arrives as Unix nanoseconds. uPlot's time scale uses seconds.
+      out.push({ x: ts / 1e9, y });
+    }
+    return out;
+  }
+
+  // fetchEventOverlayMarkers returns a flat list of {x, name, ts, value,
+  // payload, color} for one overlay. Each entry maps to a vertical line
+  // drawn over the chart at x (Unix seconds, matching uPlot time scale).
+  // The renderer iterates these in the draw hook; they are not part of
+  // the chart's series data, so they don't influence the y-axis scale.
+  async function fetchEventOverlayMarkers(db, overlay, lookbackSec) {
+    const pattern = overlay && (overlay.event_name_pattern || "").trim();
+    if (!db || !pattern) {
+      return [];
+    }
+    const end = new Date();
+    const start = new Date(end.getTime() - lookbackSec * 1000);
+    const limit = overlay && overlay.event_limit ? Math.max(1, Math.min(1000, Number(overlay.event_limit) || 200)) : 200;
+    const eventsURL = apiURL(
+      "/api/v1/events?db=" + encodeURIComponent(db) +
+      "&name=" + encodeURIComponent(pattern) +
+      "&start=" + encodeURIComponent(start.toISOString()) +
+      "&end=" + encodeURIComponent(end.toISOString()) +
+      "&limit=" + limit
+    );
+    const payload = await fetchJSON(eventsURL);
+    const events = (payload.data && payload.data.result) ? payload.data.result : [];
+    const out = [];
+    for (const evt of events) {
+      const ts = Number(evt && evt.ts);
+      if (!Number.isFinite(ts)) {
+        continue;
+      }
+      out.push({
+        x: ts / 1e9,
+        ts,
+        name: evt.name || "",
+        valueText: extractEventValue(evt),
+        payload: evt.payload || null,
+        color: overlay.color || "",
+        label: overlay.label || pattern,
+      });
+    }
+    return out;
   }
 
   function resolveAggregateBandBatch(chartSeries, dashboardCfg) {
@@ -787,6 +979,17 @@
           const seriesItems = new Array(chartSeries.length);
           await Promise.all(chartSeries.map(async (series, idx) => {
             const db = seriesDB(series, dashboardCfg);
+            const isEventBacked = !!(series && (series.event_name_pattern || "").trim());
+            if (isEventBacked) {
+              // Each int32/float32 event becomes one scatter point.
+              const points = await fetchEventSeriesPoints(db, series, lookbackSec);
+              seriesItems[idx] = {
+                label: effectiveSeriesLabel(series, idx),
+                role: "event",
+                points,
+              };
+              return;
+            }
             const query = seriesMetric(series);
             if (!db || !query) {
               return;
@@ -800,11 +1003,33 @@
           }));
           filteredItems = seriesItems.filter(Boolean);
         }
-        const hasData = renderUPlotChart(els.plot, widget, filteredItems);
+
+        // Pull event_overlays in parallel with the series fetch above.
+        // Overlays only apply to line_chart (validated server-side); the
+        // aggregate_band branch never reaches here with overlays defined.
+        let overlayLayers = [];
+        if (widgetChartType(widget) === "line_chart" && Array.isArray(widget.event_overlays) && widget.event_overlays.length > 0) {
+          overlayLayers = await Promise.all(widget.event_overlays.map(async (overlay) => {
+            const overlayDB = (overlay && (overlay.db || overlay.database) || "").trim() || (dashboardCfg && dashboardCfg.default_db) || "";
+            const markers = await fetchEventOverlayMarkers(overlayDB, overlay, lookbackSec);
+            return {
+              label: (overlay && overlay.label) || (overlay && overlay.event_name_pattern) || "",
+              color: (overlay && overlay.color) || "",
+              markers,
+            };
+          }));
+        }
+
+        const hasData = renderUPlotChart(els.plot, widget, filteredItems, overlayLayers);
         if (widgetChartType(widget) === "aggregate_band") {
           els.foot.textContent = "";
         } else {
-          els.foot.textContent = hasData ? "updated " + new Date().toLocaleTimeString() + " · " + currentLookback : "no points for " + currentLookback;
+          const overlayMarkerCount = overlayLayers.reduce((acc, layer) => acc + (layer.markers ? layer.markers.length : 0), 0);
+          let statusText = hasData ? "updated " + new Date().toLocaleTimeString() + " · " + currentLookback : "no points for " + currentLookback;
+          if (overlayMarkerCount > 0) {
+            statusText += " · " + overlayMarkerCount + " event" + (overlayMarkerCount === 1 ? "" : "s") + " overlaid";
+          }
+          els.foot.textContent = statusText;
         }
       };
       const refresher = createWidgetRefresher(refresh, refreshMs, { refreshBtn: els.refreshBtn, pauseBtn: els.pauseBtn }, {

@@ -416,6 +416,107 @@ For the full discussion and the SD-card story, see
 
 ---
 
+## Events — a sibling layer for discrete occurrences
+
+Everything above is about **metrics**: dense, regular, single-numeric-valued
+streams. NanoTDB also has an **events** layer for the other shape of data —
+discrete things that happen, sometimes carrying a value, sometimes carrying
+arbitrary context.
+
+A metric answers: *"what was the temperature every 10 seconds?"*
+An event answers: *"the SD-write probe exceeded 500 ms at 14:22:07, and
+here's the payload context."*
+
+Events live alongside metrics in the same database, but with their own
+files:
+
+```text
+sensors/
+  catalog.json                — metric catalog
+  events.json                 — event catalog                  (NEW per DB, opt-in)
+  manifest.toml               — extended with [events]
+  sensors.wal                 — metric WAL (unchanged)
+  sensors.events.wal          — events WAL                     (NEW)
+  data-<partition>.dat        — metric raw pages
+  metric-<partition>.dat      — optional query-optimized metric layout
+  events-<partition>.dat      — event pages                    (NEW)
+```
+
+Three things to know:
+
+- **Events are opt-in per database** via `[events].enabled = true` in the
+  manifest. Default is off, so existing databases don't suddenly grow
+  events files on upgrade.
+- **Each event has a name, a timestamp, an optional typed value
+  (`int32`, `float32`, or `none`), and an optional opaque payload**
+  (typically JSON). The value type is pinned at first write per event
+  name — same rule as metrics.
+- **The events layer mirrors the metric layer's crash-safety story:**
+  WAL append → in-memory page → flushed partition file, with a strict
+  catalog-before-WAL-reset invariant.
+
+### What's the same as metrics
+
+- Partition cadence: events follow the database's configured partition
+  mode (`day|month|year|forever`). One `events-<partition>.dat` per window.
+- Retention: events files join the partition family, so
+  `retention_action = delete` removes them with their metric siblings.
+- Catalog-before-WAL-reset: the events catalog is fsynced before the
+  events WAL is allowed to reset.
+- Inspectable: `nanocli inspect events`, `nanocli inspect events-wal`,
+  `nanocli inspect events-catalog` mirror the metric inspect commands.
+
+### What's different
+
+- **Strings live in the payload, not the value.** Events have only
+  `none`, `int32`, or `float32` for the typed value. If you want to log
+  a deploy SHA or a hostname, put it in the payload — that keeps the
+  on-disk value field fixed-width and avoids high-cardinality value
+  spaces in future aggregate work.
+- **Per-page event-id bitmap.** Every event-page frame carries a
+  128-byte bitmap of which `EventID`s appear in it, so name-filtered
+  queries skip whole frames without decompressing. (Equivalent to a
+  per-frame "index" baked into the header, no sidecar files.)
+- **Event-id space is `1..1023`**, separate from metric ID space. The
+  cap is a hard architectural constant — the bitmap is sized for
+  exactly that range.
+- **Page-wide ts ordering is intentionally lax**, while per-event-name
+  ordering is strict. The metric Page rejects any out-of-order ts; the
+  events page accepts arrival-order interleaving across different event
+  names. The per-event-name monotonic rule lives in the events catalog,
+  not in the page.
+
+### What you can do with them
+
+Today (Phases 1, 2, 3 shipped):
+
+- Ingest via `POST /api/v1/events` (JSON only — no line protocol form)
+- Range-query via `GET /api/v1/events` with name filter, time window,
+  and `limit`
+- Time-bucketed **count** via `GET /api/v1/events/aggregate` (count is
+  the only aggregate in v1; numeric aggregates on event values are
+  designed, not built)
+- Use `nanocli events` for the offline range query or count aggregation
+- Display recent events in an `event_log` dashboard widget filtered by
+  name pattern
+- Plot numeric (int32/float32) events as scatter points on a
+  `line_chart` widget by setting `event_name_pattern` on the series
+- Overlay event timestamps as vertical markers on a metric chart via
+  `event_overlays` at the widget level
+
+Not yet shipped from the design:
+
+- Numeric aggregates over event values (avg/min/max/sum/percentiles
+  on event values) — only `count` is implemented today
+- Phase 4 — handler registry for re-emit / webhook / threshold-to-event
+  pipelines
+
+For the full byte-level spec, see [EVENTS.md](EVENTS.md). For the
+crash-safety properties and the chaos test that asserts them, see
+[scripts/events_chaos.py](../scripts/events_chaos.py).
+
+---
+
 ## A minute-long mental model
 
 Reading from outermost in:
@@ -423,19 +524,27 @@ Reading from outermost in:
 ```text
 engine
  └── database (one namespace, own retention)
-      ├── catalog.json        — name ↔ MetricID ↔ type
-      ├── manifest.toml       — retention, WAL, page, rollups for this DB
-      ├── <db>.wal            — crash safety for in-memory page
-      ├── data-<partition>.dat  — append-only compressed write-order pages
-      │                          (always present; queries can read directly)
-      └── metric-<partition>.dat — optional query-optimized layout
-                                  (built when [metrics] enabled = true,
-                                   or manually with `nanocli build metric`)
+      ├── catalog.json        — name ↔ MetricID ↔ type        (metrics)
+      ├── events.json         — name ↔ EventID  ↔ type        (events, opt-in)
+      ├── manifest.toml       — retention, WAL, page, rollups, events for this DB
+      ├── <db>.wal            — crash safety for in-memory metric page
+      ├── <db>.events.wal     — crash safety for in-memory events page  (opt-in)
+      ├── data-<partition>.dat   — metric raw write-order pages
+      │                            (always present; queries can read directly)
+      ├── metric-<partition>.dat — optional query-optimized metric layout
+      │                            (built when [metrics] enabled = true,
+      │                             or manually with `nanocli build metric`)
+      └── events-<partition>.dat — events pages with per-frame id bitmap
+                                    (opt-in; one per partition window)
 ```
 
-Writes go WAL → in-memory page → `data-*.dat`. Queries prefer `metric-*.dat`
-when available, fall back to `data-*.dat`. Retention deletes whole partition
-families. WAL stays small. Files stay readable. That's the whole shape.
+Metric writes go metric WAL → in-memory page → `data-*.dat`. Queries
+prefer `metric-*.dat` when available, fall back to `data-*.dat`. Event
+writes go events WAL → in-memory events page → `events-*.dat`. Queries
+walk the per-frame bitmap to skip non-matching frames without
+decompressing. Retention deletes whole partition families (metric and
+event files for the same window go together). Both WALs stay small.
+All files stay readable. That's the whole shape.
 
 ---
 
@@ -443,9 +552,12 @@ families. WAL stays small. Files stay readable. That's the whole shape.
 
 - [HELLO_WORLD.md](HELLO_WORLD.md) — copy/paste the 60-second flow.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the deeper storage walkthrough,
-  line-protocol parsing, WAL byte layout, page frame format.
-- [GLOSSARY.md](GLOSSARY.md) — canonical term reference.
+  line-protocol parsing, WAL byte layout, page frame format,
+  events-layer data flow.
+- [GLOSSARY.md](GLOSSARY.md) — canonical term reference (metrics + events).
 - [CONFIGURATION.md](CONFIGURATION.md) — `engine.toml` + `manifest.toml`.
 - [RECOVERY.md](RECOVERY.md) — durability tuning in depth.
 - [METRIC_FILES.md](METRIC_FILES.md) — codecs, benchmarks, build options.
 - [ROLLUPS.md](ROLLUPS.md) — downsampling jobs and backfill.
+- [EVENTS.md](EVENTS.md) — events byte spec, ingest/query APIs,
+  dashboard integration, crash-safety contract.

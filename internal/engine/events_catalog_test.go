@@ -228,9 +228,9 @@ func TestEventCatalog_Persistence_RoundTrip(t *testing.T) {
 	defer c2.Close()
 
 	want := []EventInfo{
-		{"disc.write.slow", 1, Int32Sample},
-		{"heartbeat", 3, EventValueNone},
-		{"temp.over", 2, Float32Sample},
+		{Name: "disc.write.slow", EventID: 1, ValueType: Int32Sample},
+		{Name: "heartbeat", EventID: 3, ValueType: EventValueNone},
+		{Name: "temp.over", EventID: 2, ValueType: Float32Sample},
 	}
 	got := c2.ListEvents()
 	if len(got) != len(want) {

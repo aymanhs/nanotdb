@@ -371,14 +371,27 @@ func TestEngine_AddEvent_CrashRecovery(t *testing.T) {
 // TestEngine_AddEvent_ReplayFromWALOnly is the harder recovery test:
 // crash before any catalog write. The events catalog must be rebuilt
 // from newEvent records in the WAL alone.
+//
+// We can't actually SIGKILL inside a Go unit test — a graceful Close()
+// correctly flushes the in-memory page, writes events.json, AND resets
+// the WAL (the bug scripts/events_chaos.py caught earlier). So we
+// snapshot the WAL bytes *before* Close, then after Close restore those
+// bytes while deleting both events.json and the now-flushed
+// events-*.dat. That leaves the on-disk state any real crash between
+// WAL append and catalog write would produce: a populated WAL,
+// no catalog file, no sealed page file.
 func TestEngine_AddEvent_ReplayFromWALOnly(t *testing.T) {
 	root := t.TempDir()
 	writeEventsEnabledManifest(t, root, "sensors")
 
-	// First incarnation: write events, then forcibly truncate the
-	// events.json file to zero bytes (simulating "we crashed before
-	// the catalog write finished") before reopening. The WAL still
-	// has the newEvent records.
+	dbDir := filepath.Join(root, "sensors")
+	walPath := filepath.Join(dbDir, "sensors.events.wal")
+	catPath := filepath.Join(dbDir, "events.json")
+
+	// First incarnation: write the two events, snapshot the WAL bytes
+	// while they're still on disk and before Close has a chance to
+	// reset the WAL.
+	var walSnapshot []byte
 	{
 		e, err := OpenEngine(root, 1024*1024)
 		if err != nil {
@@ -390,16 +403,33 @@ func TestEngine_AddEvent_ReplayFromWALOnly(t *testing.T) {
 		if err := e.AddEvent("sensors", "ev.beta", 2, float32(2), []byte("p")); err != nil {
 			t.Fatal(err)
 		}
-		// Critical: close the engine but truncate the catalog file
-		// before it can be persisted at a known good state. We do
-		// this by closing first (which writes the catalog), then
-		// truncating to simulate the pre-write crash state.
+		// Snapshot the WAL bytes BEFORE graceful close (which would
+		// reset them).
+		walSnapshot, err = os.ReadFile(walPath)
+		if err != nil {
+			t.Fatalf("read events wal: %v", err)
+		}
+		if len(walSnapshot) == 0 {
+			t.Fatal("expected non-empty events WAL after two AddEvent calls")
+		}
 		if err := e.Close(); err != nil {
 			t.Fatal(err)
 		}
-		catPath := filepath.Join(root, "sensors", "events.json")
-		if err := os.Truncate(catPath, 0); err != nil {
-			t.Fatalf("truncate catalog: %v", err)
+	}
+
+	// Simulate the crash state: restore the WAL bytes, delete the
+	// flushed page file(s), and remove the catalog. Now the engine has
+	// nothing but the WAL to recover from.
+	if err := os.WriteFile(walPath, walSnapshot, 0644); err != nil {
+		t.Fatalf("restore wal: %v", err)
+	}
+	if err := os.Remove(catPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove events.json: %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dbDir, "events-*.dat"))
+	for _, m := range matches {
+		if err := os.Remove(m); err != nil {
+			t.Fatalf("remove %s: %v", m, err)
 		}
 	}
 

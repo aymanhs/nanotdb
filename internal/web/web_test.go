@@ -689,3 +689,221 @@ func TestRegister_AcceptsMixedDashboardWithMetricAndEventWidgets(t *testing.T) {
 		t.Fatalf("expected ok response, got %q", rec.Body.String())
 	}
 }
+
+// validateDashboardJSON is a small helper that POSTs a dashboard config
+// to /api/dashboard-config/validate and returns (code, body). Used by
+// the event-backed line-chart and event_overlays tests below to keep
+// each case readable.
+func validateDashboardJSON(t *testing.T, body string) (int, string) {
+	t.Helper()
+	root := t.TempDir()
+	mux := http.NewServeMux()
+	Register(mux, DefaultConfig(), root)
+	req := httptest.NewRequest(http.MethodPost, "/api/dashboard-config/validate", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// TestValidate_EventBackedLineChartSeries_Accepts confirms a line_chart
+// widget with an event-backed series (event_name_pattern present, no
+// metric fields) validates successfully.
+func TestValidate_EventBackedLineChartSeries_Accepts(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Events on a chart",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "title": "Slow disk events",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"label": "ms", "event_name_pattern": "disc.write.slow"}]
+    }
+  }
+}`)
+	if code != http.StatusOK || !strings.Contains(body, `"ok":true`) {
+		t.Fatalf("expected ok, got code=%d body=%q", code, body)
+	}
+}
+
+// TestValidate_EventBackedLineChartSeries_RejectsMixedFields ensures
+// the validator catches a series that has both event_name_pattern and
+// metric-shaped fields.
+func TestValidate_EventBackedLineChartSeries_RejectsMixedFields(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Bad mix",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"event_name_pattern": "ev.x", "metric": "temp.cpu"}]
+    }
+  }
+}`)
+	if code == http.StatusOK {
+		t.Fatalf("expected non-OK for mixed series, got 200 body=%q", body)
+	}
+	if !strings.Contains(body, "cannot mix event_name_pattern with metric fields") {
+		t.Fatalf("expected mix error, got %q", body)
+	}
+}
+
+// TestValidate_EventBackedLineChartSeries_RejectsAggregate ensures
+// numeric-aggregate-over-events is rejected (designed but not built —
+// v1 does not support per-event-value aggregation on event-backed
+// line series).
+func TestValidate_EventBackedLineChartSeries_RejectsAggregate(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Bad agg",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"event_name_pattern": "ev.x", "aggregate": "avg", "window": "1m"}]
+    }
+  }
+}`)
+	if code == http.StatusOK {
+		t.Fatalf("expected non-OK for event series w/ aggregate, got 200 body=%q", body)
+	}
+	if !strings.Contains(body, "event-backed line-chart series does not support aggregate/window") {
+		t.Fatalf("expected aggregate-rejection error, got %q", body)
+	}
+}
+
+// TestValidate_EventOverlays_Accepts confirms a line_chart with one
+// metric series and two event_overlays validates.
+func TestValidate_EventOverlays_Accepts(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Overlays",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"metric": "temp.cpu"}],
+      "event_overlays": [
+        {"event_name_pattern": "temp.over*", "color": "#c00"},
+        {"event_name_pattern": "deploy.completed", "color": "blue"}
+      ]
+    }
+  }
+}`)
+	if code != http.StatusOK || !strings.Contains(body, `"ok":true`) {
+		t.Fatalf("expected ok, got code=%d body=%q", code, body)
+	}
+}
+
+// TestValidate_EventOverlays_RejectsOnNonLineChart confirms overlays
+// are only valid on line_chart widgets.
+func TestValidate_EventOverlays_RejectsOnNonLineChart(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Bad",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "event_log",
+      "lookback": "6h",
+      "series": [{"event_name_pattern": "ev.x"}],
+      "event_overlays": [{"event_name_pattern": "ev.y"}]
+    }
+  }
+}`)
+	if code == http.StatusOK {
+		t.Fatalf("expected non-OK for overlays on event_log, got 200 body=%q", body)
+	}
+	if !strings.Contains(body, "event_overlays only supported on line_chart") {
+		t.Fatalf("expected scope error, got %q", body)
+	}
+}
+
+// TestValidate_EventOverlays_RejectsEmptyPattern ensures each overlay
+// must carry an event_name_pattern.
+func TestValidate_EventOverlays_RejectsEmptyPattern(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Bad",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"metric": "temp.cpu"}],
+      "event_overlays": [{"color": "#c00"}]
+    }
+  }
+}`)
+	if code == http.StatusOK {
+		t.Fatalf("expected non-OK for overlay missing pattern, got 200 body=%q", body)
+	}
+	if !strings.Contains(body, "must define event_name_pattern") {
+		t.Fatalf("expected missing-pattern error, got %q", body)
+	}
+}
+
+// TestValidate_EventOverlays_RejectsBadColor verifies obvious garbage
+// in the color field surfaces a clean error.
+func TestValidate_EventOverlays_RejectsBadColor(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Bad",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"metric": "temp.cpu"}],
+      "event_overlays": [{"event_name_pattern": "ev.x", "color": "javascript:alert(1)"}]
+    }
+  }
+}`)
+	if code == http.StatusOK {
+		t.Fatalf("expected non-OK for bogus color, got 200 body=%q", body)
+	}
+	if !strings.Contains(body, "invalid color") {
+		t.Fatalf("expected color error, got %q", body)
+	}
+}
+
+// TestValidate_EventOverlays_RejectsDuplicateLabels catches an editor
+// authoring mistake — two overlays with the same label or fallback
+// pattern would be indistinguishable in the UI legend.
+func TestValidate_EventOverlays_RejectsDuplicateLabels(t *testing.T) {
+	code, body := validateDashboardJSON(t, `{
+  "title": "Dup",
+  "default_db": "metrics",
+  "groups": [{"id":"g","widgets":["w"]}],
+  "widgets": {
+    "w": {
+      "type": "line_chart",
+      "lookback": "6h",
+      "interval": "1m",
+      "series": [{"metric": "temp.cpu"}],
+      "event_overlays": [
+        {"event_name_pattern": "ev.x"},
+        {"event_name_pattern": "ev.x"}
+      ]
+    }
+  }
+}`)
+	if code == http.StatusOK {
+		t.Fatalf("expected non-OK for duplicate overlay label, got 200 body=%q", body)
+	}
+	if !strings.Contains(body, "duplicate label") {
+		t.Fatalf("expected duplicate-label error, got %q", body)
+	}
+}

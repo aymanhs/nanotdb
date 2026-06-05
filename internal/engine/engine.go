@@ -660,6 +660,22 @@ func (e *Engine) Close() error {
 			// Keep going — the next database still needs flushing/closing.
 		}
 		e.captureWALStats(db, name)
+
+		// Events layer must mirror the same flush-then-reset discipline as
+		// the metric WAL above. Skipping this would leave the in-memory
+		// events page un-flushed and the events WAL un-truncated on graceful
+		// shutdown — visible as a non-zero <db>.events.wal after Close() and
+		// caught by scripts/events_chaos.py's post-checkpoint assertion.
+		if rt.info.EventsEnabled && db.eventsWAL != nil {
+			if err := e.flushOpenEventsPages(db, rt, name); err != nil {
+				closeErrs = append(closeErrs, fmt.Errorf("flush events pages for %q: %w", name, err))
+				// Keep going so we still close the rest of the DBs cleanly.
+				continue
+			}
+			if err := e.maybeResetEventsWAL(db, rt, name); err != nil {
+				closeErrs = append(closeErrs, fmt.Errorf("reset events wal for %q: %w", name, err))
+			}
+		}
 	}
 	e.mu.Unlock()
 
