@@ -216,3 +216,7 @@ exponential backoff until the connection succeeds or the retry limit is hit.
   full MQTT broker.
 - Only subscribed topics are processed; other broker traffic is ignored.
 - Wildcard subscriptions follow MQTT semantics for `+` and `#`.
+- JSON parsing is more CPU-intensive than plain text parsing, especially on
+  low-power hardware such as a Raspberry Pi 3B+. Prefer `text` mode for
+  high-volume metric streams and reserve `json` for lower-volume or richer
+  event payloads.
