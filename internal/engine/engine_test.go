@@ -223,6 +223,22 @@ func TestOpenEngineRejectsInvalidMetricRawIngestAction(t *testing.T) {
 	}
 }
 
+func TestOpenEngineRejectsMissingMQTTBroker(t *testing.T) {
+	root := t.TempDir()
+	cfg := []byte("[mqtt]\nenabled = true\nbroker = \"\"\n[[mqtt.topic]]\ntype = \"metric\"\ntopic = \"sensors/+/temperature\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	_, err := OpenEngine(root, 1024*1024)
+	if err == nil {
+		t.Fatal("expected missing mqtt broker config to fail")
+	}
+	if !strings.Contains(err.Error(), "mqtt.broker") {
+		t.Fatalf("expected mqtt.broker error, got: %v", err)
+	}
+}
+
 func TestOpenEngineReadsLoggingConfig(t *testing.T) {
 	root := t.TempDir()
 	cfg := []byte("[logging]\n\n[[logging.logger]]\noutput = \"console\"\nlevel = \"info\"\n\n[[logging.logger]]\noutput = \"nanotdb.log\"\nlevel = \"trace\"\n")

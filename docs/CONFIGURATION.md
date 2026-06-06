@@ -80,6 +80,30 @@ time_cache_slots = 256
 raw_ingest_action = "keep"
 ```
 
+### `[mqtt]`
+
+MQTT ingest is optional and can be enabled with a broker address and one or
+more `[[mqtt.topic]]` subscriptions.
+
+```toml
+[mqtt]
+enabled = false
+broker = "127.0.0.1:1883"
+client_id = "nanotdb-mqtt-ingest"
+format = "json"
+keepalive = "60s"
+
+[[mqtt.topic]]
+type = "metric"
+topic = "sensors/+/temperature"
+# Optional per-topic overrides:
+# db = "sensors"
+# name = "temperature"
+# format = "text"
+```
+
+For full MQTT ingest reference, see [docs/MQTT.md](MQTT.md).
+
 ### `[web]`
 
 Dashboard, editor, Explore, and engine view settings. Full reference in

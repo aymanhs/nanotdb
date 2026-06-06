@@ -188,6 +188,38 @@ max_segment_size = 16777216
 # events WAL fsync behavior: segment | always
 fsync_policy = "segment"
 
+[mqtt]
+# Enable or disable MQTT ingest for this engine.
+enabled = false
+# MQTT broker address, e.g. "127.0.0.1:1883".
+broker = "127.0.0.1:1883"
+# Optional client credentials.
+username = ""
+password = ""
+# Optional MQTT client identifier used on connect.
+client_id = "nanotdb-mqtt-ingest"
+# Default payload format applied to topics that do not set `format`.
+# Valid values: "json", "text".
+format = "json"
+# Keepalive interval for the MQTT connection.
+keepalive = "60s"
+retry_enabled = true
+retry_interval = "5s"
+retry_max_interval = "1m"
+retry_max_attempts = 0
+
+# Declarative per-topic subscriptions.
+# The topic filter may use MQTT wildcards + and #.
+[[mqtt.topic]]
+type = "metric"
+topic = "sensors/+/temperature"
+# Optional database and metric/event names.
+# If omitted, names are derived from matching wildcard parts.
+# db = "sensors"
+# name = "temperature"
+# Optional per-topic payload format override.
+# format = "text"
+
 # ------------------------------------------------------------------------------
 # Sample per-database rollup config (put in <root>/<db>/manifest.toml)
 # ------------------------------------------------------------------------------

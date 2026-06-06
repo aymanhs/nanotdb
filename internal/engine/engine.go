@@ -187,6 +187,7 @@ type EngineConfig struct {
 	WAL              EngineConfigWAL              `toml:"wal"`
 	Durability       EngineConfigDurability       `toml:"durability"`
 	Metrics          EngineConfigMetrics          `toml:"metrics"`
+	MQTT             EngineConfigMQTT             `toml:"mqtt"`
 	Logging          EngineConfigLogging          `toml:"logging"`
 	Stats            EngineConfigStats            `toml:"stats"`
 	Defaults         EngineConfigDefaults         `toml:"defaults"`
@@ -211,6 +212,29 @@ type EngineConfigMetrics struct {
 	Compression     string `toml:"compression"`
 	RawIngestAction string `toml:"raw_ingest_action"`
 	TimeCacheSlots  int    `toml:"time_cache_slots"`
+}
+
+type EngineConfigMQTT struct {
+	Enabled          bool                    `toml:"enabled"`
+	Broker           string                  `toml:"broker"`
+	Username         string                  `toml:"username"`
+	Password         string                  `toml:"password"`
+	ClientID         string                  `toml:"client_id"`
+	KeepAlive        string                  `toml:"keepalive"`
+	Format           string                  `toml:"format"`
+	RetryEnabled     bool                    `toml:"retry_enabled"`
+	RetryInterval    string                  `toml:"retry_interval"`
+	RetryMaxInterval string                  `toml:"retry_max_interval"`
+	RetryMaxAttempts int                     `toml:"retry_max_attempts"`
+	Topics           []EngineConfigMQTTTopic `toml:"topic"`
+}
+
+type EngineConfigMQTTTopic struct {
+	Type   string `toml:"type"`
+	Topic  string `toml:"topic"`
+	DB     string `toml:"db,omitempty"`
+	Name   string `toml:"name,omitempty"`
+	Format string `toml:"format,omitempty"`
 }
 
 type EngineConfigLogging struct {
@@ -287,6 +311,7 @@ type Engine struct {
 	SyncCatalog           bool
 	StatsEnabled          bool
 	StatsInterval         time.Duration
+	mqttWorker            *mqttWorker
 	dbDefaults            DBInfo
 
 	// LOCK ORDERING (must be obeyed by every code path to avoid deadlock):
@@ -389,6 +414,17 @@ func defaultEngineConfig(walMaxSegSize int64) EngineConfig {
 			Compression:     CompressionCodecZstdFastestName,
 			RawIngestAction: MetricRawIngestActionKeep,
 			TimeCacheSlots:  metricTimeFrameCacheMaxEntriesV2,
+		},
+		MQTT: EngineConfigMQTT{
+			Enabled:          false,
+			Broker:           "127.0.0.1:1883",
+			ClientID:         "nanotdb-mqtt-ingest",
+			KeepAlive:        "60s",
+			Format:           "json",
+			RetryEnabled:     true,
+			RetryInterval:    "5s",
+			RetryMaxInterval: "1m",
+			RetryMaxAttempts: 0,
 		},
 		Logging: EngineConfigLogging{Loggers: []EngineConfigLogger{{
 			Output: "console",
@@ -522,6 +558,66 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	if cfg.Metrics.TimeCacheSlots > maxTimeCacheSlots {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid metrics.time_cache_slots: %d (max %d)", cfg.Metrics.TimeCacheSlots, maxTimeCacheSlots)
 	}
+	if cfg.MQTT.Enabled {
+		if strings.TrimSpace(cfg.MQTT.Broker) == "" {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("mqtt.broker must be set when mqtt.enabled is true")
+		}
+		if strings.TrimSpace(cfg.MQTT.ClientID) == "" {
+			cfg.MQTT.ClientID = def.MQTT.ClientID
+		}
+		if strings.TrimSpace(cfg.MQTT.KeepAlive) == "" {
+			cfg.MQTT.KeepAlive = def.MQTT.KeepAlive
+		}
+		if strings.TrimSpace(cfg.MQTT.Format) == "" {
+			cfg.MQTT.Format = def.MQTT.Format
+		}
+		cfg.MQTT.Format = strings.ToLower(strings.TrimSpace(cfg.MQTT.Format))
+		if cfg.MQTT.Format != "json" && cfg.MQTT.Format != "text" {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.format: %q", cfg.MQTT.Format)
+		}
+		if cfg.MQTT.RetryInterval == "" {
+			cfg.MQTT.RetryInterval = def.MQTT.RetryInterval
+		}
+		if cfg.MQTT.RetryMaxInterval == "" {
+			cfg.MQTT.RetryMaxInterval = def.MQTT.RetryMaxInterval
+		}
+		cfg.MQTT.RetryInterval = strings.TrimSpace(cfg.MQTT.RetryInterval)
+		cfg.MQTT.RetryMaxInterval = strings.TrimSpace(cfg.MQTT.RetryMaxInterval)
+		if cfg.MQTT.RetryInterval == "" {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.retry_interval: empty")
+		}
+		if cfg.MQTT.RetryMaxInterval == "" {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.retry_max_interval: empty")
+		}
+		if _, err := ParseDuration(cfg.MQTT.RetryInterval); err != nil {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.retry_interval: %w", err)
+		}
+		if _, err := ParseDuration(cfg.MQTT.RetryMaxInterval); err != nil {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.retry_max_interval: %w", err)
+		}
+		if cfg.MQTT.RetryMaxAttempts < 0 {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.retry_max_attempts: must be >= 0")
+		}
+		if len(cfg.MQTT.Topics) == 0 {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("mqtt.topic must contain at least one subscription when mqtt.enabled is true")
+		}
+		for i, topic := range cfg.MQTT.Topics {
+			typeValue := strings.ToLower(strings.TrimSpace(topic.Type))
+			if typeValue != "metric" && typeValue != "event" {
+				return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.topic[%d].type: %q", i, topic.Type)
+			}
+			if strings.TrimSpace(topic.Topic) == "" {
+				return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("mqtt.topic[%d].topic must not be empty", i)
+			}
+			format := strings.ToLower(strings.TrimSpace(topic.Format))
+			if format == "" {
+				format = cfg.MQTT.Format
+			}
+			if format != "json" && format != "text" {
+				return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid mqtt.topic[%d].format: %q", i, topic.Format)
+			}
+		}
+	}
 	loggingCfg, err := normalizeLoggingConfig(cfg.Logging, def.Logging)
 	if err != nil {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid logging: %w", err)
@@ -633,6 +729,7 @@ func (e *Engine) Close() error {
 
 	var closeErrs []error
 
+	e.stopMQTT()
 	e.mu.Lock()
 	for name, db := range e.dbs {
 		if name == internalStatsDatabase {

@@ -101,6 +101,11 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 			return nil, fmt.Errorf("create default database %q: %w", dbName, err)
 		}
 	}
+	if cfg.MQTT.Enabled {
+		if err := e.startMQTT(cfg.MQTT); err != nil {
+			return nil, err
+		}
+	}
 	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile, "metric_auto_create", cfg.Metrics.Enabled, "prefer_metric_files", true, "metric_file_compression", cfg.Metrics.Compression, "metric_raw_ingest_action", cfg.Metrics.RawIngestAction, "metric_time_cache_slots", cfg.Metrics.TimeCacheSlots)
 	return e, nil
 }
