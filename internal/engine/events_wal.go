@@ -48,6 +48,16 @@ type EventsWAL struct {
 	bufferSize  int64
 	statsMu     sync.RWMutex
 	stats       WALStats
+	hook        walLifecycleHook
+}
+
+// SetLifecycleHook installs an engine-side observer for events WAL
+// events. Mirrors WAL.SetLifecycleHook.
+func (w *EventsWAL) SetLifecycleHook(h walLifecycleHook) {
+	if w == nil {
+		return
+	}
+	w.hook = h
 }
 
 // Events WAL flag-byte definitions. Independent of the metric WAL's
@@ -296,6 +306,9 @@ func (w *EventsWAL) Fsync() error {
 	}
 	start := time.Now()
 	if err := w.currentFile.Sync(); err != nil {
+		if w.hook.onFsyncError != nil {
+			w.hook.onFsyncError(w.hook.dbName, w.hook.file, err)
+		}
 		return err
 	}
 	dur := time.Since(start)
@@ -311,6 +324,9 @@ func (w *EventsWAL) Fsync() error {
 		}
 		stats.LastFsyncAt = now
 	})
+	if w.hook.onFsyncSlow != nil && dur >= walSlowFsyncThreshold {
+		w.hook.onFsyncSlow(w.hook.dbName, w.hook.file, float64(dur.Microseconds())/1000.0)
+	}
 	return nil
 }
 
@@ -353,6 +369,9 @@ func (w *EventsWAL) Reset() error {
 			stats.MaxResetDuration = resetDur
 		}
 	})
+	if w.hook.onReset != nil {
+		w.hook.onReset(w.hook.dbName, w.hook.file, flushed)
+	}
 	return nil
 }
 

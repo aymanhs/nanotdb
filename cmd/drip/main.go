@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,8 +50,22 @@ func main() {
 	interval := time.Duration(cfg.Drip.CollectionIntervalMS) * time.Millisecond
 	timeout := time.Duration(cfg.Drip.TimeoutMS) * time.Millisecond
 
+	// Internal events emitter must be initialized before runCycle is
+	// invoked so the once-mode path also gets drip.started / drip.target
+	// / threshold events into the target.
+	internalEvents = newDripInternalEventEmitter(cfg.InternalEvents, eventsURL, httpClient, timeout)
+	internalEvents.start()
+	defer internalEvents.stop()
+	internalEvents.emitStarted(len(cs), cfg.Drip.ServerURL)
+	lastTargetOK.Store(true)
+	adminSrv, adminErr := startDripAdminServer(cfg.Admin.Listen, internalEvents)
+	if adminErr != nil {
+		log.Printf("drip: admin listener init failed: %v", adminErr)
+	}
+
 	if *once {
 		runCycle(cfg.Drip.Database, cs, timeout, httpClient, importURL, eventsURL, *debug)
+		internalEvents.emitStoppedClean(0)
 		return
 	}
 
@@ -64,6 +80,11 @@ func main() {
 		select {
 		case <-sigCh:
 			log.Println("drip: shutting down")
+			shutdownStart := time.Now()
+			internalEvents.emitStoppedClean(int32(time.Since(shutdownStart).Milliseconds()))
+			if adminSrv != nil {
+				_ = adminSrv.Close()
+			}
 			return
 		case <-ticker.C:
 			runCycle(cfg.Drip.Database, cs, timeout, httpClient, importURL, eventsURL, *debug)
@@ -194,15 +215,18 @@ func runCycle(database string, cs []Collector, timeout time.Duration, client *ht
 	if lp != "" {
 		if err := sendLP(client, importURL, lp); err != nil {
 			log.Printf("drip: metric send failed (%d metrics): %v", len(regularMetrics), err)
+			noteTargetTransition(importURL, false, err)
 			return
 		}
 	}
 	if len(eventBatch) > 0 {
 		if err := sendEvents(client, eventsURL, eventBatch); err != nil {
 			log.Printf("drip: event send failed (%d events): %v", len(eventBatch), err)
+			noteTargetTransition(eventsURL, false, err)
 			return
 		}
 	}
+	noteTargetTransition(importURL, true, nil)
 	sendElapsed := time.Since(sendStart)
 
 	if debug {
@@ -217,6 +241,62 @@ type eventRecord struct {
 	TS      int64  `json:"ts"`
 	Value   any    `json:"value,omitempty"`
 	Payload any    `json:"payload,omitempty"`
+}
+
+// MarshalJSON exists so float event values always serialise with an
+// explicit decimal point. Go's default encoding/json marshals
+// float32(15.0) as "15", which the nanotdb events endpoint then
+// reparses as int32 — producing ErrEventTypeMismatch (HTTP 400) on
+// any catalog entry previously registered as Float32Sample. By
+// forcing a trailing ".0" on whole-number floats we keep drip's
+// floats round-tripping as floats end-to-end. See
+// docs/EVENTS.md for the typing rules the server enforces.
+func (r eventRecord) MarshalJSON() ([]byte, error) {
+	type rawRec struct {
+		DB      string          `json:"db"`
+		Name    string          `json:"name"`
+		TS      int64           `json:"ts,omitempty"`
+		Value   json.RawMessage `json:"value,omitempty"`
+		Payload any             `json:"payload,omitempty"`
+	}
+	var valueRaw json.RawMessage
+	if r.Value != nil {
+		b, err := marshalEventValue(r.Value)
+		if err != nil {
+			return nil, err
+		}
+		valueRaw = b
+	}
+	return json.Marshal(rawRec{
+		DB:      r.DB,
+		Name:    r.Name,
+		TS:      r.TS,
+		Value:   valueRaw,
+		Payload: r.Payload,
+	})
+}
+
+// marshalEventValue mirrors encoding/json for everything except
+// float32/float64, where we guarantee the literal contains a decimal
+// (or exponent) so the server's JSON-number → engine-type heuristic
+// picks Float32Sample. int32 values keep their compact integer form.
+func marshalEventValue(v any) (json.RawMessage, error) {
+	switch x := v.(type) {
+	case float32:
+		s := strconv.FormatFloat(float64(x), 'f', -1, 32)
+		if !strings.ContainsAny(s, ".eE") {
+			s += ".0"
+		}
+		return json.RawMessage(s), nil
+	case float64:
+		s := strconv.FormatFloat(x, 'f', -1, 64)
+		if !strings.ContainsAny(s, ".eE") {
+			s += ".0"
+		}
+		return json.RawMessage(s), nil
+	default:
+		return json.Marshal(v)
+	}
 }
 
 // formatLP serialises metrics as nanotdb line protocol lines:
@@ -261,7 +341,16 @@ func sendEvents(client *http.Client, url string, records []eventRecord) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("events server returned %s", resp.Status)
+		// Include the response body so the operator sees the real
+		// reason (e.g. "event 0: event type mismatch ...") instead of
+		// a bare HTTP status. Cap at 512 bytes so a verbose error
+		// page can't blow up our log line.
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		snippet := strings.TrimSpace(string(respBody))
+		if snippet == "" {
+			return fmt.Errorf("events server returned %s", resp.Status)
+		}
+		return fmt.Errorf("events server returned %s: %s", resp.Status, snippet)
 	}
 	return nil
 }

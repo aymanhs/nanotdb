@@ -264,3 +264,108 @@ h2 {
     gap: 4px;
   }
 }
+
+/* Explorer event-overlays accordion. */
+.overlays-panel {
+  padding: 14px;
+}
+
+.overlays-panel summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.overlays-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.overlays-panel summary::before {
+  content: "▸";
+  font-size: 0.8rem;
+  transition: transform 0.15s ease;
+  color: var(--muted);
+}
+
+.overlays-panel[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.overlays-summary-count {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
+.overlays-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 10px 0;
+  flex-wrap: wrap;
+}
+
+.overlays-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.overlays-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.overlays-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.overlay-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-2);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.overlay-card .overlay-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(220px, 2.4fr) minmax(120px, 1fr) minmax(120px, 1fr) 90px 40px;
+  gap: 10px;
+  align-items: end;
+}
+
+.overlay-card label {
+  font-size: 0.84rem;
+  color: var(--muted);
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.overlay-card .field-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.overlay-card [data-overlay-action="remove"] {
+  align-self: end;
+  height: 38px;
+  min-width: 0;
+  padding: 0;
+}
+
+@media (max-width: 760px) {
+  .overlay-card .overlay-grid {
+    grid-template-columns: 1fr;
+  }
+  .overlay-card [data-overlay-action="remove"] {
+    height: 36px;
+  }
+}

@@ -8,6 +8,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Internal events surface: the engine and `drip` now emit lifecycle, db, partition (sealed/deleted/archived/optimized/flush.slow), retention sweep, WAL (replayed/tail_truncated/reset/fsync.slow/fsync.error), catalog (metric.added/event.added/full/write.failed), ingest (rejected.stale batched, payload_too_large, spike.force_flush), rollup (window.emitted, catchup.started/completed), HTTP listener, MQTT connected/disconnected, dirty-shutdown detection, and drip target-state events into the existing `internal` database via the events layer. See [docs/INTERNAL_EVENTS.md](docs/INTERNAL_EVENTS.md). New `engine.toml` `[internal_events]` section, `[internal_events.groups]` per-group toggles, runtime `POST /api/v1/internal-events/groups` toggle, `GET /api/v1/internal-events/catalog`, and `nanocli internal-events {catalog|groups|set|tail}` subcommands. The `[admin]` section in `drip.toml` opts into a tiny admin HTTP listener for the same runtime toggle on the drip side.
 - New `--timestamp-unit ns|us|ms|s` flag on `nanocli query` and `nanocli import parts`, plus the equivalent `timestamp_unit` query parameter on the web API range endpoints; default is `ns`. Bare numeric timestamps are no longer auto-bucketed by magnitude.
 - Duration parsing now accepts `d` (days) and `w` (weeks) across config, API, and CLI time/window inputs.
 - Database names are now validated consistently across ingest, API, rollups, and offline import/export.
@@ -17,6 +18,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - Size-based file log rotation with configurable file-size limits and backup retention.
 
 ### Changed
+- The default `drip` SD-write-probe threshold event name moved from `disk.sd_write_probe.slow` to `drip.threshold.disk.sd_write_probe.slow` so it lives under the new `drip.threshold` internal-events group. Installs that override `collectors.sd_write_probe.event_name` are unaffected.
 - Manifests now require an explicit `retention.retention_action` (`keep|delete|archive`) during upgrade.
 - `nanocli query --end` defaults to an unbounded upper range again, restoring the earlier behaviour for future-dated samples and backfills.
 - Engine API responses now return relative storage paths instead of absolute filesystem paths.

@@ -106,7 +106,22 @@ func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval ti
 			return nil, err
 		}
 	}
-	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile, "metric_auto_create", cfg.Metrics.Enabled, "prefer_metric_files", true, "metric_file_compression", cfg.Metrics.Compression, "metric_raw_ingest_action", cfg.Metrics.RawIngestAction, "metric_time_cache_slots", cfg.Metrics.TimeCacheSlots)
+	e.internalEvents = newInternalEventsEmitter(cfg.InternalEvents)
+	if cfg.InternalEvents.Enabled {
+		if err := e.ensureInternalEventsDB(); err != nil {
+			return nil, fmt.Errorf("ensure internal-events db: %w", err)
+		}
+		e.startInternalEventsDrain()
+	}
+	e.logInfo("engine opened", "data_dir", rootDataDir, "stats_enabled", cfg.Stats.Enabled, "durability", cfg.Durability.Profile, "metric_auto_create", cfg.Metrics.Enabled, "prefer_metric_files", true, "metric_file_compression", cfg.Metrics.Compression, "metric_raw_ingest_action", cfg.Metrics.RawIngestAction, "metric_time_cache_slots", cfg.Metrics.TimeCacheSlots, "internal_events_enabled", cfg.InternalEvents.Enabled)
+
+	// Emit the lifecycle event after the engine is fully ready. The
+	// drain goroutine will pick it up and write it via AddEvent on its
+	// own schedule — it does not block this call.
+	e.emitInternalEvent("nanotdb.lifecycle", "nanotdb.engine.started", int32(0), map[string]any{
+		"root_dir": rootDataDir,
+		"db_count": len(e.dbs),
+	}, "")
 	return e, nil
 }
 

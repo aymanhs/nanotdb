@@ -15,7 +15,7 @@
     {
       "id": "events",
       "label": "Events",
-      "widgets": ["slow_writes"]
+      "widgets": ["slow_writes", "internal_events_feed"]
     }
   ],
   "widgets": {
@@ -156,9 +156,32 @@
       "lookback": "6h",
       "series": [
         {
+          "event_name_pattern": "drip.threshold.disk.sd_write_probe.slow",
+          "event_limit": 10,
+          "db": "internal"
+        },
+        {
           "event_name_pattern": "disk.sd_write_probe.slow",
           "event_limit": 10,
           "db": "metrics"
+        }
+      ]
+    },
+    "internal_events_feed": {
+      "type": "event_log",
+      "title": "Engine Events",
+      "refresh_sec": 10,
+      "lookback": "1h",
+      "series": [
+        {
+          "event_name_pattern": "nanotdb.*",
+          "event_limit": 30,
+          "db": "internal"
+        },
+        {
+          "event_name_pattern": "drip.*",
+          "event_limit": 20,
+          "db": "internal"
         }
       ]
     }

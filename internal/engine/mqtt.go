@@ -4,15 +4,36 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// mqttDialTimeout caps how long a single TCP connection attempt to the broker
+// may take before we treat it as a transient failure and fall through to the
+// retry loop. Independent of mqtt.keepalive, which governs an established
+// session.
+const mqttDialTimeout = 10 * time.Second
+
+// mqttPermanentError marks a broker error that will not succeed on retry —
+// authentication failures, protocol mismatches, ACL-rejected subscriptions,
+// etc. The worker exits its retry loop when it sees one of these so we don't
+// hammer the broker (or the journal) every retry interval forever.
+type mqttPermanentError struct {
+	err error
+}
+
+func (e *mqttPermanentError) Error() string { return e.err.Error() }
+func (e *mqttPermanentError) Unwrap() error { return e.err }
+
+func permanentMQTTError(err error) error { return &mqttPermanentError{err: err} }
 
 const (
 	pCONNECT    = 1 << 4
@@ -48,6 +69,18 @@ func (e *Engine) startMQTT(cfg EngineConfigMQTT) error {
 		return err
 	}
 	e.mqttWorker = worker
+	topicFilters := make([]string, 0, len(worker.topics))
+	for _, t := range worker.topics {
+		topicFilters = append(topicFilters, t.Topic)
+	}
+	e.logInfo("mqtt worker starting",
+		"broker", worker.broker,
+		"client_id", worker.clientID,
+		"topics", topicFilters,
+		"retry_enabled", worker.retryEnabled,
+		"retry_interval", worker.retryInterval,
+		"retry_max_interval", worker.retryMaxInterval,
+	)
 	go worker.run()
 	return nil
 }
@@ -132,11 +165,30 @@ func newMQTTWorker(e *Engine, cfg EngineConfigMQTT) (*mqttWorker, error) {
 }
 
 func (w *mqttWorker) run() {
+	// Recover from any panic in the MQTT worker so a bug here cannot take
+	// the whole engine process down. Failure is reported via the standard
+	// internal event channel; the worker simply exits and the engine keeps
+	// running without MQTT ingest.
+	defer func() {
+		if r := recover(); r != nil {
+			w.engine.logInfo("mqtt worker panic", "broker", w.broker, "err", fmt.Sprint(r), "stack", string(debug.Stack()))
+			w.closeConn()
+			w.engine.emitInternalEvent("nanotdb.mqtt", "nanotdb.mqtt.disconnected", nil, map[string]any{
+				"broker": w.broker,
+				"reason": fmt.Sprintf("panic: %v", r),
+			}, "")
+		}
+	}()
+
 	backoff := w.retryInterval
 	attempts := 0
 
 	for {
 		if err := w.connect(); err != nil {
+			w.closeConn()
+			if w.handlePermanent("connect", err) {
+				return
+			}
 			w.engine.logInfo("mqtt broker connect failed", "broker", w.broker, "err", err)
 			if !w.retryEnabled || !w.waitRetry(backoff) {
 				return
@@ -151,8 +203,11 @@ func (w *mqttWorker) run() {
 		}
 
 		if err := w.subscribe(); err != nil {
-			w.engine.logInfo("mqtt subscribe failed", "err", err)
 			w.closeConn()
+			if w.handlePermanent("subscribe", err) {
+				return
+			}
+			w.engine.logInfo("mqtt subscribe failed", "err", err)
 			if !w.retryEnabled || !w.waitRetry(backoff) {
 				return
 			}
@@ -165,6 +220,10 @@ func (w *mqttWorker) run() {
 			continue
 		}
 
+		w.engine.logInfo("mqtt connected", "broker", w.broker, "client_id", w.clientID)
+		w.engine.emitInternalEvent("nanotdb.mqtt", "nanotdb.mqtt.connected", nil, map[string]any{
+			"broker": w.broker,
+		}, "")
 		attempts = 0
 		backoff = w.retryInterval
 
@@ -210,6 +269,10 @@ func (w *mqttWorker) run() {
 
 		close(sessionDone)
 		w.closeConn()
+		w.engine.emitInternalEvent("nanotdb.mqtt", "nanotdb.mqtt.disconnected", nil, map[string]any{
+			"broker": w.broker,
+			"reason": "session_ended",
+		}, "")
 		if !w.retryEnabled || !w.waitRetry(backoff) {
 			return
 		}
@@ -258,6 +321,12 @@ func minDuration(a, b time.Duration) time.Duration {
 }
 
 func (w *mqttWorker) connect() error {
+	conn, err := net.DialTimeout("tcp", w.broker, mqttDialTimeout)
+	if err != nil {
+		return err
+	}
+	w.conn = conn
+
 	var payload bytes.Buffer
 	writeUTF8String(&payload, "MQTT")
 	payload.WriteByte(0x04)
@@ -286,15 +355,46 @@ func (w *mqttWorker) connect() error {
 		return err
 	}
 	if packetType != pCONNACK {
-		return fmt.Errorf("unexpected packet type 0x%02x", packetType)
+		return permanentMQTTError(fmt.Errorf("unexpected packet type 0x%02x", packetType))
 	}
 	if len(data) < 2 {
-		return fmt.Errorf("invalid CONNACK payload")
+		return permanentMQTTError(fmt.Errorf("invalid CONNACK payload"))
 	}
-	if data[1] != 0x00 {
-		return fmt.Errorf("mqtt connect refused code 0x%02x", data[1])
+	// CONNACK return codes (MQTT 3.1.1, §3.2.2.3). Only 0x03 "Server
+	// unavailable" is treated as transient — the rest indicate a
+	// configuration or protocol problem that retrying cannot resolve.
+	switch data[1] {
+	case 0x00:
+		return nil
+	case 0x03:
+		return fmt.Errorf("mqtt connect refused: server unavailable (0x03)")
+	case 0x01:
+		return permanentMQTTError(fmt.Errorf("mqtt connect refused: unacceptable protocol version (0x01)"))
+	case 0x02:
+		return permanentMQTTError(fmt.Errorf("mqtt connect refused: identifier rejected (0x02)"))
+	case 0x04:
+		return permanentMQTTError(fmt.Errorf("mqtt connect refused: bad username or password (0x04)"))
+	case 0x05:
+		return permanentMQTTError(fmt.Errorf("mqtt connect refused: not authorized (0x05)"))
+	default:
+		return permanentMQTTError(fmt.Errorf("mqtt connect refused code 0x%02x", data[1]))
 	}
-	return nil
+}
+
+// handlePermanent reports a permanent (non-retriable) MQTT error and emits a
+// disconnected internal event with a structured reason. Returns true when the
+// caller should exit the worker loop without further retries.
+func (w *mqttWorker) handlePermanent(stage string, err error) bool {
+	var perm *mqttPermanentError
+	if !errors.As(err, &perm) {
+		return false
+	}
+	w.engine.logInfo("mqtt fatal error; not retrying", "stage", stage, "broker", w.broker, "err", err)
+	w.engine.emitInternalEvent("nanotdb.mqtt", "nanotdb.mqtt.disconnected", nil, map[string]any{
+		"broker": w.broker,
+		"reason": "permanent: " + err.Error(),
+	}, "")
+	return true
 }
 
 func (w *mqttWorker) subscribe() error {
@@ -320,9 +420,14 @@ func (w *mqttWorker) subscribe() error {
 	}
 	for i, returnCode := range data[2:] {
 		if returnCode == 0x80 {
-			return fmt.Errorf("mqtt subscription rejected for topic %q", w.topics[i].Topic)
+			return permanentMQTTError(fmt.Errorf("mqtt subscription rejected for topic %q", w.topics[i].Topic))
 		}
 	}
+	topicFilters := make([]string, 0, len(w.topics))
+	for _, t := range w.topics {
+		topicFilters = append(topicFilters, t.Topic)
+	}
+	w.engine.logInfo("mqtt subscribed", "broker", w.broker, "topics", topicFilters)
 	return nil
 }
 

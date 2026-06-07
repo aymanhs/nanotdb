@@ -94,3 +94,291 @@ body {
   height: 2px;
   background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 70%, transparent), transparent);
 }
+
+/* ------------------------------------------------------------------- */
+/* Event-overlay tooltip — shared by dashboard widgets and the         */
+/* explorer chart. Created lazily by ensureOverlayTooltip in           */
+/* dashboard_utils.js as one element per chart.                        */
+/* ------------------------------------------------------------------- */
+.overlay-tooltip {
+  background: color-mix(in srgb, var(--surface, #1f2937) 92%, transparent);
+  color: var(--text, #f1f5f9);
+  border: 1px solid color-mix(in srgb, var(--accent, #2563eb) 50%, transparent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  max-width: 240px;
+  line-height: 1.35;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.overlay-tooltip-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.overlay-tooltip-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.overlay-tooltip-name {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.overlay-tooltip-row {
+  color: color-mix(in srgb, var(--text, #f1f5f9) 80%, transparent);
+}
+
+.overlay-tooltip-payload {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+/* ------------------------------------------------------------------- */
+/* Event overlay picker — used by the dashboard editor's Event         */
+/* Overlays section and by the Explorer page's overlays panel. The     */
+/* picker is a custom dropdown (not a native <select>) so we can       */
+/* filter as you type and render group headers above events when the   */
+/* db is "internal". Defined here (rather than in editor.css) because  */
+/* the Explorer does not load editor.css.                              */
+/* ------------------------------------------------------------------- */
+
+.codeish {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+/* Base layout for the overlay row — each page that mounts the picker  */
+/* sets its own grid-template-columns (editor.css uses 5 columns; the  */
+/* Explorer's styles.css uses 6 to inline the remove button).          */
+.overlay-grid {
+  display: grid;
+  gap: 12px;
+  align-items: end;
+}
+
+.overlay-event-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.overlay-mode-toggle {
+  display: inline-flex;
+  gap: 0;
+  background: var(--card-2, rgba(255, 255, 255, 0.04));
+  border-radius: 6px;
+  padding: 2px;
+  align-self: flex-start;
+}
+
+.overlay-mode-tab {
+  border: none;
+  background: transparent;
+  color: var(--muted, #64748b);
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.overlay-mode-tab.active {
+  background: var(--card, #fff);
+  color: var(--text, #0f172a);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.overlay-event-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+}
+
+.overlay-picker {
+  position: relative;
+}
+
+.overlay-picker-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 4px;
+  background: var(--card-2, var(--card, #fff));
+  color: var(--text, #0f172a);
+  font-family: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+  gap: 8px;
+}
+
+.overlay-picker-button:hover {
+  border-color: var(--accent, #2563eb);
+}
+
+.picker-placeholder {
+  color: var(--muted, #64748b);
+  font-style: italic;
+}
+
+.overlay-picker-caret {
+  color: var(--muted, #64748b);
+  font-size: 0.7rem;
+  flex: 0 0 auto;
+}
+
+.overlay-picker-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: hidden;
+}
+
+.overlay-picker-search {
+  border: none;
+  border-bottom: 1px solid var(--border, #cbd5e1);
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  outline: none;
+  background: transparent;
+  color: inherit;
+}
+
+.overlay-picker-list {
+  overflow-y: auto;
+  max-height: 280px;
+}
+
+.overlay-picker-group {
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #64748b);
+  background: var(--card-2, rgba(0, 0, 0, 0.03));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.overlay-picker-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text, #0f172a);
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  gap: 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border, #cbd5e1) 50%, transparent);
+}
+
+.overlay-picker-item:hover {
+  background: color-mix(in srgb, var(--accent, #2563eb) 18%, transparent);
+}
+
+.overlay-picker-item.overlay-picker-selected {
+  background: color-mix(in srgb, var(--accent, #2563eb) 28%, transparent);
+}
+
+.overlay-picker-name {
+  font-size: 0.8rem;
+}
+
+.overlay-picker-desc {
+  font-size: 0.72rem;
+  color: var(--muted, #64748b);
+}
+
+.overlay-picker-empty {
+  padding: 12px;
+  font-size: 0.78rem;
+  color: var(--muted, #64748b);
+  text-align: center;
+}
+
+.overlay-preview {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--card-2, rgba(0, 0, 0, 0.03));
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+.overlay-preview-head {
+  font-weight: 600;
+  color: var(--muted, #64748b);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.overlay-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.overlay-preview-empty {
+  color: var(--muted, #64748b);
+  font-style: italic;
+}
+
+.overlay-preview-row {
+  display: grid;
+  grid-template-columns: 80px 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.overlay-preview-time {
+  color: var(--muted, #64748b);
+  font-size: 0.72rem;
+}
+
+.overlay-preview-name {
+  font-size: 0.76rem;
+}
+
+.overlay-preview-value {
+  font-size: 0.72rem;
+  color: var(--muted, #64748b);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (max-width: 760px) {
+  .overlay-grid {
+    grid-template-columns: 1fr;
+  }
+}

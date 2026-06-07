@@ -33,6 +33,7 @@
           <button type="button" class="tab engine-tab" id="engine-tab-files" role="tab" aria-selected="false" aria-controls="filesPane" data-tab="files">Files</button>
           <button type="button" class="tab engine-tab" id="engine-tab-wal" role="tab" aria-selected="false" aria-controls="walPane" data-tab="wal">WAL</button>
           <button type="button" class="tab engine-tab" id="engine-tab-runtime" role="tab" aria-selected="false" aria-controls="runtimePane" data-tab="runtime">Runtime</button>
+          <button type="button" class="tab engine-tab" id="engine-tab-internal-events" role="tab" aria-selected="false" aria-controls="internalEventsPane" data-tab="internal-events">Internal Events</button>
         </div>
         <button type="button" id="refreshBtn" class="engine-refresh-btn" title="Refresh current view" aria-label="Refresh current view">↻ <span>Refresh</span></button>
         <span id="status" class="engine-status" aria-live="polite"></span>
@@ -44,6 +45,7 @@
     <section id="filesPane" class="panel pane" role="tabpanel" aria-labelledby="engine-tab-files" hidden></section>
     <section id="walPane" class="panel pane" role="tabpanel" aria-labelledby="engine-tab-wal" hidden></section>
     <section id="runtimePane" class="panel pane" role="tabpanel" aria-labelledby="engine-tab-runtime" hidden></section>
+    <section id="internalEventsPane" class="panel pane" role="tabpanel" aria-labelledby="engine-tab-internal-events" hidden></section>
   </main>
 
   <script>window.NANOTDB_DASH_CONFIG = {{ .ConfigJSON }};</script>

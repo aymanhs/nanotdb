@@ -4,6 +4,32 @@
 # URL of the running nanotdb server.
 server_url = "http://localhost:8448"
 
+# -----------------------------------------------------------------------------
+# Internal events — drip emits lifecycle and target-state events into the
+# nanotdb events layer. See docs/INTERNAL_EVENTS.md for the full spec.
+# -----------------------------------------------------------------------------
+
+[internal_events]
+# Master switch — turn the whole emitter off without touching individual
+# groups.
+enabled = true
+# Destination database on the target nanotdb. Defaults to "internal"
+# alongside engine stats and engine-side internal events.
+target_db = "internal"
+# Bounded send queue; on overflow drip drops the record and counts it.
+queue_depth = 1024
+
+# Per-group enable overrides. Any group not listed uses its default
+# (see docs/INTERNAL_EVENTS.md). Unknown groups are a hard error at
+# config load.
+[internal_events.groups]
+# "drip.host" = "on"   # uncomment to enable host telemetry events
+
+# Admin HTTP listener (optional). When set, exposes /healthz, /version,
+# and the runtime group toggle at /api/v1/internal-events/groups.
+[admin]
+listen = ""    # "127.0.0.1:9099" enables the listener
+
 # Target database for all collected metrics.
 database = "metrics"
 
@@ -60,7 +86,10 @@ enabled = true
 # Optionally emits an event instead of a metric when latency exceeds
 # event_when_over_ms.
 enabled = true
-# Directory on the target storage (set to an SD-card-backed path on RPi).
+# Directory on the target storage. Must be on the disk you want to
+# probe — NOT a tmpfs mount, where fsync is a no-op and the probe
+# would measure RAM latency instead of SD I/O. drip logs a WARN at
+# startup if the chosen directory is on tmpfs.
 directory = "/tmp"
 # Probe payload size in bytes.
 bytes = 32000
@@ -70,9 +99,13 @@ every_n_cycles = 6
 metric = "disk.sd_write_probe_ms"
 # If > 0 and the measured latency is strictly above this threshold,
 # drip emits only an event (no metric sample) for that cycle.
-event_when_over_ms = 500
-# Event name to emit when over threshold.
-event_name = "disk.sd_write_probe.slow"
+# 100 ms is a useful default: a healthy SD card probe runs in single-
+# digit ms, so 100 ms reliably catches stalls without spamming.
+event_when_over_ms = 100
+# Event name to emit when over threshold. The default ships under the
+# drip.threshold internal-events group naming scheme; legacy installs
+# can keep the old "disk.sd_write_probe.slow" name if they prefer.
+event_name = "drip.threshold.disk.sd_write_probe.slow"
 
 [collectors.network]
 # Reads /proc/net/dev per-interface byte/packet counters.

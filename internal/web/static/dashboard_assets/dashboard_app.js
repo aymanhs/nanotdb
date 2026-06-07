@@ -292,90 +292,14 @@
     return true;
   }
 
-  // mergeUPlotHooks composes hook objects without losing arrays from
-  // either side. aggregate_band already uses opts.hooks; the overlay
-  // path must concatenate rather than overwrite.
-  function mergeUPlotHooks(a, b) {
-    const out = {};
-    const keys = new Set(Object.keys(a || {}).concat(Object.keys(b || {})));
-    keys.forEach((k) => {
-      const aHooks = (a && a[k]) || [];
-      const bHooks = (b && b[k]) || [];
-      out[k] = aHooks.concat(bHooks);
-    });
-    return out;
-  }
-
-  // eventOverlayHooks returns uPlot hook callbacks that draw a vertical
-  // marker at each event timestamp after the main chart has rendered.
-  // Cursor enters/leaves drive a small overlay-summary tooltip element
-  // attached to the plot's parent.
-  function eventOverlayHooks(overlays) {
-    return {
-      draw: [
-        (u) => {
-          const ctx = u.ctx;
-          const plotTop = u.bbox.top;
-          const plotBottom = u.bbox.top + u.bbox.height;
-          ctx.save();
-          for (const layer of overlays) {
-            const stroke = isValidCssColorBasic(layer.color) ? layer.color : overlayDefaultColor(layer.label);
-            ctx.strokeStyle = stroke;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 3]);
-            for (const m of (layer.markers || [])) {
-              const xPx = u.valToPos(m.x, "x", true);
-              if (!Number.isFinite(xPx) || xPx < u.bbox.left || xPx > u.bbox.left + u.bbox.width) {
-                continue;
-              }
-              ctx.beginPath();
-              ctx.moveTo(Math.round(xPx) + 0.5, plotTop);
-              ctx.lineTo(Math.round(xPx) + 0.5, plotBottom);
-              ctx.stroke();
-            }
-          }
-          ctx.restore();
-        },
-      ],
-    };
-  }
-
-  // isValidCssColorBasic mirrors the backend's color allow-shape (hex
-  // form or a short ASCII identifier). We re-check on the client side
-  // because the renderer is given untrusted dashboard JSON in dev — we
-  // don't want a typo to land an invalid stroke style and freeze the
-  // chart.
-  function isValidCssColorBasic(value) {
-    if (!value || typeof value !== "string") {
-      return false;
-    }
-    const v = value.trim();
-    if (v.length === 0) {
-      return false;
-    }
-    if (v[0] === "#") {
-      const hex = v.slice(1);
-      if (hex.length !== 3 && hex.length !== 4 && hex.length !== 6 && hex.length !== 8) {
-        return false;
-      }
-      return /^[0-9a-fA-F]+$/.test(hex);
-    }
-    return v.length <= 32 && /^[A-Za-z]+$/.test(v);
-  }
-
-  // overlayDefaultColor maps a layer's stable identifier (label or
-  // pattern) to one of a small fixed palette, so dashboards stay visually
-  // consistent across reloads without the operator having to assign a
-  // color in JSON.
-  function overlayDefaultColor(key) {
-    const palette = ["#fb923c", "#a78bfa", "#22d3ee", "#f87171", "#f472b6", "#facc15"];
-    let h = 0;
-    const s = String(key || "");
-    for (let i = 0; i < s.length; i++) {
-      h = (h * 31 + s.charCodeAt(i)) >>> 0;
-    }
-    return palette[h % palette.length];
-  }
+  // Overlay rendering + helpers moved to common_assets/dashboard_utils.js
+  // so the explorer page can share them. Pull the shared symbols into
+  // the dashboard's local scope so the rest of this file keeps using
+  // them by their old names without changes.
+  const mergeUPlotHooks = NANOTDB_UTILS.mergeUPlotHooks;
+  const eventOverlayHooks = NANOTDB_UTILS.eventOverlayHooks;
+  const isValidCssColorBasic = NANOTDB_UTILS.isValidCssColorBasic;
+  const overlayDefaultColor = NANOTDB_UTILS.overlayDefaultColor;
 
   async function fetchLast(db, series, lookbackSec) {
     const instantPath = buildInstantQueryPath(db, series);
@@ -458,45 +382,17 @@
     return out;
   }
 
-  // fetchEventOverlayMarkers returns a flat list of {x, name, ts, value,
-  // payload, color} for one overlay. Each entry maps to a vertical line
-  // drawn over the chart at x (Unix seconds, matching uPlot time scale).
-  // The renderer iterates these in the draw hook; they are not part of
-  // the chart's series data, so they don't influence the y-axis scale.
+  // fetchEventOverlayMarkers delegates to the shared utils
+  // implementation. Kept as a thin wrapper so the dashboard
+  // continues to call it with (db, overlay, lookbackSec) without
+  // passing apiBase at every call site.
   async function fetchEventOverlayMarkers(db, overlay, lookbackSec) {
-    const pattern = overlay && (overlay.event_name_pattern || "").trim();
-    if (!db || !pattern) {
-      return [];
-    }
-    const end = new Date();
-    const start = new Date(end.getTime() - lookbackSec * 1000);
-    const limit = overlay && overlay.event_limit ? Math.max(1, Math.min(1000, Number(overlay.event_limit) || 200)) : 200;
-    const eventsURL = apiURL(
-      "/api/v1/events?db=" + encodeURIComponent(db) +
-      "&name=" + encodeURIComponent(pattern) +
-      "&start=" + encodeURIComponent(start.toISOString()) +
-      "&end=" + encodeURIComponent(end.toISOString()) +
-      "&limit=" + limit
+    return NANOTDB_UTILS.fetchEventOverlayMarkers(
+      (typeof cfg !== "undefined" && cfg && cfg.apiBaseURL) || "",
+      db,
+      overlay,
+      lookbackSec
     );
-    const payload = await fetchJSON(eventsURL);
-    const events = (payload.data && payload.data.result) ? payload.data.result : [];
-    const out = [];
-    for (const evt of events) {
-      const ts = Number(evt && evt.ts);
-      if (!Number.isFinite(ts)) {
-        continue;
-      }
-      out.push({
-        x: ts / 1e9,
-        ts,
-        name: evt.name || "",
-        valueText: extractEventValue(evt),
-        payload: evt.payload || null,
-        color: overlay.color || "",
-        label: overlay.label || pattern,
-      });
-    }
-    return out;
   }
 
   function resolveAggregateBandBatch(chartSeries, dashboardCfg) {
@@ -1048,10 +944,15 @@
     if (widget.type === "event_log") {
       const els = createEventLogWidget(widget, containerEl);
       const refresh = async () => {
-        const series = (widget.series || [])[0];
-        const db = seriesDB(series, dashboardCfg);
-        const eventNamePattern = series && (series.event_name_pattern || "").trim();
-        if (!db || !eventNamePattern) {
+        // Multi-series: every series with a non-empty event_name_pattern
+        // contributes events to the same scrolling feed, merged by ts
+        // descending. Lets one widget show "nanotdb.*" alongside
+        // "drip.*" (or any other split the operator wants) without
+        // stacking two widgets side by side.
+        const series = (widget.series || []).filter(
+          (s) => s && (s.event_name_pattern || "").trim() !== ""
+        );
+        if (series.length === 0) {
           els.events.textContent = "";
           els.foot.textContent = "missing db/event_name_pattern";
           return;
@@ -1059,10 +960,30 @@
         const lookbackSec = parseDurationSeconds(widget.lookback || "1h", 3600);
         const end = new Date();
         const start = new Date(end.getTime() - lookbackSec * 1000);
-        const limit = series && series.event_limit ? series.event_limit : 10;
-        const eventsURL = apiURL(`/api/v1/events?db=${encodeURIComponent(db)}&name=${encodeURIComponent(eventNamePattern)}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}&limit=${limit}`);
-        const payload = await fetchJSON(eventsURL);
-        const events = payload.data && payload.data.result ? payload.data.result : [];
+        const fetched = await Promise.all(series.map(async (s) => {
+          const db = seriesDB(s, dashboardCfg);
+          if (!db) return [];
+          const pattern = (s.event_name_pattern || "").trim();
+          const limit = s.event_limit ? s.event_limit : 10;
+          const url = apiURL(`/api/v1/events?db=${encodeURIComponent(db)}&name=${encodeURIComponent(pattern)}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}&limit=${limit}`);
+          try {
+            const payload = await fetchJSON(url);
+            return (payload.data && payload.data.result) ? payload.data.result : [];
+          } catch (err) {
+            // Per-series errors don't kill the widget; other series
+            // still render. The error itself is surfaced via the
+            // outer createWidgetRefresher onError when ALL series
+            // fail; partial failures are quietly skipped here.
+            return [];
+          }
+        }));
+        // Flatten, sort newest-first, cap the merged feed at the sum
+        // of per-series caps so the widget never grows unbounded.
+        const merged = [];
+        fetched.forEach((evts) => evts.forEach((e) => merged.push(e)));
+        merged.sort((a, b) => (b.ts || b.T || 0) - (a.ts || a.T || 0));
+        const totalCap = series.reduce((sum, s) => sum + (s.event_limit ? s.event_limit : 10), 0);
+        const events = merged.slice(0, totalCap);
         els.events.innerHTML = "";
         if (events.length === 0) {
           els.foot.textContent = "no events";
@@ -1077,12 +998,8 @@
           const timeCell = document.createElement("span");
           timeCell.className = "eventlog-cell eventlog-time";
           timeCell.textContent = formatEventTimestamp(evt.ts || evt.T);
-          const valueCell = document.createElement("span");
-          valueCell.className = "eventlog-cell eventlog-value";
-          valueCell.textContent = extractEventValue(evt) || formatEventPayloadSummary(evt.payload || evt.p) || "";
           row.appendChild(nameCell);
           row.appendChild(timeCell);
-          row.appendChild(valueCell);
           els.events.appendChild(row);
         });
         els.foot.textContent = "updated " + new Date().toLocaleTimeString();

@@ -18,6 +18,12 @@ designed-for-only.
 For the friendly intro to where events fit alongside metrics, see
 [CONCEPTS.md](CONCEPTS.md).
 
+NanoTDB and `drip` both use this events layer to emit their own
+lifecycle, partition, and target-state events into the `internal`
+database. See [INTERNAL_EVENTS.md](INTERNAL_EVENTS.md) for the
+internal-events spec, group catalog, runtime toggle, and per-event
+payload shapes.
+
 ---
 
 ## Why events

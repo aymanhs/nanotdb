@@ -320,6 +320,66 @@ tbody tr:nth-child(odd) td {
   font-size: 0.8rem;
 }
 
+.codeish-soft {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* Inline status / source badges used on the Internal Events tab. */
+.badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.badge-on {
+  background: #d1f7d1;
+  color: #1f6b1f;
+}
+
+.badge-off {
+  background: #f3d3d3;
+  color: #8a2020;
+}
+
+.badge-runtime {
+  background: #ffe9b0;
+  color: #7a4f00;
+}
+
+.badge-soft {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* Borderless action-link style for inline toggles inside table cells. */
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent, #2563eb);
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.catalog-group {
+  margin-top: 8px;
+}
+
 @media (max-width: 760px) {
   .engine-toolbar-main {
     align-items: stretch;

@@ -274,7 +274,7 @@
 
 .eventlog-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: baseline;
   padding: 8px 10px;
@@ -294,12 +294,6 @@
 
 .eventlog-cell.eventlog-time {
   color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.eventlog-cell.eventlog-value {
-  color: color-mix(in srgb, var(--accent) 80%, var(--text));
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }

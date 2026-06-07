@@ -73,6 +73,24 @@ var walAppendBufferPool = sync.Pool{
 	},
 }
 
+// walLifecycleHook lets the engine observe WAL-internal events without
+// the WAL needing to know about the internal-events emitter or the
+// stats writer. Set by the engine before any Append/Reset/Fsync is
+// performed; nil is fine and means "no observer".
+//
+// Fields are read inside hot paths — they must be cheap. The engine
+// implementation forwards them to emitInternalEvent with the
+// per-call db name and file (wal/events.wal) context.
+type walLifecycleHook struct {
+	// dbName/file context bound at WAL construction by the engine.
+	dbName string
+	file   string
+
+	onFsyncSlow  func(dbName, file string, ms float64)
+	onFsyncError func(dbName, file string, err error)
+	onReset      func(dbName, file string, bytesReclaimed int64)
+}
+
 // WAL manages a single reusable write-ahead log file.
 type WAL struct {
 	path        string
@@ -84,6 +102,18 @@ type WAL struct {
 	hasBaseline bool      // whether baseline has been written
 	statsMu     sync.RWMutex
 	stats       WALStats
+	hook        walLifecycleHook
+}
+
+// SetLifecycleHook installs an engine-side observer for WAL events.
+// Safe to call once after NewWAL and before the WAL goes hot. Threading:
+// the WAL only reads the hook from inside Reset/Fsync, both of which
+// run with appendMu held by their callers, so this is single-writer.
+func (w *WAL) SetLifecycleHook(h walLifecycleHook) {
+	if w == nil {
+		return
+	}
+	w.hook = h
 }
 
 // NewWAL creates a new WAL manager
@@ -305,6 +335,9 @@ func (w *WAL) Fsync() error {
 	}
 	start := time.Now()
 	if err := w.currentFile.Sync(); err != nil {
+		if w.hook.onFsyncError != nil {
+			w.hook.onFsyncError(w.hook.dbName, w.hook.file, err)
+		}
 		return err
 	}
 	dur := time.Since(start)
@@ -320,8 +353,17 @@ func (w *WAL) Fsync() error {
 		}
 		stats.LastFsyncAt = now
 	})
+	if w.hook.onFsyncSlow != nil && dur >= walSlowFsyncThreshold {
+		w.hook.onFsyncSlow(w.hook.dbName, w.hook.file, float64(dur.Microseconds())/1000.0)
+	}
 	return nil
 }
+
+// walSlowFsyncThreshold is the boundary above which a fsync is
+// reported as nanotdb.wal.fsync.slow. 50ms is a reasonable "the disk
+// stalled" mark for spinning rust and SD cards; SSDs almost never
+// cross it. Not a tuning knob today.
+const walSlowFsyncThreshold = 50 * time.Millisecond
 
 // Records returns all WAL records currently present in the WAL file.
 func (w *WAL) Records() ([]WALRecord, error) {
@@ -454,6 +496,9 @@ func (w *WAL) Reset() error {
 			stats.MaxResetDuration = resetDur
 		}
 	})
+	if w.hook.onReset != nil {
+		w.hook.onReset(w.hook.dbName, w.hook.file, flushed)
+	}
 	return nil
 }
 
@@ -524,6 +569,30 @@ func OpenAndRecoverWAL(name string, fsyncPolicy string) (*WAL, error) {
 		stats.AppendBytes = bytes
 	})
 	return w, nil
+}
+
+// scanWALAppendStatsWithTail extends scanWALAppendStats by also
+// reporting tail bytes — the trailing bytes of the file that follow
+// the last decodable record. Non-zero tail bytes indicate either
+// crash-truncated tail (legitimate) or corruption (not). Used by
+// internal events to report nanotdb.wal.tail_truncated and
+// nanotdb.engine.shutdown.dirty.
+func scanWALAppendStatsWithTail(path string) (count int64, consumed int64, tail int64, err error) {
+	count, consumed, err = scanWALAppendStats(path)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	fi, statErr := os.Stat(path)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return count, consumed, 0, nil
+		}
+		return count, consumed, 0, statErr
+	}
+	if fi.Size() > consumed {
+		tail = fi.Size() - consumed
+	}
+	return count, consumed, tail, nil
 }
 
 // scanWALAppendStats counts valid records and consumed bytes in a WAL file.

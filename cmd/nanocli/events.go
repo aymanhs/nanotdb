@@ -1,12 +1,44 @@
 package main
 
+// `nanocli events` is an OFFLINE reader for the events stored under a
+// database's data directory.
+//
+// It NEVER opens the engine and NEVER talks to a running server. It
+// reads the sealed `events-<partition>.dat` frames directly using the
+// engine's exported decode primitives (WalkEventsFileHeaders +
+// CollectEventsFrame + LoadEventCatalog).
+//
+// Why offline-only:
+//
+//   - The previous engine.OpenEngine() implementation emitted a
+//     nanotdb.engine.started event on open and a
+//     nanotdb.engine.shutdown.clean on close, so every nanocli
+//     invocation silently grew the internal-events catalog by two
+//     records.
+//   - Opening the engine also re-replays the events WAL into memory.
+//     Repeated runs on the same root cumulatively re-played those
+//     records each time and eventually drifted the catalog (the
+//     "event id N already assigned" failure mode you hit on the pi).
+//
+// Disk-only is the right architectural fit: nanocli is for inspecting
+// files when no live system is using them. The running server is the
+// source of truth for live state and is what the web UI's Internal
+// Events tab and `event_log` widget query.
+//
+// We deliberately read SEALED events-*.dat files only. The events
+// WAL holds records that the engine has not yet flushed to a page;
+// for those, `nanocli inspect events-wal` already exists and decodes
+// the WAL frame-by-frame (with the catalog supplied).
+
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,12 +148,6 @@ func runEvents(args []string) error {
 	}
 
 	started := time.Now()
-	eng, err := engine.OpenEngine(ctx.RootDir, 0)
-	if err != nil {
-		return err
-	}
-	defer eng.Close()
-
 	report := eventsReport{
 		RootDir:      ctx.RootDir,
 		Database:     ctx.Database,
@@ -133,28 +159,51 @@ func runEvents(args []string) error {
 		OutputFormat: outFormat,
 	}
 
+	// Resolve the name filter into an exact match or a path.Match
+	// wildcard. Stays consistent with how the HTTP layer interprets
+	// the same param.
+	exactName := strings.TrimSpace(*nameFilter)
+	pattern := ""
+	queryName := exactName
+	if strings.ContainsAny(exactName, "*?[") {
+		pattern = exactName
+		queryName = ""
+	}
+
+	// Read the events catalog once; required to decode page frames.
+	catPath := filepath.Join(ctx.DatabaseDir, "events.json")
+	cat, err := engine.LoadEventCatalog(catPath)
+	if err != nil {
+		// Missing catalog means there are no events for this db
+		// yet; nothing to read. We don't treat this as an error so
+		// "nanocli events --db internal" on a fresh install just
+		// produces an empty result.
+		if os.IsNotExist(err) {
+			return finishEmpty(&report, outFormat, started)
+		}
+		return fmt.Errorf("load events catalog %s: %w", catPath, err)
+	}
+
+	keep := func(name string) bool {
+		if queryName != "" {
+			return name == queryName
+		}
+		if pattern != "" {
+			ok, mErr := path.Match(pattern, name)
+			return mErr == nil && ok
+		}
+		return true
+	}
+
 	if aggMode {
-		window, err := engine.ParseDuration(strings.TrimSpace(*windowText))
-		if err != nil || window <= 0 {
-			return fmt.Errorf("invalid --window: %w", err)
+		window, werr := engine.ParseDuration(strings.TrimSpace(*windowText))
+		if werr != nil || window <= 0 {
+			return fmt.Errorf("invalid --window: %w", werr)
 		}
 		report.Window = window.String()
 		windowNS := int64(window)
 		counts := map[int64]int64{}
-		exactName := strings.TrimSpace(*nameFilter)
-		queryName := exactName
-		pattern := ""
-		if strings.ContainsAny(exactName, "*?[") {
-			pattern = exactName
-			queryName = ""
-		}
-		err = eng.QueryEvents(ctx.Database, queryName, fromTS, toTS, func(ev engine.EventQueryResult) error {
-			if pattern != "" {
-				ok, mErr := path.Match(pattern, ev.Name)
-				if mErr != nil || !ok {
-					return nil
-				}
-			}
+		err = readEventsFromSealedPages(ctx.DatabaseDir, cat, fromTS, toTS, keep, func(ev decodedEvent) error {
 			ts := int64(ev.TS)
 			bucketStart := ts - (ts % windowNS)
 			if ts < 0 && ts%windowNS != 0 {
@@ -173,28 +222,32 @@ func runEvents(args []string) error {
 		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 		report.Buckets = make([]eventsAggregateRow, 0, len(keys))
 		for _, k := range keys {
-			report.Buckets = append(report.Buckets, eventsAggregateRow{Timestamp: k, UTC: engine.FormatTimestamp(engine.Timestamp(k)), Count: counts[k]})
+			report.Buckets = append(report.Buckets, eventsAggregateRow{
+				Timestamp: k,
+				UTC:       engine.FormatTimestamp(engine.Timestamp(k)),
+				Count:     counts[k],
+			})
 		}
 		report.RowCount = len(report.Buckets)
 	} else {
-		exactName := strings.TrimSpace(*nameFilter)
-		queryName := exactName
-		pattern := ""
-		if strings.ContainsAny(exactName, "*?[") {
-			pattern = exactName
-			queryName = ""
+		// Collect every matching event first; sort newest-first; then
+		// apply the limit. Sealed pages are append-ordered per-name
+		// but not globally newest-first, so we have to materialize the
+		// candidates before trimming.
+		all := make([]decodedEvent, 0, *limit*2)
+		err = readEventsFromSealedPages(ctx.DatabaseDir, cat, fromTS, toTS, keep, func(ev decodedEvent) error {
+			all = append(all, ev)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		rows := make([]eventsQueryRow, 0, *limit)
-		err = eng.QueryEvents(ctx.Database, queryName, fromTS, toTS, func(ev engine.EventQueryResult) error {
-			if pattern != "" {
-				ok, mErr := path.Match(pattern, ev.Name)
-				if mErr != nil || !ok {
-					return nil
-				}
-			}
-			if len(rows) >= *limit {
-				return io.EOF
-			}
+		sort.Slice(all, func(i, j int) bool { return all[i].TS > all[j].TS })
+		if len(all) > *limit {
+			all = all[:*limit]
+		}
+		rows := make([]eventsQueryRow, 0, len(all))
+		for _, ev := range all {
 			row := eventsQueryRow{
 				Name:      ev.Name,
 				ID:        uint16(ev.EventID),
@@ -212,25 +265,117 @@ func runEvents(args []string) error {
 				row.Payload = string(ev.Payload)
 			}
 			rows = append(rows, row)
-			return nil
-		})
-		if err != nil && err != io.EOF {
-			return err
 		}
 		report.Rows = rows
 		report.RowCount = len(rows)
 	}
 
 	report.DurationMS = time.Since(started).Milliseconds()
+	return renderEventsReport(&report, outFormat)
+}
 
+// decodedEvent is a per-record decoded view of one entry in a sealed
+// events page. Built locally so the WAL-vs-page distinction stays
+// inside this file.
+type decodedEvent struct {
+	Name      string
+	EventID   engine.EventID
+	TS        engine.Timestamp
+	ValueType byte
+	Int32     int32
+	Float32   float32
+	Payload   []byte
+}
+
+// readEventsFromSealedPages walks every events-*.dat under dbDir,
+// decodes the frames whose time window intersects [fromTS, toTS],
+// and calls visit for each record matching `keep`. Errors on
+// individual files are propagated; we don't silently swallow.
+//
+// Files are walked in lexicographic order (partition keys sort
+// chronologically by construction); records within a frame are
+// emitted in their on-disk append order. The caller is responsible
+// for any final sort.
+func readEventsFromSealedPages(
+	dbDir string,
+	cat *engine.EventCatalog,
+	fromTS, toTS engine.Timestamp,
+	keep func(name string) bool,
+	visit func(decodedEvent) error,
+) error {
+	paths, err := filepath.Glob(filepath.Join(dbDir, "events-*.dat"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		offsets := make([]int64, 0, 8)
+		_, err := engine.WalkEventsFileHeaders(p, func(hdr engine.EventsFrameHeader) error {
+			// Frame is in range iff [StartTime, EndTime] overlaps
+			// the requested window. Inclusive on both ends.
+			if hdr.EndTime < fromTS || hdr.StartTime > toTS {
+				return nil
+			}
+			offsets = append(offsets, hdr.Offset)
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("walk %s: %w", p, err)
+		}
+		for _, off := range offsets {
+			page, err := engine.CollectEventsFrame(p, off, cat)
+			if err != nil {
+				return fmt.Errorf("decode %s offset %d: %w", p, off, err)
+			}
+			for i := 0; i < len(page.EventIDs); i++ {
+				ts := page.Times[i]
+				if ts < fromTS || ts > toTS {
+					continue
+				}
+				name, _, ok := cat.GetEventByID(page.EventIDs[i])
+				if !ok {
+					continue
+				}
+				if keep != nil && !keep(name) {
+					continue
+				}
+				ev := decodedEvent{
+					Name:      name,
+					EventID:   page.EventIDs[i],
+					TS:        ts,
+					ValueType: page.ValueTypes[i],
+				}
+				switch page.ValueTypes[i] {
+				case engine.Int32Sample:
+					ev.Int32 = int32(page.ValuesRaw[i])
+				case engine.Float32Sample:
+					ev.Float32 = math.Float32frombits(page.ValuesRaw[i])
+				}
+				if i < len(page.Payloads) && len(page.Payloads[i]) > 0 {
+					ev.Payload = page.Payloads[i]
+				}
+				if err := visit(ev); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func finishEmpty(report *eventsReport, outFormat string, started time.Time) error {
+	report.DurationMS = time.Since(started).Milliseconds()
+	return renderEventsReport(report, outFormat)
+}
+
+func renderEventsReport(report *eventsReport, outFormat string) error {
 	if outFormat == "json" {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(report)
 	}
-
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if aggMode {
+	if report.Aggregate == "count" || len(report.Buckets) > 0 {
 		fmt.Fprintln(tw, "TS_NS\tTS_UTC\tCOUNT")
 		for _, b := range report.Buckets {
 			fmt.Fprintf(tw, "%d\t%s\t%d\n", b.Timestamp, b.UTC, b.Count)

@@ -190,6 +190,7 @@ type EngineConfig struct {
 	MQTT             EngineConfigMQTT             `toml:"mqtt"`
 	Logging          EngineConfigLogging          `toml:"logging"`
 	Stats            EngineConfigStats            `toml:"stats"`
+	InternalEvents   EngineConfigInternalEvents   `toml:"internal_events"`
 	Defaults         EngineConfigDefaults         `toml:"defaults"`
 	ManifestDefaults EngineConfigManifestDefaults `toml:"manifest_defaults"`
 }
@@ -253,6 +254,21 @@ type EngineConfigStats struct {
 	Interval string `toml:"interval"`
 }
 
+// EngineConfigInternalEvents holds the engine-side configuration for the
+// internal events emitter. See docs/INTERNAL_EVENTS.md.
+//
+// Groups is the per-group "on"|"off" override map mirrored from the
+// [internal_events.groups] subtable in engine.toml. A group not listed
+// uses the per-group default from internalEventsGroupDefaults. An
+// unknown group key is a hard error at config load.
+type EngineConfigInternalEvents struct {
+	Enabled    bool              `toml:"enabled"`
+	DB         string            `toml:"db"`
+	QueueDepth int               `toml:"queue_depth"`
+	DropMetric string            `toml:"drop_metric"`
+	Groups     map[string]string `toml:"groups"`
+}
+
 type EngineConfigDefaults struct {
 	Databases []string `toml:"databases"`
 }
@@ -312,6 +328,7 @@ type Engine struct {
 	StatsEnabled          bool
 	StatsInterval         time.Duration
 	mqttWorker            *mqttWorker
+	internalEvents        *internalEventsEmitter
 	dbDefaults            DBInfo
 
 	// LOCK ORDERING (must be obeyed by every code path to avoid deadlock):
@@ -431,6 +448,13 @@ func defaultEngineConfig(walMaxSegSize int64) EngineConfig {
 			Level:  LogLevelInfo,
 		}}},
 		Stats: EngineConfigStats{Enabled: true, Interval: "30s"},
+		InternalEvents: EngineConfigInternalEvents{
+			Enabled:    true,
+			DB:         internalStatsDatabase,
+			QueueDepth: defaultInternalEventsQueueDepth,
+			DropMetric: defaultInternalEventsDropMetric,
+			Groups:     map[string]string{},
+		},
 		Defaults: EngineConfigDefaults{
 			Databases: []string{},
 		},
@@ -633,6 +657,30 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	if statsInterval < 0 {
 		return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid stats_interval: must be >= 0")
 	}
+	if strings.TrimSpace(cfg.InternalEvents.DB) == "" {
+		cfg.InternalEvents.DB = def.InternalEvents.DB
+	}
+	if cfg.InternalEvents.QueueDepth <= 0 {
+		cfg.InternalEvents.QueueDepth = def.InternalEvents.QueueDepth
+	}
+	if strings.TrimSpace(cfg.InternalEvents.DropMetric) == "" {
+		cfg.InternalEvents.DropMetric = def.InternalEvents.DropMetric
+	}
+	if cfg.InternalEvents.Groups == nil {
+		cfg.InternalEvents.Groups = map[string]string{}
+	}
+	for g, v := range cfg.InternalEvents.Groups {
+		if !internalEventGroupKnown(g) {
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid internal_events.groups: unknown group %q", g)
+		}
+		normalized := strings.ToLower(strings.TrimSpace(v))
+		switch normalized {
+		case "on", "off", "true", "false", "yes", "no":
+			cfg.InternalEvents.Groups[g] = normalized
+		default:
+			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid internal_events.groups[%q]: must be \"on\" or \"off\", got %q", g, v)
+		}
+	}
 	if cfg.Defaults.Databases == nil {
 		cfg.Defaults.Databases = []string{}
 	}
@@ -724,6 +772,18 @@ func durabilitySyncPolicy(profile string) (syncDataFile bool, syncCatalog bool) 
 // databases with un-flushed pages or open WAL fds.
 func (e *Engine) Close() error {
 	e.logInfo("engine closing", "data_dir", e.RootDataDir)
+	closeStart := time.Now()
+
+	// Emit the shutdown event BEFORE taking writeMu so the drain
+	// goroutine can still pick it up and flush it via AddEvent.
+	// Then stop the drain (which blocks until the channel is empty).
+	if e.internalEvents != nil {
+		e.emitInternalEvent("nanotdb.lifecycle", "nanotdb.engine.shutdown.clean", int32(time.Since(closeStart).Milliseconds()), map[string]any{
+			"db_count": len(e.dbs),
+		}, "")
+		e.stopInternalEventsDrain()
+	}
+
 	e.writeMu.Lock()
 	defer e.writeMu.Unlock()
 
@@ -732,31 +792,42 @@ func (e *Engine) Close() error {
 	e.stopMQTT()
 	e.mu.Lock()
 	for name, db := range e.dbs {
-		if name == internalStatsDatabase {
-			continue
-		}
 		rt := e.runtimes[name]
 		if rt == nil {
 			continue
 		}
-		for day, p := range rt.openDays {
-			if p == nil {
-				continue
+		// The `internal` db's METRIC pages and WAL are written by the
+		// dedicated stats path (flushStatsToInternal, called below),
+		// not by AddSample, so we skip the normal flush-and-reset
+		// discipline for the metric side. The EVENTS side, however,
+		// goes through the same AddEvent path as every other db and
+		// MUST flush-and-reset here, otherwise WAL records from this
+		// session re-replay every startup, the events catalog and
+		// the WAL drift apart, and eventually you get an
+		// "event id N already assigned" error or duplicate query
+		// results — see https://github.com/aymanhs/nanotdb commits
+		// touching this comment for the bug history.
+		skipMetricFlush := name == internalStatsDatabase
+		if !skipMetricFlush {
+			for day, p := range rt.openDays {
+				if p == nil {
+					continue
+				}
+				if err := e.writePageToDailyFile(db, name, day, p); err != nil {
+					closeErrs = append(closeErrs, fmt.Errorf("flush %q day %s: %w", name, day, err))
+					continue
+				}
+				delete(rt.openDays, day)
 			}
-			if err := e.writePageToDailyFile(db, name, day, p); err != nil {
-				closeErrs = append(closeErrs, fmt.Errorf("flush %q day %s: %w", name, day, err))
-				continue
+			if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
+				e.logDebug("wal reset", "database", name, "buffer_bytes", db.wal.Stats().BufferBytes)
 			}
-			delete(rt.openDays, day)
+			if err := maybeResetWAL(db, rt); err != nil {
+				closeErrs = append(closeErrs, fmt.Errorf("reset wal for %q: %w", name, err))
+				// Keep going — the next database still needs flushing/closing.
+			}
+			e.captureWALStats(db, name)
 		}
-		if db.wal != nil && db.wal.Stats().BufferBytes > 0 {
-			e.logDebug("wal reset", "database", name, "buffer_bytes", db.wal.Stats().BufferBytes)
-		}
-		if err := maybeResetWAL(db, rt); err != nil {
-			closeErrs = append(closeErrs, fmt.Errorf("reset wal for %q: %w", name, err))
-			// Keep going — the next database still needs flushing/closing.
-		}
-		e.captureWALStats(db, name)
 
 		// Events layer must mirror the same flush-then-reset discipline as
 		// the metric WAL above. Skipping this would leave the in-memory
@@ -1244,6 +1315,10 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 	entry, exists := db.catalog.GetMetricEntry(metric)
 	if exists && entry.LastValid && ts < entry.LastTS {
 		e.logTrace("stale sample rejected", "database", dbName, "metric", metric, "timestamp", ts, "last_timestamp", entry.LastTS)
+		e.emitInternalEventBatched("nanotdb.ingest.reject", "nanotdb.ingest.rejected.stale", dbName, map[string]any{
+			"db":   dbName,
+			"name": metric,
+		}, defaultInternalEventsBatchEvery, dbName)
 		return fmt.Errorf("stale sample rejected for %s/%s: ts=%d < last=%d", dbName, metric, ts, entry.LastTS)
 	}
 
@@ -1260,10 +1335,12 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 	if vType == Int32Sample {
 		metricID, err = GetMetricID[int32](db.catalog, metric)
 		if err != nil {
+			e.emitCatalogFullIfApplicable(dbName, "metrics", err)
 			return err
 		}
 		if !exists {
 			e.logTrace("metric registered", "database", dbName, "metric", metric, "metric_id", metricID, "sample_type", "int32")
+			e.emitCatalogMetricAdded(dbName, metric, metricID, "int32")
 		}
 		if useWAL {
 			if !exists {
@@ -1279,10 +1356,12 @@ func (e *Engine) addParsedSample(dbName, metric string, ts Timestamp, vType byte
 	} else {
 		metricID, err = GetMetricID[float32](db.catalog, metric)
 		if err != nil {
+			e.emitCatalogFullIfApplicable(dbName, "metrics", err)
 			return err
 		}
 		if !exists {
 			e.logTrace("metric registered", "database", dbName, "metric", metric, "metric_id", metricID, "sample_type", "float32")
+			e.emitCatalogMetricAdded(dbName, metric, metricID, "float32")
 		}
 		if useWAL {
 			if !exists {
@@ -2235,14 +2314,21 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 
 	dbDir := filepath.Join(e.RootDataDir, database)
 	fullName := filepath.Join(dbDir, database)
+	// Manifest absence is what distinguishes a freshly-created db from an
+	// existing one being re-opened. Check before NewDatabaseWithWALConfig
+	// touches the directory.
+	_, manifestStatErr := os.Stat(filepath.Join(dbDir, manifestFileName))
+	freshlyCreated := os.IsNotExist(manifestStatErr)
+	openStart := time.Now()
 	db, err := NewDatabaseWithWALConfig(fullName, e.WALMaxSegSize, e.WALFsyncPolicy)
 	if err != nil {
 		return nil, nil, err
 	}
 	var replayRecords int64
 	var replayBytes int64
+	var walTailBytes int64
 	if db.wal != nil {
-		count, bytes, err := scanWALAppendStats(db.wal.path)
+		count, bytes, tail, err := scanWALAppendStatsWithTail(db.wal.path)
 		if err != nil {
 			e.recordWALReplayMetrics(database, 0, 0, false)
 			_ = db.Close()
@@ -2252,6 +2338,7 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 		db.wal.stats.AppendBytes = bytes
 		replayRecords = count
 		replayBytes = bytes
+		walTailBytes = tail
 	}
 	info, err := loadOrCreateDBInfoWithOptions(db.RootDataDir, defaults, rollupManifest, rollupInterval)
 	if err != nil {
@@ -2310,8 +2397,59 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 		e.captureWALStats(db, database)
 		e.logInfo("database opened", "database", database, "wal_enabled", info.WALEnabled, "wal_replay_records", replayRecords, "wal_replay_bytes", replayBytes)
 	}
+	// Install WAL lifecycle hooks now that both the metric and events
+	// WAL handles are present and replay is finished. From here forward
+	// every Reset/Fsync will be observed by the internal-events emitter.
+	e.installWALLifecycleHooks(db, database)
+	if info.WALEnabled && replayRecords > 0 && e.internalEventsActive("nanotdb.wal") {
+		e.emitInternalEvent("nanotdb.wal", "nanotdb.wal.replayed", int32(replayRecords), map[string]any{
+			"db":            database,
+			"file":          "wal",
+			"bytes_scanned": replayBytes,
+		}, database)
+	}
+	if walTailBytes > 0 && e.internalEventsActive("nanotdb.wal") {
+		e.emitInternalEvent("nanotdb.wal", "nanotdb.wal.tail_truncated", int32(walTailBytes), map[string]any{
+			"db":     database,
+			"file":   "wal",
+			"reason": "crash_tail",
+		}, database)
+	}
+	// nanotdb.engine.shutdown.dirty: previous run left WAL records that
+	// didn't make it to a sealed page. replayRecords>0 at open is the
+	// signal — a clean Close() always Reset()s the WAL.
+	if info.WALEnabled && replayRecords > 0 && e.internalEventsActive("nanotdb.lifecycle") {
+		e.emitInternalEvent("nanotdb.lifecycle", "nanotdb.engine.shutdown.dirty", nil, map[string]any{
+			"db":              database,
+			"prev_wal_bytes":  replayBytes,
+			"prev_wal_records": replayRecords,
+		}, database)
+	}
+	openMs := int32(time.Since(openStart).Milliseconds())
 	e.dbs[database] = db
 	e.runtimes[database] = rt
+	if freshlyCreated && e.internalEventsActive("nanotdb.db") {
+		e.emitInternalEvent("nanotdb.db", "nanotdb.db.created", nil, map[string]any{
+			"db":               database,
+			"partition_mode":   info.Partition,
+			"retention_action": info.RetentionAction,
+		}, database)
+	}
+	if e.internalEventsActive("nanotdb.db") {
+		metricCount := 0
+		if db.catalog != nil {
+			metricCount = len(db.catalog.ListMetrics())
+		}
+		eventCount := 0
+		if db.eventCatalog != nil {
+			eventCount = len(db.eventCatalog.ListEvents())
+		}
+		e.emitInternalEvent("nanotdb.db", "nanotdb.db.opened", openMs, map[string]any{
+			"db":           database,
+			"metric_count": metricCount,
+			"event_count":  eventCount,
+		}, database)
+	}
 	return db, rt, nil
 }
 
@@ -2637,8 +2775,41 @@ func sealDay(e *Engine, db *Database, rt *dbRuntime, dbName, day string, nowTS T
 	}
 	e.captureWALStats(db, dbName)
 	if e != nil && e.AutoCreateMetricFiles {
-		if _, err := e.buildMetricFileFromSealedPartition(db, rt, day); err != nil {
+		// Stat the source data-*.dat BEFORE the build so we can
+		// report bytes_saved honestly. The build may rename it to
+		// raw-*.dat (per raw_ingest_action), which is why we measure
+		// in advance and look up the produced file separately after.
+		var srcBytes int64
+		if rawPath, rawErr := resolveMetricRawPartitionPath(db.RootDataDir, day); rawErr == nil {
+			if fi, statErr := os.Stat(rawPath); statErr == nil {
+				srcBytes = fi.Size()
+			}
+		}
+		if path, err := e.buildMetricFileFromSealedPartition(db, rt, day); err != nil {
 			e.logInfo("metric file auto-build failed", "database", dbName, "partition", day, "error", err)
+			if e.internalEventsActive("nanotdb.disk") {
+				e.emitInternalEvent("nanotdb.disk", "nanotdb.disk.write.error", nil, map[string]any{
+					"file": path,
+					"err":  err.Error(),
+				}, dbName)
+			}
+		} else if path != "" && e.internalEventsActive("nanotdb.partition") {
+			var dstBytes int64
+			if fi, statErr := os.Stat(path); statErr == nil {
+				dstBytes = fi.Size()
+			}
+			// bytes_saved can be negative if the metric file ends up
+			// larger than the raw page (small partitions whose
+			// per-metric framing overhead exceeds the win). Report
+			// the signed value so charts can show the loss honestly.
+			bytesSaved := srcBytes - dstBytes
+			e.emitInternalEvent("nanotdb.partition", "nanotdb.partition.optimized", int32(bytesSaved), map[string]any{
+				"db":            dbName,
+				"partition_key": day,
+				"file":          filepath.Base(path),
+				"source_bytes":  srcBytes,
+				"dest_bytes":    dstBytes,
+			}, dbName)
 		}
 	}
 	rt.sealedDays[day] = struct{}{}
@@ -2704,8 +2875,30 @@ func (e *Engine) writePageToDailyFile(db *Database, dbName, day string, page *Pa
 		e.stats.setMin(dbName+"/data/min_fsync_duration_ns", syncDurNs)
 	}
 	e.logDebug("page flushed", "database", dbName, "day", day, "records", len(page.Times), "frame_bytes", st.FrameBytes, "compressed_bytes", st.CompressedBytes)
+	flushDur := time.Since(start)
+	if e.internalEventsActive("nanotdb.partition") {
+		e.emitInternalEvent("nanotdb.partition", "nanotdb.partition.sealed", int32(len(page.Times)), map[string]any{
+			"db":            dbName,
+			"file":          "data",
+			"partition_key": day,
+			"bytes":         st.FrameBytes,
+		}, dbName)
+	}
+	if flushDur >= partitionFlushSlowThreshold && e.internalEventsActive("nanotdb.partition.slow") {
+		e.emitInternalEvent("nanotdb.partition.slow", "nanotdb.partition.flush.slow", float32(flushDur.Microseconds())/1000.0, map[string]any{
+			"db":            dbName,
+			"file":          "data",
+			"partition_key": day,
+		}, dbName)
+	}
 	return nil
 }
+
+// partitionFlushSlowThreshold is the boundary above which a page
+// flush is reported as nanotdb.partition.flush.slow. 250ms picked to
+// distinguish "the disk just stalled" from "a big page took a while
+// to compress" on typical hardware.
+const partitionFlushSlowThreshold = 250 * time.Millisecond
 
 // writePage is the raw disk write used by both writePageToDailyFile and flushStatsToInternal.
 func writePage(db *Database, day string, page *Page) error {
@@ -2815,15 +3008,41 @@ func (e *Engine) cleanupRetention(db *Database, rt *dbRuntime, nowTS Timestamp) 
 		parts = append(parts, part)
 	}
 	sort.Strings(parts)
+	if len(parts) > 0 && e.internalEventsActive("nanotdb.retention") {
+		e.emitInternalEvent("nanotdb.retention", "nanotdb.retention.sweep.started", int32(len(parts)), map[string]any{
+			"db":     db.Name,
+			"action": action,
+		}, db.Name)
+	}
+	sweepStart := time.Now()
+	var deletedCount, archivedCount int
+	var bytesFreed int64
 	for _, part := range parts {
 		paths := partitions[part]
 		sort.Strings(paths)
 		switch action {
 		case RetentionActionDelete:
+			var partBytes int64
+			var removed int
 			for _, filePath := range paths {
+				if fi, statErr := os.Stat(filePath); statErr == nil {
+					partBytes += fi.Size()
+				}
 				if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 					e.logInfo("retention delete failed", "database", db.Name, "partition", part, "path", filePath, "error", err)
+					continue
 				}
+				removed++
+			}
+			deletedCount++
+			bytesFreed += partBytes
+			if e.internalEventsActive("nanotdb.partition") {
+				e.emitInternalEvent("nanotdb.partition", "nanotdb.partition.deleted", int32(partBytes), map[string]any{
+					"db":               db.Name,
+					"partition_key":    part,
+					"files_removed":    removed,
+					"retention_reason": "age",
+				}, db.Name)
 			}
 		case RetentionActionArchive:
 			archivePath, err := retentionArchivePath(db.RootDataDir, rt.info.Partition, part)
@@ -2835,12 +3054,34 @@ func (e *Engine) cleanupRetention(db *Database, rt *dbRuntime, nowTS Timestamp) 
 				e.logInfo("retention archive failed", "database", db.Name, "partition", part, "archive", archivePath, "error", err)
 				return
 			}
+			var partBytes int64
 			for _, filePath := range paths {
+				if fi, statErr := os.Stat(filePath); statErr == nil {
+					partBytes += fi.Size()
+				}
 				if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 					e.logInfo("retention archive cleanup failed", "database", db.Name, "partition", part, "path", filePath, "archive", archivePath, "error", err)
 				}
 			}
+			archivedCount++
+			bytesFreed += partBytes
+			if e.internalEventsActive("nanotdb.partition") {
+				e.emitInternalEvent("nanotdb.partition", "nanotdb.partition.archived", int32(partBytes), map[string]any{
+					"db":            db.Name,
+					"partition_key": part,
+					"tar_path":      archivePath,
+				}, db.Name)
+			}
 		}
+	}
+	if len(parts) > 0 && e.internalEventsActive("nanotdb.retention") {
+		e.emitInternalEvent("nanotdb.retention", "nanotdb.retention.sweep.completed", int32(deletedCount+archivedCount), map[string]any{
+			"db":          db.Name,
+			"deleted":     deletedCount,
+			"archived":    archivedCount,
+			"bytes_freed": bytesFreed,
+			"ms":          time.Since(sweepStart).Milliseconds(),
+		}, db.Name)
 	}
 }
 

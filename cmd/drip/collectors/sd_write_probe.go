@@ -7,8 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// tmpfsMagic is the f_type returned by statfs for a Linux tmpfs
+// mount. Used by the constructor to warn when the probe directory is
+// in RAM — a near-universal misconfiguration on Raspberry Pi where
+// the default "/tmp" is tmpfs and an fsync there is a no-op (so the
+// probe never measures real SD latency and the over-threshold event
+// never fires).
+const tmpfsMagic = 0x01021994
 
 // SDWriteProbeCollector measures write+fsync latency in milliseconds by writing
 // a small probe file periodically. It emits the latest measured value each cycle.
@@ -50,6 +59,14 @@ func NewSDWriteProbeCollector(directory string, bytes int, everyNCycles int, met
 	if eventWhenOverMS < 0 {
 		eventWhenOverMS = 0
 	}
+	if err := warnIfTmpfs(dir); err != nil {
+		// Non-fatal — the probe still runs, but the log line makes it
+		// obvious the latency reading is meaningless and the
+		// threshold event will never fire.
+		log.Printf("sd_write_probe collector: WARN: %v", err)
+	}
+	log.Printf("sd_write_probe collector: configured directory=%s bytes=%d every_n_cycles=%d metric=%s event_name=%s event_when_over_ms=%d",
+		dir, bytes, everyNCycles, metric, eventName, eventWhenOverMS)
 	return &SDWriteProbeCollector{
 		directory:       dir,
 		bytes:           bytes,
@@ -74,6 +91,13 @@ func (c *SDWriteProbeCollector) Collect(ctx context.Context, ch chan<- Metric) {
 
 	firstProbe := !hasLast
 	runProbe := firstProbe || (cycle%c.everyNCycles == 0)
+	// freshProbe stays true only when this cycle actually ran a new
+	// probe (vs. emitting the cached value between probes). The
+	// over-threshold event must fire only on fresh readings — otherwise
+	// the same stale measurement gets re-fired every cycle for the
+	// every_n_cycles window, drowning the event log in duplicates of
+	// the same value (the bug this guard fixes).
+	freshProbe := false
 	if runProbe {
 		probeCtx := ctx
 		if firstProbe {
@@ -98,13 +122,21 @@ func (c *SDWriteProbeCollector) Collect(ctx context.Context, ch chan<- Metric) {
 			last = ms
 			hasLast = true
 			c.mu.Unlock()
+			freshProbe = true
+			// Log every probe result so silent misconfigurations (e.g.
+			// directory on tmpfs producing sub-millisecond readings and
+			// never triggering the over-threshold event) show up in
+			// `journalctl -u drip`. One line per probe, every
+			// every_n_cycles cycles (default ~60s), so this is cheap.
+			log.Printf("sd_write_probe collector: probe ok dir=%s bytes=%d latency_ms=%.3f threshold_ms=%g",
+				c.directory, c.bytes, last, c.eventWhenOverMS)
 		}
 	}
 
 	if !hasLast {
 		return
 	}
-	if c.eventWhenOverMS > 0 && last > c.eventWhenOverMS {
+	if freshProbe && c.eventWhenOverMS > 0 && last > c.eventWhenOverMS {
 		ch <- Metric{
 			Name:        c.metric,
 			Value:       last,
@@ -152,4 +184,27 @@ func (c *SDWriteProbeCollector) runProbe(ctx context.Context) (float32, error) {
 		return 0, err
 	}
 	return float32(time.Since(start).Seconds() * 1000.0), nil
+}
+
+// warnIfTmpfs returns a descriptive error when dir resides on a
+// tmpfs (in-RAM) filesystem. Callers log this as a warning, not a
+// hard failure — the probe will still run; the operator just
+// needs to know that the readings have nothing to do with the SD
+// card. Best-effort: if statfs fails (non-Linux, missing path, etc.)
+// we silently return nil.
+func warnIfTmpfs(dir string) error {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return nil
+	}
+	if int64(st.Type) == tmpfsMagic {
+		return &tmpfsWarning{dir: dir}
+	}
+	return nil
+}
+
+type tmpfsWarning struct{ dir string }
+
+func (w *tmpfsWarning) Error() string {
+	return "directory " + w.dir + " is on tmpfs (in-RAM); fsync is a no-op there so the probe will measure RAM latency, not SD I/O — the over-threshold event will never fire. Point [collectors.sd_write_probe].directory at an SD-backed path (e.g. /home/pi)."
 }

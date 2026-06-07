@@ -35,6 +35,7 @@
           <button type="button" id="addQueryBtn" class="secondary-btn">Add</button>
         </div>
       </label>
+      <datalist id="eventOptions"></datalist>
       <label>
         Aggregate
         <input id="aggregateInput" list="aggregateOptions" type="text" placeholder="optional" />
@@ -91,6 +92,18 @@
       </header>
       <div id="cards" class="cards"></div>
     </section>
+
+    <details id="overlaysSection" class="panel overlays-panel">
+      <summary>
+        <span>Event overlays</span>
+        <span id="overlaysSummaryCount" class="overlays-summary-count"></span>
+      </summary>
+      <div class="overlays-controls">
+        <button type="button" id="addExplorerOverlayBtn" class="secondary-btn">Add overlay</button>
+        <span class="overlays-hint">Vertical dashed markers drawn over the chart at matching event timestamps. Encoded in the URL so the view is shareable.</span>
+      </div>
+      <div id="overlaysList" class="overlays-list"></div>
+    </details>
 
     <section class="chart-wrap panel">
       <header class="section-head">

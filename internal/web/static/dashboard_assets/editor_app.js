@@ -19,6 +19,18 @@
     databases: [],
     metricsByDB: new Map(),
     eventsByDB: new Map(),
+    // Per-db internal-events catalog (when the db is "internal"),
+    // shaped as [{group, events: [{name, description, value_type}]}].
+    // Populated by loadEventsForDB. Currently unused by the overlay
+    // editor (which uses native datalist autocomplete) but kept for
+    // future use by other UI surfaces.
+    internalEventsCatalog: null,
+    // Debounce timers for per-overlay "recent matches" preview
+    // fetches. Keyed by overlay index within the currently selected
+    // widget; reset on widget switch since the editor re-renders the
+    // whole card every time.
+    overlayPreviewTimers: new Map(),
+    overlayPreviewCache: new Map(),
     selectedGroupId: "",
     selectedWidgetId: "",
     expandedGroups: new Set(),
@@ -282,8 +294,44 @@
     try {
       const payload = await fetchJSON(apiURL("/api/v1/events/catalog?db=" + encodeURIComponent(db)));
       const items = (payload.data && payload.data.result) || [];
-      const names = items.map((it) => it.name).filter(Boolean).sort();
-      state.eventsByDB.set(db, names);
+      const names = items.map((it) => it.name).filter(Boolean);
+      // For the engine's `internal` db, also fold in every event name
+      // the internal-events registry knows about, even if it hasn't
+      // actually been emitted yet (and so isn't in the per-db events
+      // catalog). Lets operators picker-complete "nanotdb.partition.*"
+      // before the first partition has sealed.
+      if (db === "internal") {
+        try {
+          const ie = await fetchJSON(apiURL("/api/v1/internal-events/catalog"));
+          const groups = (ie.data && ie.data.groups) || [];
+          // Cache the grouped catalog for the overlay picker's
+          // group-headers rendering. We keep the raw [{name,
+          // events:[...]}] shape so the picker can avoid an extra
+          // fetch when the overlay db is "internal".
+          state.internalEventsCatalog = groups.map((g) => ({
+            name: g.name || "",
+            events: (g.events || [])
+              .filter((e) => e && e.name)
+              .map((e) => ({
+                name: e.name,
+                value_type: e.value_type,
+                description: e.description || "",
+              })),
+          })).filter((g) => g.events.length > 0);
+          groups.forEach((g) => {
+            (g.events || []).forEach((e) => {
+              if (e && e.name) {
+                names.push(e.name);
+              }
+            });
+          });
+        } catch (err) {
+          // Older nanotdb without the endpoint — fall back to the
+          // events-catalog list we already have.
+        }
+      }
+      const dedup = Array.from(new Set(names)).sort();
+      state.eventsByDB.set(db, dedup);
     } catch (err) {
       state.eventsByDB.set(db, []);
     }
@@ -302,7 +350,12 @@
   }
 
   async function loadDatabasesAndMetrics() {
-    const payload = await fetchJSON(apiURL("/api/v1/databases"));
+    // include_internal=true so widgets editing the internal-events
+    // feed can pick "internal" from the db dropdown. The public
+    // /api/v1/databases route hides it by default to keep ordinary
+    // dashboards from displaying engine telemetry as a user db, but
+    // the editor needs the full list.
+    const payload = await fetchJSON(apiURL("/api/v1/databases?include_internal=true"));
     const databases = ((payload.data && payload.data.result) || []).slice().sort();
     state.databases = databases;
     await Promise.all(databases.map((db) => loadMetricsForDB(db)));
@@ -386,11 +439,19 @@
   function refreshExistingWidgetSelect() {
     const group = selectedGroup();
     const options = ['<option value="">Shared widget</option>'];
-    widgetIDs().sort().forEach((widgetId) => {
-      if (!group || group.widgets.includes(widgetId)) {
+    // Show the user-visible widget title in the dropdown (with the
+    // auto-generated ID as fallback). Widget IDs are hidden from the
+    // editor UI, so titles are the only stable label users recognise.
+    const entries = widgetIDs().map((id) => {
+      const widget = state.draftConfig.widgets[id] || {};
+      return { id, label: widget.title || id };
+    });
+    entries.sort((a, b) => a.label.localeCompare(b.label));
+    entries.forEach(({ id, label }) => {
+      if (!group || group.widgets.includes(id)) {
         return;
       }
-      options.push('<option value="' + escapeHTML(widgetId) + '">' + escapeHTML(widgetId) + '</option>');
+      options.push('<option value="' + escapeHTML(id) + '">' + escapeHTML(label) + '</option>');
     });
     existingWidgetSelect.innerHTML = options.join("");
   }
@@ -423,7 +484,6 @@
         '</summary>' +
         '<div class="accordion-body">' +
           '<div class="form-grid">' +
-            '<label>Group ID<input type="text" data-action="group-id" value="' + escapeHTML(group.id) + '" /></label>' +
             '<label>Label<input type="text" data-action="group-label" value="' + escapeHTML(group.label || "") + '" /></label>' +
           '</div>' +
         '</div>';
@@ -471,18 +531,6 @@
         state.expandedGroups.delete(group.id);
         groups.splice(index, 1);
         ensureSelection();
-        renderAll();
-        schedulePreview();
-        markDirty();
-      });
-      card.querySelector('[data-action="group-id"]').addEventListener("change", (event) => {
-        const nextID = uniqueID(groups.filter((_, idx) => idx !== index).map((item) => item.id), event.target.value || group.id);
-        group.id = nextID;
-        if (state.selectedGroupId === group.id) {
-          state.selectedGroupId = nextID;
-        } else if (state.selectedGroupId === event.target.defaultValue) {
-          state.selectedGroupId = nextID;
-        }
         renderAll();
         schedulePreview();
         markDirty();
@@ -583,6 +631,122 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  // ---------------------------------------------------------------------
+  // Event-overlay picker — renders the overlay card with a real
+  // dropdown of event names scoped to the chosen db, plus a custom-
+  // pattern toggle for wildcards. Also renders an inline "recent
+  // matches" preview that auto-refreshes 300ms after each change.
+  // ---------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------
+  // Event-overlay card rendering. Uses the same native datalist
+  // autocomplete pattern as the metric query field: one text input
+  // wired to the global #eventOptions datalist. Operators get type-
+  // ahead suggestions for known event names and can still type a
+  // wildcard pattern (e.g. `disk.*`) for the custom-pattern case.
+  // The card also renders an inline "recent matches" preview that
+  // auto-refreshes 300ms after each change.
+  // ---------------------------------------------------------------------
+
+  // renderOverlayCardHTML returns the full HTML for one overlay
+  // card. Handlers for [data-overlay-field] inputs are wired by the
+  // overlay-binding section of renderWidgetEditor.
+  function renderOverlayCardHTML(overlay, oi, draftCfg) {
+    const overlayDB = overlay.db || overlay.database || (draftCfg && draftCfg.default_db) || "";
+    const currentValue = overlay && overlay.event_name_pattern || "";
+
+    const previewHTML =
+      '<div class="overlay-preview" data-overlay-preview="' + oi + '">' +
+        '<div class="overlay-preview-head">Recent matches</div>' +
+        '<div class="overlay-preview-body" data-overlay-preview-body="' + oi + '">' +
+          '<div class="overlay-preview-empty">Pick an event to preview recent matches.</div>' +
+        '</div>' +
+      '</div>';
+
+    return (
+      '<div class="series-card overlay-card" data-overlay-index="' + oi + '">' +
+        '<div class="series-body">' +
+          '<div class="overlay-grid">' +
+            '<label>Database<select data-overlay-field="db">' + dbOptionsHTML(overlayDB, true) + '</select></label>' +
+            '<label class="overlay-event-control">Event' +
+              '<input type="text" list="eventOptions" data-overlay-field="event_name_pattern" placeholder="e.g. nanotdb.mqtt.connected or disk.*" value="' + escapeHTML(currentValue) + '" />' +
+            '</label>' +
+            '<label>Label<input type="text" data-overlay-field="label" placeholder="(optional)" value="' + escapeHTML(overlay.label || "") + '" /></label>' +
+            '<label>Color<input type="text" data-overlay-field="color" placeholder="e.g. #c00 or red" value="' + escapeHTML(overlay.color || "") + '" /></label>' +
+            '<label>Limit<input type="number" min="1" step="1" data-overlay-field="event_limit" value="' + escapeHTML(overlay.event_limit || 200) + '" /></label>' +
+          '</div>' +
+          previewHTML +
+          '<div class="series-tools">' +
+            '<button type="button" class="editor-btn icon-btn" data-overlay-action="remove" title="Remove overlay" aria-label="Remove overlay">✕</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  // attachOverlayPickerHandlers is intentionally empty: the simple
+  // datalist input is wired via the standard [data-overlay-field]
+  // change/input listeners in renderWidgetEditor. Kept as a no-op so
+  // older call sites don't need to be renamed.
+  function attachOverlayPickerHandlers(_card, _overlay, _oi) {}
+
+  // schedulePreviewFetch debounces a /api/v1/events query for the
+  // given overlay's current (db, pattern) and renders the result in
+  // the overlay-preview body. 300ms debounce per spec.
+  function schedulePreviewFetch(overlay, oi) {
+    const prev = state.overlayPreviewTimers.get(oi);
+    if (prev != null) {
+      window.clearTimeout(prev);
+    }
+    const timer = window.setTimeout(() => {
+      void renderOverlayPreview(overlay, oi);
+    }, 300);
+    state.overlayPreviewTimers.set(oi, timer);
+  }
+
+  async function renderOverlayPreview(overlay, oi) {
+    const body = document.querySelector('[data-overlay-preview-body="' + oi + '"]');
+    if (!body) return;
+    const db = overlay.db || overlay.database || (state.draftConfig && state.draftConfig.default_db) || "";
+    const pattern = (overlay && overlay.event_name_pattern || "").trim();
+    if (!db || !pattern) {
+      body.innerHTML = '<div class="overlay-preview-empty">Pick an event to preview recent matches.</div>';
+      return;
+    }
+    body.innerHTML = '<div class="overlay-preview-empty">Loading…</div>';
+    try {
+      const end = new Date();
+      const start = new Date(end.getTime() - 60 * 60 * 1000); // last 1h
+      const url = apiURL(
+        "/api/v1/events?db=" + encodeURIComponent(db) +
+        "&name=" + encodeURIComponent(pattern) +
+        "&start=" + encodeURIComponent(start.toISOString()) +
+        "&end=" + encodeURIComponent(end.toISOString()) +
+        "&limit=5"
+      );
+      const payload = await fetchJSON(url);
+      const events = (payload.data && payload.data.result) || [];
+      if (events.length === 0) {
+        body.innerHTML = '<div class="overlay-preview-empty">No matches in the last hour.</div>';
+        return;
+      }
+      const rows = events.map((evt) => {
+        const t = Number(evt && evt.ts);
+        const when = Number.isFinite(t) ? new Date(t / 1e6).toLocaleTimeString() : "?";
+        const val = (typeof evt.int32 === "number" ? evt.int32 : (typeof evt.float32 === "number" ? evt.float32 : ""));
+        const valText = val === "" ? "" : ' <span class="overlay-preview-value">' + escapeHTML(String(val)) + '</span>';
+        return '<div class="overlay-preview-row">' +
+          '<span class="overlay-preview-time">' + escapeHTML(when) + '</span>' +
+          '<span class="overlay-preview-name codeish">' + escapeHTML(evt.name || "") + '</span>' +
+          valText +
+        '</div>';
+      }).join("");
+      body.innerHTML = rows;
+    } catch (err) {
+      body.innerHTML = '<div class="overlay-preview-empty">Preview failed: ' + escapeHTML(err.message || String(err)) + '</div>';
+    }
+  }
+
   function renderWidgetEditor() {
     const widget = selectedWidget();
     const widgetId = state.selectedWidgetId;
@@ -628,12 +792,16 @@
           : (item.label || ("Series " + (idx + 1))));
       // Source toggle is line_chart-only. Aggregate_band and event_log are
       // never user-switchable here.
-      const sourceToggle = isLineChart && !isAggregateBand ? (
-        '<div class="series-source-toggle">' +
-          '<label><input type="radio" data-field="source-mode" value="metric"' + (isEventBacked ? '' : ' checked') + '> Metric</label>' +
-          '<label><input type="radio" data-field="source-mode" value="event"' + (isEventBacked ? ' checked' : '') + '> Event</label>' +
-        '</div>'
-      ) : '';
+      // Source mode is line_chart-only (aggregate_band and event_log
+      // are never user-switchable here). Rendered as a labeled select
+      // inside the primary grid so it lines up with DB/Query/Label and
+      // styles consistently with the other controls.
+      const sourceSelect = isLineChart && !isAggregateBand
+        ? ('<label title="Pick whether this series is sourced from a metric (time-bucketed aggregate) or from individual events (one point per event).">Source<select data-field="source-mode">' +
+            '<option value="metric"' + (isEventBacked ? '' : ' selected') + '>Metric</option>' +
+            '<option value="event"' + (isEventBacked ? ' selected' : '') + '>Event</option>' +
+          '</select></label>')
+        : '';
       return (
         '<details class="series-card" data-series-index="' + idx + '"' + (openSeriesKey === seriesKey ? ' open' : '') + '>' +
           '<summary class="series-summary">' +
@@ -650,37 +818,27 @@
             '</div>' +
           '</summary>' +
           '<div class="series-body">' +
-            sourceToggle +
             (showEventFields ?
             '<div class="series-grid-primary">' +
-              '<label>Event Name Pattern<input type="text" list="eventOptions" data-field="event_name_pattern" placeholder="e.g. disk.sd_write_probe.*" value="' + escapeHTML(item.event_name_pattern || "") + '" /><span class="field-hint">Supports wildcards with *. Suggestions from catalog.</span></label>' +
+              sourceSelect +
               '<label>Database<select data-field="db">' + dbOptionsHTML(item.db || item.database || "", true) + '</select></label>' +
+              '<label>Event Name Pattern<input type="text" list="eventOptions" data-field="event_name_pattern" placeholder="e.g. disk.sd_write_probe.*" value="' + escapeHTML(item.event_name_pattern || "") + '" title="Supports wildcards with *. Suggestions come from the catalog." /></label>' +
               '<label>Limit<input type="number" min="1" step="1" data-field="event_limit" value="' + escapeHTML(item.event_limit || (isEventBacked ? 1000 : 10)) + '" /></label>' +
               (isEventBacked ? '<label>Label<input type="text" data-field="label" value="' + escapeHTML(item.label || "") + '" /></label>' : '') +
             '</div>' :
             '<div class="series-grid-primary">' +
-              '<label>Query<input type="text" list="metricOptions" data-field="query" value="' + escapeHTML(item.query || item.metric || "") + '" /></label>' +
+              sourceSelect +
               '<label>Database<select data-field="db">' + dbOptionsHTML(item.db || item.database || "", true) + '</select></label>' +
+              '<label>Query<input type="text" list="metricOptions" data-field="query" value="' + escapeHTML(item.query || item.metric || "") + '" /></label>' +
               (isAggregateBand ? '' : '<label>Label<input type="text" data-field="label" value="' + escapeHTML(item.label || "") + '" /></label>') +
               (isAggregateBand && !usesAggregateBandShortcut ? '<label>Aggregate<input type="text" data-field="aggregate" placeholder="e.g. avg" value="' + escapeHTML(item.aggregate || "") + '" /></label>' : '') +
+              (!isAggregateBand ? '<label>Aggregate<input type="text" list="aggregateOptions" data-field="aggregate" placeholder="e.g. ' + escapeHTML(aggregateCatalog.default || 'avg') + '" value="' + escapeHTML(item.aggregate || "") + '" /></label>' : '') +
+              '<label>Factor<input type="number" step="any" data-field="transform.factor" value="' + escapeHTML(transform.factor == null ? "" : transform.factor) + '" /></label>' +
+              '<label>Offset<input type="number" step="any" data-field="transform.offset" value="' + escapeHTML(transform.offset == null ? "" : transform.offset) + '" /></label>' +
+              '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
+              '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
+              '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /></label>' +
             '</div>') +
-            (showEventFields ? '' :
-            (!isAggregateBand ?
-            '<div class="series-grid-secondary">' +
-              '<label>Aggregate<input type="text" list="aggregateOptions" data-field="aggregate" placeholder="e.g. ' + escapeHTML(aggregateCatalog.default || 'avg') + '" value="' + escapeHTML(item.aggregate || "") + '" /></label>' +
-              '<label>Factor<input type="number" step="any" data-field="transform.factor" value="' + escapeHTML(transform.factor == null ? "" : transform.factor) + '" /></label>' +
-              '<label>Offset<input type="number" step="any" data-field="transform.offset" value="' + escapeHTML(transform.offset == null ? "" : transform.offset) + '" /></label>' +
-              '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
-              '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
-              '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /><span class="field-hint">Use <code>{duration}</code> for durations/uptime.</span></label>' +
-            '</div>' :
-            '<div class="series-grid-secondary">' +
-              '<label>Factor<input type="number" step="any" data-field="transform.factor" value="' + escapeHTML(transform.factor == null ? "" : transform.factor) + '" /></label>' +
-              '<label>Offset<input type="number" step="any" data-field="transform.offset" value="' + escapeHTML(transform.offset == null ? "" : transform.offset) + '" /></label>' +
-              '<label>Unit<input type="text" data-field="transform.unit" value="' + escapeHTML(transform.unit || "") + '" /></label>' +
-              '<label>Decimals<input type="number" step="1" min="0" data-field="transform.decimals" value="' + escapeHTML(transform.decimals == null ? "" : transform.decimals) + '" /></label>' +
-              '<label>Format<input type="text" data-field="transform.format" placeholder="e.g. {value} or {duration}" value="' + escapeHTML(transform.format || "") + '" title="Format template. Use {value} for the raw/scaled metric, or {duration} for a human-readable duration (e.g. 5d 4h 30m)." /><span class="field-hint">Use <code>{duration}</code> for durations/uptime.</span></label>' +
-            '</div>')) +
             (isEventLog || isLineChart ? '' :
             '<div class="series-grid-thresholds">' +
               '<label>Threshold<select data-field="thresholds.direction">' +
@@ -708,22 +866,7 @@
         '</div>' +
         (overlays.length === 0
           ? '<p class="editor-note">No overlays. Add one to drop vertical markers on this chart at the timestamps of matching events.</p>'
-          : overlays.map((ov, oi) => (
-              '<div class="series-card overlay-card" data-overlay-index="' + oi + '">' +
-                '<div class="series-body">' +
-                  '<div class="series-grid-primary">' +
-                    '<label>Event Name Pattern<input type="text" list="eventOptions" data-overlay-field="event_name_pattern" placeholder="e.g. temp.over*" value="' + escapeHTML(ov.event_name_pattern || "") + '" /><span class="field-hint">Supports wildcards with *.</span></label>' +
-                    '<label>Database<select data-overlay-field="db">' + dbOptionsHTML(ov.db || ov.database || "", true) + '</select></label>' +
-                    '<label>Label<input type="text" data-overlay-field="label" placeholder="(optional)" value="' + escapeHTML(ov.label || "") + '" /></label>' +
-                    '<label>Color<input type="text" data-overlay-field="color" placeholder="e.g. #c00 or red" value="' + escapeHTML(ov.color || "") + '" /></label>' +
-                    '<label>Limit<input type="number" min="1" step="1" data-overlay-field="event_limit" value="' + escapeHTML(ov.event_limit || 200) + '" /></label>' +
-                  '</div>' +
-                  '<div class="series-tools">' +
-                    '<button type="button" class="editor-btn icon-btn" data-overlay-action="remove" title="Remove overlay" aria-label="Remove overlay">✕</button>' +
-                  '</div>' +
-                '</div>' +
-              '</div>'
-            )).join("")) +
+          : overlays.map((ov, oi) => renderOverlayCardHTML(ov, oi, state.draftConfig)).join("")) +
       '</section>'
     ) : '';
 
@@ -731,7 +874,6 @@
       '<div class="editor-form">' +
         '<section class="editor-section">' +
           '<div class="widget-top-grid">' +
-            '<label>Widget ID<input id="widgetIdInput" type="text" value="' + escapeHTML(widgetId) + '" /></label>' +
             '<label>Title<input id="widgetTitleInput" type="text" value="' + escapeHTML(widget.title || "") + '" /></label>' +
             '<label>Type<select id="widgetTypeSelect">' +
               '<option value="number"' + (widgetType === "number" ? ' selected' : '') + '>Single Number</option>' +
@@ -741,14 +883,10 @@
               '<option value="event_log"' + (widgetType === "event_log" ? ' selected' : '') + '>Event Log</option>' +
             '</select></label>' +
             '<label>Refresh Sec<input id="widgetRefreshInput" type="number" min="0" step="1" value="' + escapeHTML(widget.refresh_sec == null ? (cfg.refreshSeconds || 10) : widget.refresh_sec) + '" /></label>' +
+            (isLineChart || isEventLog ? '<label>Lookback<input id="widgetLookbackInput" type="text" value="' + escapeHTML(widget.lookback || "1h") + '" /></label>' : '') +
+            (isLineChart ? '<label>' + (isAggregateBand ? 'Band / Interval' : 'Interval') + '<input id="widgetIntervalInput" type="text" value="' + escapeHTML(widget.interval || "30s") + '" /></label>' : '') +
             '<label class="toggle-field" title="Toggle automatic refresh"><input id="widgetAutoRefreshInput" type="checkbox"' + (widget.auto_refresh !== false ? ' checked' : '') + ' /><span class="toggle-switch" aria-hidden="true"></span><span class="toggle-label">Auto refresh</span></label>' +
           '</div>' +
-          (isLineChart || isEventLog ?
-            '<div class="widget-settings-grid">' +
-              '<label>Lookback<input id="widgetLookbackInput" type="text" value="' + escapeHTML(widget.lookback || "1h") + '" /></label>' +
-              (isLineChart ? '<label>' + (isAggregateBand ? 'Band / Interval' : 'Interval') + '<input id="widgetIntervalInput" type="text" value="' + escapeHTML(widget.interval || "30s") + '" /></label>' : '') +
-            '</div>' :
-            '') +
           (isAggregateBand ? '<p class="editor-note">Aggregate band charts use widget interval as the band window. With one series, just choose the metric. Add more series only if you want manual min/avg/max aggregate control.</p>' : '') +
           (effectiveWidgetType === "line_chart" ? '<p class="editor-note">Line-chart aggregate buckets use widget interval for every series. Per-series windows are not used. Event-backed series ignore aggregate/window — each event becomes one scatter point.</p>' : '') +
           (isSingleNumber ? '<p class="editor-note">Single number widgets use only the first series.</p>' : '') +
@@ -763,13 +901,6 @@
         overlaysSection +
       '</div>';
 
-    widgetEditorEl.querySelector("#widgetIdInput").addEventListener("change", (event) => {
-      const nextID = renameWidget(widgetId, event.target.value);
-      state.selectedWidgetId = nextID;
-      renderAll();
-      schedulePreview();
-      markDirty();
-    });
     widgetEditorEl.querySelector("#widgetTitleInput").addEventListener("change", (event) => {
       widget.title = event.target.value;
       renderWidgets();
@@ -842,7 +973,11 @@
       schedulePreview();
       markDirty();
     });
-    widgetEditorEl.querySelectorAll(".series-card").forEach((card) => {
+    // Series cards are <details class="series-card">. Overlay cards reuse
+    // the series-card class for styling but are <div>s with their own
+    // wiring further down; the :not(.overlay-card) guard keeps this loop
+    // from trying to wire a .series-summary that overlay cards do not have.
+    widgetEditorEl.querySelectorAll("details.series-card:not(.overlay-card)").forEach((card) => {
       const seriesIndex = Number(card.dataset.seriesIndex);
       const seriesKey = widgetId + ':' + seriesIndex;
       const seriesItem = widget.series[seriesIndex];
@@ -1062,14 +1197,22 @@
           const value = event.target.value;
           if (field === "event_name_pattern") {
             overlay.event_name_pattern = value;
+            schedulePreviewFetch(overlay, overlayIdx);
           } else if (field === "db") {
             delete overlay.database;
             if (value) {
               overlay.db = value;
               await loadMetricsForDB(value);
+              await loadEventsForDB(value);
               populateMetricDatalist();
+              populateEventDatalist();
+              // Redraw so the db dropdown reflects the new selection
+              // and the inline preview re-fetches under the new db.
+              renderWidgetEditor();
+              schedulePreviewFetch(overlay, overlayIdx);
             } else {
               delete overlay.db;
+              renderWidgetEditor();
             }
           } else if (field === "label") {
             if (value) overlay.label = value; else delete overlay.label;
@@ -1087,6 +1230,23 @@
           markDirty();
         });
       });
+      // Live updates for the event_name_pattern text input: keep the
+      // preview, draft, and dashboard in sync on every keystroke so
+      // operators see recent matches without losing focus on blur.
+      const patternEl = card.querySelector('[data-overlay-field="event_name_pattern"]');
+      if (patternEl) {
+        patternEl.addEventListener("input", () => {
+          overlay.event_name_pattern = patternEl.value;
+          schedulePreviewFetch(overlay, overlayIdx);
+          schedulePreview();
+          markDirty();
+        });
+      }
+      // No-op kept so removing the old picker doesn't break call sites.
+      attachOverlayPickerHandlers(card, overlay, overlayIdx);
+      // Kick a preview fetch so the recent-matches list populates on
+      // first render without a click.
+      schedulePreviewFetch(overlay, overlayIdx);
     });
   }
 
@@ -1368,74 +1528,12 @@
     return true;
   }
 
-  function mergeUPlotHooks(a, b) {
-    const out = {};
-    const keys = new Set(Object.keys(a || {}).concat(Object.keys(b || {})));
-    keys.forEach((k) => {
-      const aHooks = (a && a[k]) || [];
-      const bHooks = (b && b[k]) || [];
-      out[k] = aHooks.concat(bHooks);
-    });
-    return out;
-  }
-
-  function eventOverlayHooks(overlays) {
-    return {
-      draw: [
-        (u) => {
-          const ctx = u.ctx;
-          const plotTop = u.bbox.top;
-          const plotBottom = u.bbox.top + u.bbox.height;
-          ctx.save();
-          for (const layer of overlays) {
-            const stroke = isValidCssColorBasic(layer.color) ? layer.color : overlayDefaultColor(layer.label);
-            ctx.strokeStyle = stroke;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 3]);
-            for (const m of (layer.markers || [])) {
-              const xPx = u.valToPos(m.x, "x", true);
-              if (!Number.isFinite(xPx) || xPx < u.bbox.left || xPx > u.bbox.left + u.bbox.width) {
-                continue;
-              }
-              ctx.beginPath();
-              ctx.moveTo(Math.round(xPx) + 0.5, plotTop);
-              ctx.lineTo(Math.round(xPx) + 0.5, plotBottom);
-              ctx.stroke();
-            }
-          }
-          ctx.restore();
-        },
-      ],
-    };
-  }
-
-  function isValidCssColorBasic(value) {
-    if (!value || typeof value !== "string") {
-      return false;
-    }
-    const v = value.trim();
-    if (v.length === 0) {
-      return false;
-    }
-    if (v[0] === "#") {
-      const hex = v.slice(1);
-      if (hex.length !== 3 && hex.length !== 4 && hex.length !== 6 && hex.length !== 8) {
-        return false;
-      }
-      return /^[0-9a-fA-F]+$/.test(hex);
-    }
-    return v.length <= 32 && /^[A-Za-z]+$/.test(v);
-  }
-
-  function overlayDefaultColor(key) {
-    const palette = ["#fb923c", "#a78bfa", "#22d3ee", "#f87171", "#f472b6", "#facc15"];
-    let h = 0;
-    const s = String(key || "");
-    for (let i = 0; i < s.length; i++) {
-      h = (h * 31 + s.charCodeAt(i)) >>> 0;
-    }
-    return palette[h % palette.length];
-  }
+  // Overlay rendering helpers live in common_assets/dashboard_utils.js
+  // so the dashboard, editor, and explorer all share one path.
+  const mergeUPlotHooks = NANOTDB_UTILS.mergeUPlotHooks;
+  const eventOverlayHooks = NANOTDB_UTILS.eventOverlayHooks;
+  const isValidCssColorBasic = NANOTDB_UTILS.isValidCssColorBasic;
+  const overlayDefaultColor = NANOTDB_UTILS.overlayDefaultColor;
 
   // fetchEventSeriesPoints / fetchEventOverlayMarkers: editor-side mirror
   // of dashboard_app.js's helpers, used by the preview pane so the
@@ -1482,35 +1580,12 @@
   }
 
   async function fetchEventOverlayMarkers(db, overlay, lookbackSec) {
-    const pattern = overlay && (overlay.event_name_pattern || "").trim();
-    if (!db || !pattern) {
-      return [];
-    }
-    const end = new Date();
-    const start = new Date(end.getTime() - lookbackSec * 1000);
-    const limit = overlay && overlay.event_limit ? Math.max(1, Math.min(1000, Number(overlay.event_limit) || 200)) : 200;
-    const eventsURL = apiURL(
-      "/api/v1/events?db=" + encodeURIComponent(db) +
-      "&name=" + encodeURIComponent(pattern) +
-      "&start=" + encodeURIComponent(start.toISOString()) +
-      "&end=" + encodeURIComponent(end.toISOString()) +
-      "&limit=" + limit
+    return NANOTDB_UTILS.fetchEventOverlayMarkers(
+      (typeof cfg !== "undefined" && cfg && cfg.apiBaseURL) || "",
+      db,
+      overlay,
+      lookbackSec
     );
-    const payload = await fetchJSON(eventsURL);
-    const events = (payload.data && payload.data.result) ? payload.data.result : [];
-    const out = [];
-    for (const evt of events) {
-      const ts = Number(evt && evt.ts);
-      if (!Number.isFinite(ts)) {
-        continue;
-      }
-      out.push({
-        x: ts / 1e9,
-        color: overlay.color || "",
-        label: overlay.label || pattern,
-      });
-    }
-    return out;
   }
 
 
@@ -1799,20 +1874,42 @@
       card.appendChild(foot);
       containerEl.appendChild(card);
 
-      const series = (widget.series || [])[0];
-      const db = series && seriesDB(series, dashboardCfg);
-      const eventNamePattern = series && (series.event_name_pattern || "").trim();
-      if (!db || !eventNamePattern) {
-        foot.textContent = "missing db/event_name_pattern";
+      // Match the dashboard widget's multi-series shape: every
+      // series with a non-empty event_name_pattern contributes to one
+      // merged feed. Error messages distinguish "no pattern set
+      // anywhere" from "pattern set but db is empty" so the operator
+      // knows which field to fix.
+      const seriesAll = widget.series || [];
+      const seriesWithPattern = seriesAll.filter((s) => s && (s.event_name_pattern || "").trim() !== "");
+      if (seriesWithPattern.length === 0) {
+        foot.textContent = "missing event_name_pattern on every series";
+        return;
+      }
+      const seriesWithDB = seriesWithPattern.filter((s) => seriesDB(s, dashboardCfg));
+      if (seriesWithDB.length === 0) {
+        foot.textContent = "missing db (set per-series or default_db on the dashboard)";
         return;
       }
       const lookbackSec = parseDurationSeconds(widget.lookback || "1h", 3600);
       const end = new Date();
       const start = new Date(end.getTime() - lookbackSec * 1000);
-      const limit = series && series.event_limit ? series.event_limit : 10;
-      const eventsURL = apiURL(`/api/v1/events?db=${encodeURIComponent(db)}&name=${encodeURIComponent(eventNamePattern)}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}&limit=${limit}`);
-      const payload = await fetchJSON(eventsURL);
-      const events = payload.data && payload.data.result ? payload.data.result : [];
+      const fetched = await Promise.all(seriesWithDB.map(async (s) => {
+        const db = seriesDB(s, dashboardCfg);
+        const pattern = (s.event_name_pattern || "").trim();
+        const limit = s.event_limit ? s.event_limit : 10;
+        const url = apiURL(`/api/v1/events?db=${encodeURIComponent(db)}&name=${encodeURIComponent(pattern)}&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}&limit=${limit}`);
+        try {
+          const payload = await fetchJSON(url);
+          return (payload.data && payload.data.result) ? payload.data.result : [];
+        } catch (err) {
+          return [];
+        }
+      }));
+      const merged = [];
+      fetched.forEach((evts) => evts.forEach((e) => merged.push(e)));
+      merged.sort((a, b) => (b.ts || b.T || 0) - (a.ts || a.T || 0));
+      const totalCap = seriesWithDB.reduce((sum, s) => sum + (s.event_limit ? s.event_limit : 10), 0);
+      const events = merged.slice(0, totalCap);
       if (events.length === 0) {
         foot.textContent = "no events";
         return;
@@ -1827,30 +1924,8 @@
         timeCell.className = "eventlog-cell eventlog-time";
         const tsNs = evt.ts || evt.T;
         timeCell.textContent = Number.isInteger(tsNs) ? new Date(Math.floor(tsNs / 1000000)).toLocaleTimeString() : "--";
-        const valueCell = document.createElement("span");
-        valueCell.className = "eventlog-cell eventlog-value";
-        const pl = evt.payload || evt.p;
-        let valueText = "";
-        if (evt.value !== undefined && evt.value !== null) {
-          valueText = String(evt.value);
-        } else if (typeof evt.int32 === "number") {
-          valueText = String(evt.int32);
-        } else if (typeof evt.float32 === "number") {
-          valueText = String(evt.float32);
-        } else if (evt.v !== undefined && evt.v !== null) {
-          valueText = String(evt.v);
-        }
-        if (!valueText && pl && typeof pl === "object") {
-          if (typeof pl.latency_ms === "number") {
-            valueText = Math.round(pl.latency_ms) + " ms";
-          } else if (typeof pl.value === "number") {
-            valueText = String(pl.value);
-          }
-        }
-        valueCell.textContent = valueText;
         row.appendChild(nameCell);
         row.appendChild(timeCell);
-        row.appendChild(valueCell);
         eventsEl.appendChild(row);
       });
       foot.textContent = "preview updated " + new Date().toLocaleTimeString();
@@ -1895,7 +1970,32 @@
     requestAnimationFrame(() => rebalanceSingleNumberRows(pane));
   }
 
+  // flushEditorInputsToState walks every text input currently bound to a
+  // series or overlay field and copies its DOM value back into
+  // state.draftConfig. The per-field input/change listeners normally do
+  // this on every keystroke, but if a save is triggered before the
+  // listener fires (or never fires — e.g. some browsers when picking a
+  // datalist option) the JSON we send would be stale. Calling this
+  // immediately before validate/save guarantees the request reflects
+  // what the user sees in the editor.
+  function flushEditorInputsToState() {
+    const widget = selectedWidget();
+    if (!widget) return;
+    if (Array.isArray(widget.event_overlays)) {
+      widgetEditorEl.querySelectorAll(".overlay-card").forEach((card) => {
+        const overlayIdx = Number(card.dataset.overlayIndex);
+        const overlay = widget.event_overlays[overlayIdx];
+        if (!overlay) return;
+        const patternEl = card.querySelector('[data-overlay-field="event_name_pattern"]');
+        if (patternEl) {
+          overlay.event_name_pattern = patternEl.value;
+        }
+      });
+    }
+  }
+
   async function validateDraft() {
+    flushEditorInputsToState();
     await fetchJSON(apiURL("/api/dashboard-config/validate"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1904,6 +2004,7 @@
   }
 
   async function saveDraft() {
+    flushEditorInputsToState();
     return fetchJSON(apiURL("/api/dashboard-config"), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -1920,10 +2021,12 @@
       renderAll();
       schedulePreview();
       markDirty();
-      const groupIDInput = groupsListEl.querySelector('details[data-group-id="' + id + '"] [data-action="group-id"]');
-      if (groupIDInput) {
-        groupIDInput.focus();
-        groupIDInput.select();
+      // Focus the new group's label input so the user can rename it
+      // immediately. Group IDs are auto-generated and hidden.
+      const groupLabelInput = groupsListEl.querySelector('details[data-group-id="' + id + '"] [data-action="group-label"]');
+      if (groupLabelInput) {
+        groupLabelInput.focus();
+        groupLabelInput.select();
       }
     });
 
@@ -1956,10 +2059,12 @@
       renderAll();
       schedulePreview();
       markDirty();
-      const widgetIDInput = widgetEditorEl.querySelector("#widgetIdInput");
-      if (widgetIDInput) {
-        widgetIDInput.focus();
-        widgetIDInput.select();
+      // Focus the new widget's Title input so the user can rename it
+      // immediately. Widget IDs are auto-generated and hidden.
+      const widgetTitleInput = widgetEditorEl.querySelector("#widgetTitleInput");
+      if (widgetTitleInput) {
+        widgetTitleInput.focus();
+        widgetTitleInput.select();
       }
     });
 

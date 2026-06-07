@@ -9,8 +9,25 @@ import (
 
 // Config is the top-level drip configuration loaded from drip.toml.
 type Config struct {
-	Drip       DripConfig       `toml:"drip"`
-	Collectors CollectorsConfig `toml:"collectors"`
+	Drip           DripConfig               `toml:"drip"`
+	Collectors     CollectorsConfig         `toml:"collectors"`
+	InternalEvents DripInternalEventsConfig `toml:"internal_events"`
+	Admin          DripAdminConfig          `toml:"admin"`
+}
+
+// DripInternalEventsConfig holds drip's per-install internal-events
+// settings. See docs/INTERNAL_EVENTS.md for the spec.
+type DripInternalEventsConfig struct {
+	Enabled    bool              `toml:"enabled"`
+	TargetDB   string            `toml:"target_db"`
+	QueueDepth int               `toml:"queue_depth"`
+	Groups     map[string]string `toml:"groups"`
+}
+
+// DripAdminConfig holds the admin HTTP listener config. Empty Listen
+// disables the listener.
+type DripAdminConfig struct {
+	Listen string `toml:"listen"`
 }
 
 // DripConfig holds global runtime settings.
@@ -93,6 +110,13 @@ func defaultConfig() Config {
 			CollectionIntervalMS: 10000,
 			TimeoutMS:            1500,
 		},
+		InternalEvents: DripInternalEventsConfig{
+			Enabled:    true,
+			TargetDB:   "internal",
+			QueueDepth: 1024,
+			Groups:     map[string]string{},
+		},
+		Admin: DripAdminConfig{Listen: ""},
 		Collectors: CollectorsConfig{
 			CPU: CPUCollectorConfig{
 				Enabled:    true,
@@ -116,7 +140,12 @@ func defaultConfig() Config {
 				EveryNCycles:    6,
 				Metric:          "disk.sd_write_probe_ms",
 				EventWhenOverMS: 0,
-				EventName:       "disk.sd_write_probe.slow",
+				// Per docs/INTERNAL_EVENTS.md: drip threshold events live
+				// under the drip.threshold group with names of the form
+				// drip.threshold.<metric>.<state>. Pre-1.x installs that
+				// still emit the old "disk.sd_write_probe.slow" name will
+				// keep working — only the default has changed.
+				EventName: "drip.threshold.disk.sd_write_probe.slow",
 			},
 		},
 	}

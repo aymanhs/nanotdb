@@ -8,13 +8,20 @@
   const filesPane = document.getElementById("filesPane");
   const walPane = document.getElementById("walPane");
   const runtimePane = document.getElementById("runtimePane");
+  const internalEventsPane = document.getElementById("internalEventsPane");
   const panes = {
     overview: overviewPane,
     database: databasePane,
     files: filesPane,
     wal: walPane,
     runtime: runtimePane,
+    "internal-events": internalEventsPane,
   };
+  // The Internal Events tab keeps the catalog drawer open/closed
+  // across refreshes so a redraw doesn't snap it shut while an
+  // operator is looking at it.
+  let internalEventsCatalogOpen = false;
+  let internalEventsToggleBusy = false;
   const tabButtons = Array.from(document.querySelectorAll('.engine-tab'));
   let activeTab = "overview";
   let refreshTimer = null;
@@ -717,6 +724,191 @@
       '</div>';
   }
 
+  // formatInternalEventValue extracts the typed value field from an
+  // event response. Mirrors the dashboard widget's extractor — events
+  // can be int32, float32, or none-typed (no value, just a payload).
+  function formatInternalEventValue(evt) {
+    if (!evt) return '';
+    if (evt.int32 != null) return String(evt.int32);
+    if (evt.float32 != null) return String(evt.float32);
+    if (evt.value != null) return String(evt.value);
+    return '';
+  }
+
+  // formatInternalEventPayload renders a one-line summary of an event
+  // payload — first 8 keys, truncated to 240 chars. The full payload
+  // (as JSON) is also exposed via the row's title attribute so a hover
+  // tooltip reveals everything that didn't fit.
+  function formatInternalEventPayload(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    const entries = Object.entries(payload).slice(0, 8);
+    if (entries.length === 0) return '';
+    const summary = entries.map(([k, v]) => {
+      let val = v;
+      if (typeof v === 'object') {
+        try { val = JSON.stringify(v); } catch (e) { val = String(v); }
+      }
+      return k + '=' + String(val);
+    }).join(' ');
+    return summary.length > 240 ? summary.slice(0, 237) + '...' : summary;
+  }
+
+  // fullInternalEventPayload renders the entire payload object as a
+  // pretty-printed JSON string for use as a tooltip / title attribute.
+  function fullInternalEventPayload(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    try { return JSON.stringify(payload, null, 2); } catch (e) { return String(payload); }
+  }
+
+  // toggleInternalEventsGroup posts an on/off flip to
+  // /api/v1/internal-events/groups, then triggers a redraw on success.
+  // Click-busy guard prevents double-flips while the request is in
+  // flight; the global setInterval will redraw within ~10s either way.
+  async function toggleInternalEventsGroup(group, on) {
+    if (internalEventsToggleBusy) return;
+    internalEventsToggleBusy = true;
+    try {
+      await postJSON(apiURL('/api/v1/internal-events/groups'), { [group]: on ? 'on' : 'off' });
+      await loadInternalEvents();
+    } catch (err) {
+      setStatus(err && err.message ? err.message : 'Toggle failed');
+    } finally {
+      internalEventsToggleBusy = false;
+    }
+  }
+
+  async function loadInternalEvents() {
+    // Three concurrent fetches:
+    //   1. Group state (with source: default | engine.toml | runtime)
+    //   2. Recent nanotdb.* events
+    //   3. Recent drip.* events
+    // The catalog (every defined event) is also fetched so the drawer
+    // can render. Failures of any single call render an inline error
+    // for that subpanel rather than tanking the whole tab.
+    const lookback = 60 * 60; // 1h, in seconds
+    const end = new Date();
+    const start = new Date(end.getTime() - lookback * 1000);
+    const startISO = encodeURIComponent(start.toISOString());
+    const endISO = encodeURIComponent(end.toISOString());
+
+    const [groupsRes, catalogRes, nanoEventsRes, dripEventsRes] = await Promise.all([
+      fetchJSON(apiURL('/api/v1/internal-events/groups')).catch((err) => ({ error: err })),
+      fetchJSON(apiURL('/api/v1/internal-events/catalog')).catch((err) => ({ error: err })),
+      fetchJSON(apiURL('/api/v1/events?db=internal&name=nanotdb.*&start=' + startISO + '&end=' + endISO + '&limit=100')).catch((err) => ({ error: err })),
+      fetchJSON(apiURL('/api/v1/events?db=internal&name=drip.*&start=' + startISO + '&end=' + endISO + '&limit=50')).catch((err) => ({ error: err })),
+    ]);
+
+    const groups = (groupsRes && groupsRes.data && groupsRes.data.groups) || [];
+    const catalog = (catalogRes && catalogRes.data && catalogRes.data.groups) || [];
+    const nanoEvents = (nanoEventsRes && nanoEventsRes.data && nanoEventsRes.data.result) || [];
+    const dripEvents = (dripEventsRes && dripEventsRes.data && dripEventsRes.data.result) || [];
+    const masterEnabled = catalogRes && catalogRes.data && catalogRes.data.master_enabled;
+    const destDB = (catalogRes && catalogRes.data && catalogRes.data.destination_db) || 'internal';
+
+    // Merged feed, newest first. Cap by combined budget so a chatty
+    // burst can't flood the DOM.
+    const recent = [];
+    nanoEvents.forEach((e) => recent.push(e));
+    dripEvents.forEach((e) => recent.push(e));
+    recent.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const recentRows = recent.slice(0, 150).map((evt) => ({
+      time: '<span title="' + escapeHTML(String(evt.ts || '')) + '">' + escapeHTML(new Date((evt.ts || 0) / 1e6).toLocaleString()) + '</span>',
+      name: '<span class="codeish">' + escapeHTML(evt.name || '?') + '</span>',
+      value: escapeHTML(formatInternalEventValue(evt)),
+      payload: '<span class="codeish-soft" title="' + escapeHTML(fullInternalEventPayload(evt.payload)) + '">' + escapeHTML(formatInternalEventPayload(evt.payload)) + '</span>',
+    }));
+
+    // Groups table with inline toggle. A click on the toggle button
+    // posts to /groups; the button is rebuilt on the next redraw.
+    const groupsRows = groups.map((g) => {
+      const stateLabel = g.enabled
+        ? '<span class="badge badge-on">on</span>'
+        : '<span class="badge badge-off">off</span>';
+      const toggleText = g.enabled ? 'Disable' : 'Enable';
+      const next = g.enabled ? 'off' : 'on';
+      const sourceLabel = g.source === 'runtime'
+        ? '<span class="badge badge-runtime">' + g.source + '</span>'
+        : '<span class="badge-soft">' + g.source + '</span>';
+      return {
+        name: '<span class="codeish">' + escapeHTML(g.name) + '</span>',
+        state: stateLabel,
+        defaultState: g.default ? 'on' : 'off',
+        source: sourceLabel,
+        action: '<button type="button" class="link-btn" data-toggle-group="' + escapeHTML(g.name) + '" data-toggle-next="' + next + '">' + toggleText + '</button>',
+      };
+    });
+
+    // Catalog drawer — a collapsible listing of every registered
+    // event. Body is only built when open to avoid the DOM cost when
+    // the drawer is collapsed (common case).
+    const catalogBody = !internalEventsCatalogOpen ? '' :
+      catalog.map((g) => {
+        const events = (g.events || []).map((e) => ({
+          name: '<span class="codeish">' + escapeHTML(e.name) + '</span>',
+          type: e.value_type,
+          units: e.value_units || '-',
+          description: escapeHTML(e.description || ''),
+        }));
+        return '<div class="subpanel catalog-group"><div class="section-head"><h4>' + escapeHTML(g.name) +
+          ' <span class="badge-soft">' + (g.enabled ? 'on' : 'off') + '</span></h4></div>' +
+          renderTable([
+            { key: 'name', label: 'Event' },
+            { key: 'type', label: 'Value' },
+            { key: 'units', label: 'Units' },
+            { key: 'description', label: 'Description' },
+          ], events) + '</div>';
+      }).join('');
+
+    internalEventsPane.innerHTML =
+      '<div class="section-head"><h2>Internal Events</h2><p>Engine and drip lifecycle events flowing into the <span class="codeish">' + escapeHTML(destDB) + '</span> database. ' +
+        (masterEnabled ? '<span class="badge badge-on">master: enabled</span>' : '<span class="badge badge-off">master: disabled</span>') + '</p></div>' +
+      '<div class="stack">' +
+      '<div class="subpanel"><div class="section-head"><h3>Recent Events (last 1h)</h3><p>Merged feed from <span class="codeish">nanotdb.*</span> and <span class="codeish">drip.*</span>, newest first.</p></div>' +
+        (recentRows.length === 0
+          ? '<div class="empty">No internal events in the lookback window.</div>'
+          : renderTable([
+              { key: 'time', label: 'Time' },
+              { key: 'name', label: 'Event' },
+              { key: 'value', label: 'Value' },
+              { key: 'payload', label: 'Payload' },
+            ], recentRows)) +
+      '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Group Toggles</h3><p>Flip per-group emission on or off. Runtime changes do not persist across restart; persistent changes go in <span class="codeish">engine.toml</span>.</p></div>' +
+        (groupsRows.length === 0
+          ? '<div class="empty">No groups defined.</div>'
+          : renderTable([
+              { key: 'name', label: 'Group' },
+              { key: 'state', label: 'State' },
+              { key: 'defaultState', label: 'Default' },
+              { key: 'source', label: 'Source' },
+              { key: 'action', label: '' },
+            ], groupsRows)) +
+      '</div>' +
+      '<div class="subpanel"><div class="section-head"><h3>Catalog Reference <button type="button" class="link-btn" id="internal-events-catalog-toggle">' +
+        (internalEventsCatalogOpen ? 'Hide' : 'Show') + '</button></h3>' +
+        '<p>Every event the engine or drip may emit. Useful for chasing down what a specific name means.</p></div>' +
+        (internalEventsCatalogOpen ? catalogBody : '') +
+      '</div>' +
+      '</div>';
+
+    // Wire up the inline buttons after innerHTML replacement — there
+    // is no JSX, so event listeners go on after each redraw.
+    internalEventsPane.querySelectorAll('button[data-toggle-group]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const group = btn.getAttribute('data-toggle-group');
+        const next = btn.getAttribute('data-toggle-next');
+        toggleInternalEventsGroup(group, next === 'on');
+      });
+    });
+    const catalogToggleBtn = document.getElementById('internal-events-catalog-toggle');
+    if (catalogToggleBtn) {
+      catalogToggleBtn.addEventListener('click', () => {
+        internalEventsCatalogOpen = !internalEventsCatalogOpen;
+        loadInternalEvents();
+      });
+    }
+  }
+
   async function refreshActiveTab() {
     setStatus('Refreshing ' + activeTab + '...');
     try {
@@ -729,6 +921,8 @@
         await loadWAL();
       } else if (activeTab === 'runtime') {
         await loadRuntime();
+      } else if (activeTab === 'internal-events') {
+        await loadInternalEvents();
       }
       setStatus('Updated ' + new Date().toLocaleTimeString());
     } catch (err) {

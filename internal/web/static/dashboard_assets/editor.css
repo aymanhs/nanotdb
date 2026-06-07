@@ -386,9 +386,11 @@
 }
 
 .widget-top-grid {
-  grid-template-columns: minmax(150px, 220px) minmax(220px, 320px) minmax(140px, 180px) minmax(110px, 140px) max-content;
+  /* Single-row widget editor: Title | Type | Refresh | Lookback? |
+     Interval? | Auto refresh. auto-fit lets cells share remaining
+     space evenly and the row wraps only on narrow viewports. */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   align-items: end;
-  justify-content: start;
 }
 
 .widget-settings-grid {
@@ -582,15 +584,18 @@
 .series-grid-thresholds {
   display: grid;
   gap: 8px 10px;
-  align-items: start;
+  align-items: end;
 }
 
 .series-grid-primary {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* All series fields in a single row: DB | Query | Label | Aggregate
+     | Factor | Offset | Unit | Decimals | Format. auto-fit lets the
+     row collapse to fewer columns on narrower viewports. */
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
 }
 
 .series-grid-secondary {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
 }
 
 .series-grid-thresholds {
@@ -692,6 +697,20 @@
   .series-grid-primary,
   .series-grid-secondary,
   .series-grid-thresholds {
+    grid-template-columns: 1fr;
+  }
+}
+/* Event overlay picker styles (.overlay-mode-toggle, .overlay-picker-*,*/
+/* .overlay-preview-*) live in common.css because the same picker is    */
+/* mounted in the Explorer page (which does not load editor.css). Only  */
+/* editor-specific grid columns are kept here — the remove button sits  */
+/* in a separate .series-tools row, so this layout has 5 columns.       */
+.overlay-grid {
+  grid-template-columns: 1fr 2fr 1fr 1fr 80px;
+}
+
+@media (max-width: 760px) {
+  .overlay-grid {
     grid-template-columns: 1fr;
   }
 }

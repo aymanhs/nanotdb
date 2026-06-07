@@ -118,6 +118,8 @@ func main() {
 	mux.HandleFunc("/api/v1/events", handleEvents(eng))
 	mux.HandleFunc("/api/v1/events/catalog", handleEventsCatalog(eng))
 	mux.HandleFunc("/api/v1/events/aggregate", handleEventsAggregate(eng))
+	mux.HandleFunc("/api/v1/internal-events/catalog", handleInternalEventsCatalog(eng))
+	mux.HandleFunc("/api/v1/internal-events/groups", handleInternalEventsGroups(eng))
 	mux.HandleFunc("/api/engine/overview", handleEngineOverview(eng, runtimeCfg))
 	mux.HandleFunc("/api/engine/database", handleEngineDatabase(eng))
 	mux.HandleFunc("/api/engine/files", handleEngineFiles(eng))
@@ -156,8 +158,20 @@ func main() {
 	}()
 
 	logger.Info("nanotdb server listening", "listen", runtimeCfg.EngineConfig.Engine.Listen, "config", *configPath, "data_dir", runtimeCfg.DataDir)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("server failed", "error", err)
+	eng.EmitInternalEvent("nanotdb.http", "nanotdb.http.listener.started", nil, map[string]any{
+		"addr": runtimeCfg.EngineConfig.Engine.Listen,
+	}, "")
+	serveErr := srv.ListenAndServe()
+	reason := "shutdown"
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		reason = serveErr.Error()
+	}
+	eng.EmitInternalEvent("nanotdb.http", "nanotdb.http.listener.stopped", nil, map[string]any{
+		"addr":   runtimeCfg.EngineConfig.Engine.Listen,
+		"reason": reason,
+	}, "")
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		logger.Error("server failed", "error", serveErr)
 		os.Exit(1)
 	}
 }

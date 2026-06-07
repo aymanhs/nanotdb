@@ -357,6 +357,12 @@ func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, 
 		}
 	}
 	e.logInfo("rollup backfill started", "sources", report.RequestedSources)
+	catchupStart := time.Now()
+	if e.internalEventsActive("nanotdb.rollup") {
+		e.emitInternalEvent("nanotdb.rollup", "nanotdb.rollup.catchup.started", int32(len(report.RequestedSources)), map[string]any{
+			"sources": report.RequestedSources,
+		}, "")
+	}
 
 	e.rollupBackfill.Lock()
 	defer e.rollupBackfill.Unlock()
@@ -407,6 +413,13 @@ func (e *Engine) BackfillRollups(sourceDBNames []string) (RollupBackfillReport, 
 	}
 	report.ReplayPasses = passes
 	e.logInfo("rollup backfill finished", "sources", report.SourceDatabases, "destinations", report.DestinationDatabases, "replay_passes", report.ReplayPasses)
+	if e.internalEventsActive("nanotdb.rollup") {
+		e.emitInternalEvent("nanotdb.rollup", "nanotdb.rollup.catchup.completed", int32(passes), map[string]any{
+			"sources":      report.SourceDatabases,
+			"destinations": report.DestinationDatabases,
+			"ms":           time.Since(catchupStart).Milliseconds(),
+		}, "")
+	}
 	return report, nil
 }
 
@@ -614,6 +627,7 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		return err
 	}
 
+	written := int32(0)
 	for _, agg := range job.Aggregates {
 		aggFn, ok := getAggregator(agg)
 		if !ok {
@@ -626,6 +640,15 @@ func (e *Engine) buildRollupJobPeriod(rollupDB *Database, sourceDB *Database, jo
 		if err := e.insertRollupSample(rollupDB.Name, rollupDestinationMetricName(job, aggFn.Name()), periodStart, value); err != nil {
 			return err
 		}
+		written++
+	}
+	if written > 0 && e.internalEventsActive("nanotdb.rollup") {
+		e.emitInternalEvent("nanotdb.rollup", "nanotdb.rollup.window.emitted", written, map[string]any{
+			"src_metric":   job.SourceMetric,
+			"dst_metric":   rollupDestinationMetricName(job, ""),
+			"window_start": int64(periodStart),
+			"window_end":   int64(periodEnd),
+		}, rollupDB.Name)
 	}
 	return nil
 }

@@ -71,6 +71,12 @@ func (e *Engine) AddEvent(database, name string, ts Timestamp, value any, payloa
 		return ErrEventsDisabled
 	}
 	if len(payload) > rt.info.EventsMaxPayloadBytes {
+		if e.internalEventsActive("nanotdb.ingest.reject") {
+			e.emitInternalEvent("nanotdb.ingest.reject", "nanotdb.ingest.rejected.payload_too_large", int32(len(payload)), map[string]any{
+				"db":   database,
+				"name": name,
+			}, database)
+		}
 		return ErrEventPayloadTooLarge
 	}
 
@@ -84,12 +90,20 @@ func (e *Engine) AddEvent(database, name string, ts Timestamp, value any, payloa
 	_, existsBefore := db.eventCatalog.GetEventEntry(name)
 	eventID, err := db.eventCatalog.GetOrAssignEventID(name, valueType)
 	if err != nil {
+		e.emitCatalogFullIfApplicable(database, "events", err)
 		return err
+	}
+	if !existsBefore {
+		e.emitCatalogEventAdded(database, name, eventID, eventValueTypeName(valueType))
 	}
 
 	// Per-event-name monotonic ordering. Mirrors the metric stale-sample
 	// rejection in addParsedSample.
 	if lastTS, ok := db.eventCatalog.LastTS(eventID); ok && ts < lastTS {
+		e.emitInternalEventBatched("nanotdb.ingest.reject", "nanotdb.ingest.rejected.stale", database, map[string]any{
+			"db":   database,
+			"name": name,
+		}, defaultInternalEventsBatchEvery, database)
 		return fmt.Errorf("stale event rejected for %s/%s: ts=%d < last=%d", database, name, ts, lastTS)
 	}
 
@@ -129,6 +143,12 @@ func (e *Engine) AddEvent(database, name string, ts Timestamp, value any, payloa
 	// Flush oversized/aged pages immediately so events pages follow the same
 	// bounded-memory discipline as metric pages.
 	if page.MustForceFlush() || page.IsFull() {
+		if page.MustForceFlush() && e.internalEventsActive("nanotdb.ingest.spike") {
+			e.emitInternalEvent("nanotdb.ingest.spike", "nanotdb.ingest.spike.force_flush", int32(page.SizeBytes()), map[string]any{
+				"db":    database,
+				"layer": "event",
+			}, database)
+		}
 		if _, err := AppendEventsPageFrame(db.RootDataDir, day, page, e.SyncDataFile); err != nil {
 			return err
 		}
@@ -410,7 +430,7 @@ func (e *Engine) replayEventsWALIntoRuntime(db *Database, rt *dbRuntime, dbName 
 // flushOpenEventsPages writes every non-empty in-memory events page
 // for db to its events-<partition>.dat file and clears the map. Used
 // by the engine close/flush paths.
-func (e *Engine) flushOpenEventsPages(db *Database, rt *dbRuntime, _ string) error {
+func (e *Engine) flushOpenEventsPages(db *Database, rt *dbRuntime, dbName string) error {
 	if db == nil || rt == nil || rt.openEventsDays == nil {
 		return nil
 	}
@@ -419,10 +439,20 @@ func (e *Engine) flushOpenEventsPages(db *Database, rt *dbRuntime, _ string) err
 			delete(rt.openEventsDays, part)
 			continue
 		}
-		if _, err := AppendEventsPageFrame(db.RootDataDir, part, page, e.SyncDataFile); err != nil {
+		frameStats, err := AppendEventsPageFrame(db.RootDataDir, part, page, e.SyncDataFile)
+		if err != nil {
 			return fmt.Errorf("flush events page partition %q: %w", part, err)
 		}
+		records := page.Count()
 		delete(rt.openEventsDays, part)
+		if e.internalEventsActive("nanotdb.partition") {
+			e.emitInternalEvent("nanotdb.partition", "nanotdb.partition.sealed", int32(records), map[string]any{
+				"db":            dbName,
+				"file":          "events",
+				"partition_key": part,
+				"bytes":         frameStats.FrameBytes,
+			}, dbName)
+		}
 	}
 	return nil
 }
