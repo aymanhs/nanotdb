@@ -126,4 +126,8 @@ jobs:
           files: |
             dist/*
           generate_release_notes: true
-          make_latest: true
+          # SemVer prereleases (tags containing a `-`, e.g. v1.5.0-beta.1) are
+          # published as GitHub prereleases and do NOT replace the current
+          # "Latest" release. Plain `vX.Y.Z` tags publish as stable + latest.
+          prerelease: ${{ contains((github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name), '-') }}
+          make_latest: ${{ contains((github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name), '-') && 'false' || 'true' }}

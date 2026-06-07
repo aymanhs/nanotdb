@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0-beta.1] - 2026-06-07
+
 ### Added
 - Internal events surface: the engine and `drip` now emit lifecycle, db, partition (sealed/deleted/archived/optimized/flush.slow), retention sweep, WAL (replayed/tail_truncated/reset/fsync.slow/fsync.error), catalog (metric.added/event.added/full/write.failed), ingest (rejected.stale batched, payload_too_large, spike.force_flush), rollup (window.emitted, catchup.started/completed), HTTP listener, MQTT connected/disconnected, dirty-shutdown detection, and drip target-state events into the existing `internal` database via the events layer. See [docs/INTERNAL_EVENTS.md](docs/INTERNAL_EVENTS.md). New `engine.toml` `[internal_events]` section, `[internal_events.groups]` per-group toggles, runtime `POST /api/v1/internal-events/groups` toggle, `GET /api/v1/internal-events/catalog`, and `nanocli internal-events {catalog|groups|set|tail}` subcommands. The `[admin]` section in `drip.toml` opts into a tiny admin HTTP listener for the same runtime toggle on the drip side.
 - New `--timestamp-unit ns|us|ms|s` flag on `nanocli query` and `nanocli import parts`, plus the equivalent `timestamp_unit` query parameter on the web API range endpoints; default is `ns`. Bare numeric timestamps are no longer auto-bucketed by magnitude.
