@@ -45,6 +45,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - Removed two unused `Timestamp` parameters from `Aggregator.Compute`.
 - Events now fully honor per-database payload, page, and WAL settings during ingest and recovery.
 - Local deploy helper now handles config-only drip updates more cleanly, restarting services only when needed and preserving config file permissions during remote updates.
+- `drip` slow-disk-write threshold event now fires only on cycles that ran a fresh probe, instead of re-firing the cached value every collect cycle between probes.
+- `drip` HTTP event payloads now serialize whole-number floats with a trailing `.0`, so server-side type classification keeps them as `float32` instead of misreading them as `int32` (no more `ErrEventTypeMismatch` on round latency values).
+- Dashboard editor: save no longer throws `Cannot read properties of null (reading 'addEventListener')` after adding event overlays — the series-card wiring loop no longer matches overlay cards. Editor UI also condensed to single-row widget/series grids, DB picked before Query, hidden auto-generated widget/group IDs, native datalist for event names, and the event-log widget dropped the unused third column.
 
 ### Deferred
 - HTTP authentication on the engine endpoints — tracked for a dedicated release.
