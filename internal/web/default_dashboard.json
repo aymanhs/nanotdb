@@ -5,12 +5,7 @@
     {
       "id": "overview",
       "label": "Overview",
-      "widgets": ["system_snapshot", "cpu_busy_aggregate", "storage_snapshot"]
-    },
-    {
-      "id": "temperatures",
-      "label": "Temperatures",
-      "widgets": ["temperature_snapshot", "temperature_history"]
+      "widgets": ["system_snapshot", "cpu_busy_aggregate", "storage_snapshot", "system_history"]
     },
     {
       "id": "events",
@@ -92,60 +87,42 @@
         }
       ]
     },
-    "temperature_snapshot": {
-      "type": "numbers",
-      "title": "Temperatures",
-      "refresh_sec": 15,
-      "series": [
-        {
-          "label": "CPU",
-          "metric": "temp.cpu",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 },
-          "thresholds": { "direction": "above", "warning": 70, "critical": 80 }
-        },
-        {
-          "label": "Office Dry",
-          "metric": "temp.office_dry.mdeg",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
-        },
-        {
-          "label": "Office Wet",
-          "metric": "temp.office_wet.mdeg",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
-        },
-        {
-          "label": "Outdoor",
-          "metric": "temp.out_dry.mdeg",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
-        }
-      ]
-    },
-    "temperature_history": {
+    "system_history": {
       "type": "line_chart",
-      "title": "Temperature History",
+      "title": "System Activity",
       "refresh_sec": 30,
-      "lookback": "12h",
-      "interval": "2m",
+      "lookback": "6h",
+      "interval": "1m",
       "series": [
         {
-          "label": "CPU",
-          "metric": "temp.cpu",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
+          "label": "CPU Busy",
+          "metric": "cpu.busy_pct",
+          "aggregate": "avg",
+          "window": "1m",
+          "transform": { "unit": "%", "decimals": 1 }
         },
         {
-          "label": "Office Dry",
-          "metric": "temp.office_dry.mdeg",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
+          "label": "SD Write ms",
+          "metric": "disk.sd_write_probe_ms",
+          "aggregate": "avg",
+          "window": "1m",
+          "transform": { "unit": " ms", "decimals": 1 }
+        }
+      ],
+      "event_overlays": [
+        {
+          "label": "Engine start",
+          "event_name_pattern": "nanotdb.engine.started",
+          "db": "internal",
+          "color": "#0a7",
+          "event_limit": 20
         },
         {
-          "label": "Office Wet",
-          "metric": "temp.office_wet.mdeg",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
-        },
-        {
-          "label": "Outdoor",
-          "metric": "temp.out_dry.mdeg",
-          "transform": { "factor": 0.001, "unit": " C", "decimals": 1 }
+          "label": "Slow SD write",
+          "event_name_pattern": "drip.threshold.disk.sd_write_probe.slow",
+          "db": "internal",
+          "color": "#c33",
+          "event_limit": 50
         }
       ]
     },

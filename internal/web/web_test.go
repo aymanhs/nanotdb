@@ -706,6 +706,15 @@ func validateDashboardJSON(t *testing.T, body string) (int, string) {
 	return rec.Code, rec.Body.String()
 }
 
+// TestEmbeddedDefaultDashboardValidates guards the shipped showcase
+// dashboard so a broken default never ships to a fresh install.
+func TestEmbeddedDefaultDashboardValidates(t *testing.T) {
+	code, body := validateDashboardJSON(t, string(DefaultDashboardConfig()))
+	if code != http.StatusOK || !strings.Contains(body, `"ok":true`) {
+		t.Fatalf("embedded default_dashboard.json failed validation: code=%d body=%s", code, body)
+	}
+}
+
 // TestValidate_EventBackedLineChartSeries_Accepts confirms a line_chart
 // widget with an event-backed series (event_name_pattern present, no
 // metric fields) validates successfully.
