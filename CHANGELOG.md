@@ -10,6 +10,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Changed
 - The default dashboard shipped with a fresh install is now a `drip` showcase: the **Overview** group adds a `System Activity` line chart that plots CPU busy and SD write-probe latency over the last 6 h with `event_overlays` for engine restarts (`nanotdb.engine.started`) and slow-disk-write events (`drip.threshold.disk.sd_write_probe.slow`). Existing dashboards on disk are untouched.
 - Added `TestEmbeddedDefaultDashboardValidates` so the embedded default JSON is now exercised by the validator on every build.
+- `engine.toml` and `manifest.toml` loaders now warn to stderr on unrecognized keys instead of silently ignoring them.
 
 ## [1.5.0-beta.1] - 2026-06-07
 

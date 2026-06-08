@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 const TraceSlogLevel slog.Level = slog.LevelDebug - 4
@@ -57,8 +59,8 @@ func (h multiHandler) WithGroup(name string) slog.Handler {
 	return multiHandler{handlers: children}
 }
 
-func LoadEngineConfig(rootDataDir string, fallbackWalMaxSegSize int64) (EngineConfig, time.Duration, DBInfo, error) {
-	return loadOrCreateEngineConfig(rootDataDir, fallbackWalMaxSegSize)
+func LoadEngineConfig(rootDataDir string, fallbackWalMaxSegSize int64, reservedTopLevels ...string) (EngineConfig, time.Duration, DBInfo, error) {
+	return loadOrCreateEngineConfig(rootDataDir, fallbackWalMaxSegSize, reservedTopLevels...)
 }
 
 func OpenEngineWithConfig(rootDataDir string, cfg EngineConfig, statsInterval time.Duration, dbDefaults DBInfo, logger *slog.Logger) (*Engine, error) {
@@ -173,6 +175,41 @@ func NewLogger(cfg EngineConfigLogging) (*slog.Logger, func() error, error) {
 
 func defaultEngineLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// warnUnknownTOMLKeys writes a WARN line to stderr for every key present in
+// the decoded TOML that did not map to a known struct field. Written directly
+// to stderr (not via the engine logger) so misplaced or typo'd config is
+// visible even when logging is routed to io.Discard or a file the operator
+// is not tailing.
+//
+// reservedTopLevels lists top-level section names owned by *other* decoders
+// of the same file (e.g. cmd/nanotdb decodes [web] from engine.toml on its
+// own). Undecoded keys whose top-level segment is in this set are skipped so
+// shared files don't generate false-positive warnings. Typos inside owned
+// sections, and unknown top-levels not in the reserved set, still warn.
+var warnUnknownTOMLKeysOutput io.Writer = os.Stderr
+
+func warnUnknownTOMLKeys(path string, md toml.MetaData, reservedTopLevels ...string) {
+	undecoded := md.Undecoded()
+	if len(undecoded) == 0 {
+		return
+	}
+	var reserved map[string]struct{}
+	if len(reservedTopLevels) > 0 {
+		reserved = make(map[string]struct{}, len(reservedTopLevels))
+		for _, name := range reservedTopLevels {
+			reserved[name] = struct{}{}
+		}
+	}
+	for _, key := range undecoded {
+		if len(key) > 0 {
+			if _, ok := reserved[key[0]]; ok {
+				continue
+			}
+		}
+		fmt.Fprintf(warnUnknownTOMLKeysOutput, "[nanotdb] WARN: %s: ignored unknown TOML key %q\n", path, key.String())
+	}
 }
 
 func slogLevelForName(name string) (slog.Level, error) {

@@ -387,6 +387,74 @@ func TestEngineManifestRetentionPartitionInvalid(t *testing.T) {
 	}
 }
 
+func TestEngineManifestUnknownKeysWarn(t *testing.T) {
+	var buf bytes.Buffer
+	origOut := warnUnknownTOMLKeysOutput
+	warnUnknownTOMLKeysOutput = &buf
+	defer func() { warnUnknownTOMLKeysOutput = origOut }()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	// Mirrors the real footgun: operator places [metrics] (engine-level) inside
+	// the per-database manifest.toml. Decoding must succeed but warn loudly.
+	manifest := []byte("[retention]\ngrace = \"5m\"\nretention_days = 30\nretention_action = \"keep\"\nmax_active_days = 2\npartition = \"day\"\n\n[metrics]\nenabled = true\nraw_ingest_action = \"delete\"\n")
+	if err := os.WriteFile(filepath.Join(root, "prod", "manifest.toml"), manifest, 0644); err != nil {
+		t.Fatalf("WriteFile manifest failed: %v", err)
+	}
+
+	e, err := OpenEngine(root, 1024*1024)
+	if err != nil {
+		t.Fatalf("OpenEngine failed: %v", err)
+	}
+	defer e.Close()
+
+	if _, _, err := e.getOrCreateDB("prod"); err != nil {
+		t.Fatalf("getOrCreateDB failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "manifest.toml") {
+		t.Fatalf("expected warning to reference manifest.toml; got %q", out)
+	}
+	if !strings.Contains(out, "metrics.raw_ingest_action") {
+		t.Fatalf("expected warning for metrics.raw_ingest_action; got %q", out)
+	}
+	if !strings.Contains(out, "metrics.enabled") {
+		t.Fatalf("expected warning for metrics.enabled; got %q", out)
+	}
+}
+
+func TestEngineConfigUnknownKeysWarnRespectsReserved(t *testing.T) {
+	var buf bytes.Buffer
+	origOut := warnUnknownTOMLKeysOutput
+	warnUnknownTOMLKeysOutput = &buf
+	defer func() { warnUnknownTOMLKeysOutput = origOut }()
+
+	root := t.TempDir()
+	// engine.toml has both a legitimate-but-foreign [web] section (owned by
+	// cmd/nanotdb's decoder) and a real typo inside an engine-owned section.
+	// Reserving "web" must suppress only the foreign keys; the typo must
+	// still warn.
+	cfg := []byte("[wal]\nmax_segment_size = 1024\nfsync_policy = \"always\"\n\n[metrics]\nenabled = true\nraw_ingest_actoin = \"delete\"\n\n[web]\nenabled = true\nbase_path = \"/\"\n")
+	if err := os.WriteFile(filepath.Join(root, "engine.toml"), cfg, 0644); err != nil {
+		t.Fatalf("write engine.toml failed: %v", err)
+	}
+
+	if _, _, _, err := LoadEngineConfig(root, 0, "web"); err != nil {
+		t.Fatalf("LoadEngineConfig failed: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "\"web\"") || strings.Contains(out, "web.enabled") || strings.Contains(out, "web.base_path") {
+		t.Fatalf("did not expect [web] warnings (reserved); got %q", out)
+	}
+	if !strings.Contains(out, "metrics.raw_ingest_actoin") {
+		t.Fatalf("expected warning for typo metrics.raw_ingest_actoin; got %q", out)
+	}
+}
+
 func TestEngineManifestRetentionActionInvalid(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "prod"), 0755); err != nil {

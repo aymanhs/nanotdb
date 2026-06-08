@@ -792,9 +792,11 @@ func ensureInternalEventsManifest(path string, defaults DBInfo) error {
 	var info DBInfo
 	if raw, err := os.ReadFile(path); err == nil {
 		manifest := DBManifestTOML{}
-		if _, err := toml.Decode(string(raw), &manifest); err != nil {
+		md, err := toml.Decode(string(raw), &manifest)
+		if err != nil {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}
+		warnUnknownTOMLKeys(path, md)
 		// retention_action defaults to the engine default for fresh
 		// installs of the internal db — we'd rather start with the
 		// engine's normal retention than refuse to open.

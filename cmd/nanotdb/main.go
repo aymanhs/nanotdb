@@ -212,7 +212,7 @@ func loadRuntimeConfig(configPath string) (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	cfg, statsInterval, dbDefaults, err := engine.LoadEngineConfig(dataDir, 0)
+	cfg, statsInterval, dbDefaults, err := engine.LoadEngineConfig(dataDir, 0, "web")
 	if err != nil {
 		return runtimeConfig{}, err
 	}

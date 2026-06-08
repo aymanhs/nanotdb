@@ -691,13 +691,15 @@ func normalizeEngineConfig(cfg EngineConfig, fallbackWalMaxSegSize int64) (Engin
 	return cfg, statsInterval, dbDefaults, nil
 }
 
-func loadOrCreateEngineConfig(rootDataDir string, fallbackWalMaxSegSize int64) (EngineConfig, time.Duration, DBInfo, error) {
+func loadOrCreateEngineConfig(rootDataDir string, fallbackWalMaxSegSize int64, reservedTopLevels ...string) (EngineConfig, time.Duration, DBInfo, error) {
 	path := filepath.Join(rootDataDir, engineConfigFileName)
 	if raw, err := os.ReadFile(path); err == nil {
 		cfg := defaultEngineConfig(fallbackWalMaxSegSize)
-		if _, err := toml.Decode(string(raw), &cfg); err != nil {
+		md, err := toml.Decode(string(raw), &cfg)
+		if err != nil {
 			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("parse %s: %w", path, err)
 		}
+		warnUnknownTOMLKeys(path, md, reservedTopLevels...)
 		cfg, interval, dbDefaults, err := normalizeEngineConfig(cfg, fallbackWalMaxSegSize)
 		if err != nil {
 			return EngineConfig{}, 0, DBInfo{}, fmt.Errorf("invalid %s: %w", path, err)
@@ -2420,8 +2422,8 @@ func (e *Engine) getOrCreateDBWithDefaults(database string, defaults DBInfo, rol
 	// signal — a clean Close() always Reset()s the WAL.
 	if info.WALEnabled && replayRecords > 0 && e.internalEventsActive("nanotdb.lifecycle") {
 		e.emitInternalEvent("nanotdb.lifecycle", "nanotdb.engine.shutdown.dirty", nil, map[string]any{
-			"db":              database,
-			"prev_wal_bytes":  replayBytes,
+			"db":               database,
+			"prev_wal_bytes":   replayBytes,
 			"prev_wal_records": replayRecords,
 		}, database)
 	}
@@ -3618,9 +3620,11 @@ func loadExistingDBInfo(root string, defaults DBInfo) (DBInfo, bool, error) {
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		manifest := DBManifestTOML{}
-		if _, err := toml.Decode(string(raw), &manifest); err != nil {
+		md, err := toml.Decode(string(raw), &manifest)
+		if err != nil {
 			return DBInfo{}, false, fmt.Errorf("parse %s: %w", path, err)
 		}
+		warnUnknownTOMLKeys(path, md)
 		// retention_action MUST be set explicitly on existing manifests. Pre-1.4
 		// manifests did not have this field; if we defaulted it silently, a
 		// retention_days>0 manifest that previously deleted partitions would
