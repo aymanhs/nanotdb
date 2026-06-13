@@ -28,6 +28,7 @@ type Config struct {
 	WebRoot        string
 	APIBaseURL     string
 	EnginePath     string
+	APITesterPath  string
 }
 
 type indexTemplateData struct {
@@ -38,6 +39,7 @@ type indexTemplateData struct {
 	EditorPath    string
 	ExplorePath   string
 	EnginePath    string
+	APITesterPath string
 }
 
 func DefaultConfig() Config {
@@ -49,6 +51,7 @@ func DefaultConfig() Config {
 		RefreshSeconds: 10,
 		DashboardFile:  "dashboard.json",
 		EnginePath:     "/engine",
+		APITesterPath:  "/api-tester",
 	}
 }
 
@@ -93,6 +96,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	mux.Handle(cfg.BasePath+"/assets/", http.StripPrefix(cfg.BasePath+"/assets/", assetSource.dashboardAssets))
 	mux.Handle(cfg.ExplorePath+"/assets/", http.StripPrefix(cfg.ExplorePath+"/assets/", assetSource.exploreAssets))
 	mux.Handle(cfg.EnginePath+"/assets/", http.StripPrefix(cfg.EnginePath+"/assets/", assetSource.engineAssets))
+	mux.Handle(cfg.APITesterPath+"/assets/", http.StripPrefix(cfg.APITesterPath+"/assets/", assetSource.apiTesterAssets))
 	mux.Handle("/assets/", http.StripPrefix("/assets/", assetSource.commonAssets))
 
 	dashboardJSONPath := resolveDashboardPath(dataDir, cfg.DashboardFile)
@@ -164,6 +168,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			EditorPath:    editorPath,
 			ExplorePath:   cfg.ExplorePath,
 			EnginePath:    cfg.EnginePath,
+			APITesterPath: cfg.APITesterPath,
 		}); err != nil {
 			http.Error(w, "failed to render dashboard", http.StatusInternalServerError)
 		}
@@ -185,6 +190,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			EditorPath:    editorPath,
 			ExplorePath:   cfg.ExplorePath,
 			EnginePath:    cfg.EnginePath,
+			APITesterPath: cfg.APITesterPath,
 		}); err != nil {
 			http.Error(w, "failed to render explorer", http.StatusInternalServerError)
 		}
@@ -207,6 +213,7 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			EditorPath:    editorPath,
 			ExplorePath:   cfg.ExplorePath,
 			EnginePath:    cfg.EnginePath,
+			APITesterPath: cfg.APITesterPath,
 		}); err != nil {
 			http.Error(w, "failed to render engine explorer", http.StatusInternalServerError)
 		}
@@ -230,6 +237,28 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 			EnginePath:    cfg.EnginePath,
 		}); err != nil {
 			http.Error(w, "failed to render dashboard editor", http.StatusInternalServerError)
+		}
+	}
+
+	serveAPITester := func(w http.ResponseWriter, _ *http.Request) {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"basePath":       cfg.BasePath,
+			"editorPath":     editorPath,
+			"refreshSeconds": cfg.RefreshSeconds,
+			"apiBaseURL":     cfg.APIBaseURL,
+		})
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := assetSource.executeTemplate(w, assetSource.apiTesterTemplatePath, "api-tester-index", indexTemplateData{
+			Title:         cfg.Title,
+			AssetBase:     cfg.APITesterPath + "/assets",
+			ConfigJSON:    template.JS(payload),
+			DashboardPath: cfg.BasePath,
+			EditorPath:    editorPath,
+			ExplorePath:   cfg.ExplorePath,
+			EnginePath:    cfg.EnginePath,
+			APITesterPath: cfg.APITesterPath,
+		}); err != nil {
+			http.Error(w, "failed to render api tester", http.StatusInternalServerError)
 		}
 	}
 
@@ -271,6 +300,15 @@ func Register(mux *http.ServeMux, cfg Config, dataDir string) {
 	mux.HandleFunc(cfg.EnginePath+"/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == cfg.EnginePath+"/" {
 			serveEngine(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	mux.HandleFunc(cfg.APITesterPath, serveAPITester)
+	mux.HandleFunc(cfg.APITesterPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == cfg.APITesterPath+"/" {
+			serveAPITester(w, r)
 			return
 		}
 		http.NotFound(w, r)
@@ -327,9 +365,11 @@ type assetSource struct {
 	editorTemplatePath    string
 	exploreTemplatePath   string
 	engineTemplatePath    string
+	apiTesterTemplatePath string
 	dashboardAssets       http.Handler
 	exploreAssets         http.Handler
 	engineAssets          http.Handler
+	apiTesterAssets       http.Handler
 	commonAssets          http.Handler
 }
 
@@ -341,9 +381,11 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 			editorTemplatePath:    filepath.Join(webRoot, "editor.html"),
 			exploreTemplatePath:   filepath.Join(webRoot, "index.html"),
 			engineTemplatePath:    filepath.Join(webRoot, "engine.html"),
+			apiTesterTemplatePath: filepath.Join(webRoot, "api_tester.html"),
 			dashboardAssets:       http.FileServer(http.Dir(filepath.Join(webRoot, "dashboard_assets"))),
 			exploreAssets:         http.FileServer(http.Dir(filepath.Join(webRoot, "assets"))),
 			engineAssets:          http.FileServer(http.Dir(filepath.Join(webRoot, "engine_assets"))),
+			apiTesterAssets:       http.FileServer(http.Dir(filepath.Join(webRoot, "dashboard_assets"))),
 			commonAssets:          http.FileServer(http.Dir(filepath.Join(webRoot, "common_assets"))),
 		}
 	}
@@ -360,6 +402,10 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 	if err != nil {
 		panic("internal/web: engine assets unavailable")
 	}
+	apiTesterAssets, err := fs.Sub(staticFS, "static/dashboard_assets")
+	if err != nil {
+		panic("internal/web: api tester assets unavailable")
+	}
 	commonAssets, err := fs.Sub(staticFS, "static/common_assets")
 	if err != nil {
 		panic("internal/web: common assets unavailable")
@@ -369,9 +415,11 @@ func newAssetSource(cfg Config, dataDir string) assetSource {
 		editorTemplatePath:    "static/editor.html",
 		exploreTemplatePath:   "static/index.html",
 		engineTemplatePath:    "static/engine.html",
+		apiTesterTemplatePath: "static/api_tester.html",
 		dashboardAssets:       http.FileServer(http.FS(dashboardAssets)),
 		exploreAssets:         http.FileServer(http.FS(exploreAssets)),
 		engineAssets:          http.FileServer(http.FS(engineAssets)),
+		apiTesterAssets:       http.FileServer(http.FS(apiTesterAssets)),
 		commonAssets:          http.FileServer(http.FS(commonAssets)),
 	}
 }

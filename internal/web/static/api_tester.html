@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .Title }} - API Tester</title>
+  <link rel="stylesheet" href="/assets/common.css" />
+  <link rel="stylesheet" href="{{ .AssetBase }}/api_tester.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <nav class="top-nav" aria-label="Navigation">
+        <a href="/">Home</a>
+        <a href="{{ .DashboardPath }}">Dashboard</a>
+        <a href="{{ .EditorPath }}">Editor</a>
+        <a href="{{ .ExplorePath }}">Explore</a>
+        <a href="{{ .EnginePath }}">Engine</a>
+        <a href="{{ .APITesterPath }}" aria-current="page">API Tester</a>
+      </nav>
+      <h1>API Tester</h1>
+      <p class="sub">Test NanoTDB HTTP API endpoints interactively</p>
+    </header>
+
+    <section class="api-tester-container">
+      <aside class="endpoints-list">
+        <h2>Endpoints</h2>
+        <input type="text" id="searchInput" placeholder="Search endpoints..." class="search-box" />
+        <nav id="endpointsList" class="endpoints-nav"></nav>
+      </aside>
+
+      <main class="endpoint-tester">
+        <div id="endpointContent" class="endpoint-content">
+          <div class="placeholder">
+            <p>Select an endpoint to get started</p>
+          </div>
+        </div>
+      </main>
+    </section>
+  </main>
+
+  <script src="{{ .AssetBase }}/api_tester_app.js" defer></script>
+</body>
+</html>
