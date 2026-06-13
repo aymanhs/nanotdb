@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,10 @@ const (
 	TimestampUnitMilliseconds = "ms"
 	TimestampUnitSeconds      = "s"
 )
+
+// MaxRelativeDuration is the maximum allowed lookback for relative timestamps
+// (e.g., -10y). This prevents accidental "full history" scans.
+const MaxRelativeDuration = 10 * 365 * 24 * time.Hour
 
 // NormalizeTimestampUnit validates and normalizes a user-supplied unit value.
 // Empty input maps to "ns". Returns an error on unknown values.
@@ -61,6 +66,15 @@ func ParseTimestampWithUnit(input string, unit string) (Timestamp, error) {
 	if v == "" {
 		return 0, fmt.Errorf("timestamp cannot be empty")
 	}
+
+	// Handle relative negative durations (e.g. "-30s", "-5m", or "-20" which uses scale)
+	if strings.HasPrefix(v, "-") && len(v) > 1 {
+		d, err := parseDurationMagnitude(v[1:], timestampUnitScale(u))
+		if err == nil {
+			return Timestamp(time.Now().UTC().Add(-d).UnixNano()), nil
+		}
+	}
+
 	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 		return Timestamp(t.UnixNano()), nil
 	}
@@ -70,13 +84,13 @@ func ParseTimestampWithUnit(input string, unit string) (Timestamp, error) {
 	scale := timestampUnitScale(u)
 	if strings.Contains(v, ".") {
 		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
+		if err != nil || f < 0 {
 			return 0, fmt.Errorf("invalid timestamp %q", v)
 		}
 		return Timestamp(int64(f * float64(scale))), nil
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
-	if err == nil {
+	if err == nil && n >= 0 {
 		return Timestamp(n * scale), nil
 	}
 	// Fall through to the human-readable parser (handles "YYYY-MM-DD",
@@ -105,8 +119,19 @@ func ParseTimestamp(input string) (Timestamp, error) {
 		return 0, fmt.Errorf("timestamp cannot be empty")
 	}
 
+	// Handle relative negative durations. For bare numbers, default to seconds scale.
+	if strings.HasPrefix(input, "-") && len(input) > 1 {
+		d, err := parseDurationMagnitude(input[1:], int64(time.Second))
+		if err == nil {
+			if d > MaxRelativeDuration {
+				return 0, fmt.Errorf("relative duration exceeds maximum limit of 10 years")
+			}
+			return Timestamp(time.Now().UTC().Add(-d).UnixNano()), nil
+		}
+	}
+
 	// Try parsing as a raw nanosecond integer
-	if ns, err := strconv.ParseInt(input, 10, 64); err == nil {
+	if ns, err := strconv.ParseInt(input, 10, 64); err == nil && ns >= 0 {
 		// Successfully parsed as integer, treat as nanoseconds
 		return Timestamp(ns), nil
 	}
@@ -164,4 +189,87 @@ func ParseTimestamp(input string) (Timestamp, error) {
 	}
 
 	return Timestamp(sec*1_000_000_000 + nsec), nil
+}
+
+// parseDurationMagnitude parses the magnitude of a duration string.
+// If the string is a bare number, it is multiplied by the provided scale.
+// Suffixes 'w', 'd', 'h', and 'm' are handled specifically.
+// Other formats fall back to time.ParseDuration.
+func parseDurationMagnitude(s string, scale int64) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+
+	// Handle custom large units specifically
+	if strings.HasSuffix(s, "w") {
+		val, err := strconv.ParseFloat(s[:len(s)-1], 64)
+		if err != nil {
+			return 0, err
+		}
+		durNano := val * 7 * 24 * float64(time.Hour)
+		if durNano > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("duration too large")
+		}
+		if time.Duration(durNano) > MaxRelativeDuration {
+			return 0, fmt.Errorf("duration too large")
+		}
+		return time.Duration(durNano), nil
+	}
+	if strings.HasSuffix(s, "d") {
+		val, err := strconv.ParseFloat(s[:len(s)-1], 64)
+		if err != nil {
+			return 0, err
+		}
+		durNano := val * 24 * float64(time.Hour)
+		if durNano > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("duration too large")
+		}
+		if time.Duration(durNano) > MaxRelativeDuration {
+			return 0, fmt.Errorf("duration too large")
+		}
+		return time.Duration(durNano), nil
+	}
+	if strings.HasSuffix(s, "h") {
+		val, err := strconv.ParseFloat(s[:len(s)-1], 64)
+		if err != nil {
+			return 0, err
+		}
+		durNano := val * float64(time.Hour)
+		if durNano > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("duration too large")
+		}
+		if time.Duration(durNano) > MaxRelativeDuration {
+			return 0, fmt.Errorf("duration too large")
+		}
+		return time.Duration(durNano), nil
+	}
+	if strings.HasSuffix(s, "m") {
+		val, err := strconv.ParseFloat(s[:len(s)-1], 64)
+		if err != nil {
+			return 0, err
+		}
+		durNano := val * float64(time.Minute)
+		if durNano > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("duration too large")
+		}
+		if time.Duration(durNano) > MaxRelativeDuration {
+			return 0, fmt.Errorf("duration too large")
+		}
+		return time.Duration(durNano), nil
+	}
+
+	// If it's just a number, use the provided scale (nanoseconds in one unit)
+	if val, err := strconv.ParseFloat(s, 64); err == nil {
+		durNano := val * float64(scale)
+		if durNano > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("duration too large")
+		}
+		if time.Duration(durNano) > MaxRelativeDuration {
+			return 0, fmt.Errorf("duration too large")
+		}
+		return time.Duration(durNano), nil
+	}
+
+	return time.ParseDuration(s)
 }

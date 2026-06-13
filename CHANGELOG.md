@@ -12,12 +12,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Added
 - Internal events surface: the engine and `drip` now emit lifecycle, db, partition (sealed/deleted/archived/optimized/flush.slow), retention sweep, WAL (replayed/tail_truncated/reset/fsync.slow/fsync.error), catalog (metric.added/event.added/full/write.failed), ingest (rejected.stale batched, payload_too_large, spike.force_flush), rollup (window.emitted, catchup.started/completed), HTTP listener, MQTT connected/disconnected, dirty-shutdown detection, and drip target-state events into the existing `internal` database via the events layer. See [docs/INTERNAL_EVENTS.md](docs/INTERNAL_EVENTS.md). New `engine.toml` `[internal_events]` section, `[internal_events.groups]` per-group toggles, runtime `POST /api/v1/internal-events/groups` toggle, `GET /api/v1/internal-events/catalog`, and `nanocli internal-events {catalog|groups|set|tail}` subcommands. The `[admin]` section in `drip.toml` opts into a tiny admin HTTP listener for the same runtime toggle on the drip side.
 - New `--timestamp-unit ns|us|ms|s` flag on `nanocli query` and `nanocli import parts`, plus the equivalent `timestamp_unit` query parameter on the web API range endpoints; default is `ns`. Bare numeric timestamps are no longer auto-bucketed by magnitude.
-- Duration parsing now accepts `d` (days) and `w` (weeks) across config, API, and CLI time/window inputs.
+- Duration parsing now accepts `d` (days) and `w` (weeks) across config, API, and CLI time/window inputs. Timestamp parsers (API and CLI) also now accept negative durations (e.g., `-20s` or `-5m`) interpreted as offsets from "now", with a safety cap of 10 years.
 - Database names are now validated consistently across ingest, API, rollups, and offline import/export.
 - HTTP server timeout and header-size limits are now enabled by default.
 - Manifest validation now enforces upper bounds on key retention, page, and metric-cache settings.
 - First-class events support across storage, query APIs, HTTP endpoints, and `nanocli` inspection/query workflows.
 - Size-based file log rotation with configurable file-size limits and backup retention.
+- API Tester page on the Web UI to explore and test the web API
 
 ### Changed
 - The default `drip` SD-write-probe threshold event name moved from `disk.sd_write_probe.slow` to `drip.threshold.disk.sd_write_probe.slow` so it lives under the new `drip.threshold` internal-events group. Installs that override `collectors.sd_write_probe.event_name` are unaffected.
@@ -50,6 +51,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - `drip` slow-disk-write threshold event now fires only on cycles that ran a fresh probe, instead of re-firing the cached value every collect cycle between probes.
 - `drip` HTTP event payloads now serialize whole-number floats with a trailing `.0`, so server-side type classification keeps them as `float32` instead of misreading them as `int32` (no more `ErrEventTypeMismatch` on round latency values).
 - Dashboard editor: save no longer throws `Cannot read properties of null (reading 'addEventListener')` after adding event overlays — the series-card wiring loop no longer matches overlay cards. Editor UI also condensed to single-row widget/series grids, DB picked before Query, hidden auto-generated widget/group IDs, native datalist for event names, and the event-log widget dropped the unused third column.
+- API tester: added body samples for Line Protocol and Event imports; input fields now maintain the dark theme during browser autofill; corrected the Line Protocol import to send `text/plain` and removed the erroneous Prometheus import placeholder.
 
 ### Deferred
 - HTTP authentication on the engine endpoints — tracked for a dedicated release.

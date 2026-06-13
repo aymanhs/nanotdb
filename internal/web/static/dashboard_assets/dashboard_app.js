@@ -261,15 +261,23 @@
     const opts = {
       width,
       height,
-      padding: isMobile ? [4, 4, 2, 0] : [8, 8, 4, 0],
+      padding: isMobile ? [8, 12, 8, 12] : [8, 8, 4, 0],
       scales: { x: { time: true } },
       series: seriesDefs,
       axes: [
-        { stroke: theme.muted, grid: { stroke: theme.border, width: 1 } },
+        { 
+          stroke: theme.muted, 
+          grid: { stroke: theme.border, width: 1 },
+          font: isMobile ? "10px sans-serif" : "12px sans-serif",
+        },
         {
           stroke: theme.muted,
-          size: (u, vals) => yAxisSizeForValues(axisTarget, vals),
+          size: (u, vals) => {
+            const s = yAxisSizeForValues(axisTarget, vals);
+            return isMobile ? Math.max(s, 50) : s;
+          },
           grid: { stroke: theme.border, width: 1 },
+          font: isMobile ? "10px sans-serif" : "12px sans-serif",
           values: (u, vals) => vals.map((value) => (value == null ? "" : formatTransformedValue(axisTarget, value))),
         },
       ],

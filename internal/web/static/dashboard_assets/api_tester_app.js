@@ -55,10 +55,10 @@
       title: "Range Query",
       description: "Fetch a time series of raw data points. Results are sampled at the specified step interval.",
       params: [
-        { name: "query", type: "string", required: true, description: "Metric name (format: database/metric.name)" },
-        { name: "start", type: "string", required: true, description: "Start time (RFC3339 or Unix seconds/ns)" },
-        { name: "end", type: "string", required: true, description: "End time (RFC3339 or Unix seconds/ns)" },
-        { name: "step", type: "string", required: true, description: "Sampling stride (e.g., 60s, 5m, 1h)" },
+        { name: "query", type: "string", required: true, description: "Metric name (format: database/metric.name)", sample: "metrics/temp.cpu" },
+        { name: "start", type: "string", required: true, description: "Start time (RFC3339, Unix seconds/ns, or negative duration like -5m). Max lookback is 10y.", sample: "-5m" },
+        { name: "end", type: "string", required: true, description: "End time (RFC3339, Unix seconds/ns, or negative duration like -10s)", sample: "-0s" },
+        { name: "step", type: "string", required: true, description: "Sampling stride (e.g., 60s, 5m, 1h). Note: Queries are capped at 100,000 points." },
         { name: "timestamp_unit", type: "string", required: false, description: "Timestamp unit (ns, us, ms, s; default ns)" },
       ],
     },
@@ -70,8 +70,8 @@
       description: "Fetch aggregated metrics over time windows. Returns windowed statistics like min, max, avg, count per bucket.",
       params: [
         { name: "query", type: "string", required: true, description: "Metric name (format: database/metric.name)" },
-        { name: "start", type: "string", required: true, description: "Start time (RFC3339 or Unix seconds/ns)" },
-        { name: "end", type: "string", required: true, description: "End time (RFC3339 or Unix seconds/ns)" },
+        { name: "start", type: "string", required: true, description: "Start time (RFC3339, Unix seconds/ns, or negative duration like -5m)" },
+        { name: "end", type: "string", required: true, description: "End time (RFC3339, Unix seconds/ns, or negative duration like -10s)" },
         { name: "aggregate", type: "string", required: true, description: "Comma-separated aggregates (e.g., min,max,avg,count)" },
         { name: "window", type: "string", required: true, description: "Window duration (e.g., 5m, 1h)" },
         { name: "timestamp_unit", type: "string", required: false, description: "Timestamp unit (ns, us, ms, s; default ns)" },
@@ -116,8 +116,8 @@
       description: "Range query for events with optional name filter. Returns up to limit events (default 100, max 1000).",
       params: [
         { name: "db", type: "string", required: true, description: "Database name" },
-        { name: "start", type: "string", required: true, description: "Start time (RFC3339 or Unix seconds/ns)" },
-        { name: "end", type: "string", required: false, description: "End time (RFC3339 or Unix seconds/ns; defaults to now)" },
+        { name: "start", type: "string", required: true, description: "Start time (RFC3339, Unix seconds/ns, or negative duration like -5m)" },
+        { name: "end", type: "string", required: false, description: "End time (RFC3339, Unix seconds/ns, or negative duration like -10s; defaults to now)" },
         { name: "name", type: "string", required: false, description: "Event name filter (exact match or wildcard: *, ?, [abc])" },
         { name: "limit", type: "string", required: false, description: "Max events to return (default 100, max 1000)" },
       ],
@@ -130,8 +130,8 @@
       description: "Time-bucketed count of matching events. Returns event count per bucket.",
       params: [
         { name: "db", type: "string", required: true, description: "Database name" },
-        { name: "start", type: "string", required: true, description: "Start time (RFC3339 or Unix seconds/ns)" },
-        { name: "end", type: "string", required: false, description: "End time (RFC3339 or Unix seconds/ns; defaults to now)" },
+        { name: "start", type: "string", required: true, description: "Start time (RFC3339, Unix seconds/ns, or negative duration like -5m)" },
+        { name: "end", type: "string", required: false, description: "End time (RFC3339, Unix seconds/ns, or negative duration like -10s; defaults to now)" },
         { name: "window", type: "string", required: true, description: "Bucket size (e.g., 5m, 1h, 1d)" },
         { name: "name", type: "string", required: false, description: "Event name filter (exact match or wildcard)" },
         { name: "timestamp_unit", type: "string", required: false, description: "Timestamp unit (ns, us, ms, s; default ns)" },
@@ -234,6 +234,17 @@
         .form-label, .form-label-checkbox { width: 160px; flex-shrink: 0; margin-bottom: 0 !important; text-align: right; font-size: 13px; font-weight: 500; color: #94a3b8; }
         .form-input, .form-textarea { flex-grow: 1; padding: 4px 8px !important; margin: 0; background: #1e293b; border: 1px solid #334155; color: #f8fafc; border-radius: 4px; }
         .form-input:focus, .form-textarea:focus { outline: none; border-color: #38bdf8; background: #0f172a; }
+        /* Prevent browser autofill from breaking the dark theme */
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover, 
+        input:-webkit-autofill:focus,
+        textarea:-webkit-autofill,
+        textarea:-webkit-autofill:hover,
+        textarea:-webkit-autofill:focus {
+          -webkit-text-fill-color: #f8fafc !important;
+          -webkit-box-shadow: 0 0 0px 1000px #1e293b inset !important;
+          transition: background-color 5000s ease-in-out 0s;
+        }
         .form-checkbox { flex-grow: 0; margin-right: auto; }
         .form-textarea { height: 80px; resize: vertical; }
         .response-viewer { max-height: 700px; overflow-y: auto; border: 1px solid #333; border-radius: 4px; background: #0f172a; }
