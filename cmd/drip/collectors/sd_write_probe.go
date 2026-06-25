@@ -123,13 +123,6 @@ func (c *SDWriteProbeCollector) Collect(ctx context.Context, ch chan<- Metric) {
 			hasLast = true
 			c.mu.Unlock()
 			freshProbe = true
-			// Log every probe result so silent misconfigurations (e.g.
-			// directory on tmpfs producing sub-millisecond readings and
-			// never triggering the over-threshold event) show up in
-			// `journalctl -u drip`. One line per probe, every
-			// every_n_cycles cycles (default ~60s), so this is cheap.
-			log.Printf("sd_write_probe collector: probe ok dir=%s bytes=%d latency_ms=%.3f threshold_ms=%g",
-				c.directory, c.bytes, last, c.eventWhenOverMS)
 		}
 	}
 
