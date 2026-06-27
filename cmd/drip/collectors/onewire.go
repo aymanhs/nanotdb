@@ -2,6 +2,7 @@ package collectors
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,8 @@ import (
 
 const defaultOneWireBasePath = "/sys/bus/w1/devices"
 
+var errTemperatureFileEmpty = errors.New("temperature file is empty")
+
 // OneWireCollector reads DS18B20-family temperature sensors from
 // the Linux 1-Wire sysfs interface (/sys/bus/w1/devices).
 // Devices are mapped to friendly metric names via configuration.
@@ -25,13 +28,16 @@ type OneWireCollector struct {
 	autoDiscover bool
 	basePath     string
 	maxValidMdeg int32
+
+	mu              sync.Mutex
+	emptyReadMisses map[string]int
 }
 
 func NewOneWireCollector(devices map[string]string, autoDiscover bool, basePath string, maxValidMdeg int32) *OneWireCollector {
 	if strings.TrimSpace(basePath) == "" {
 		basePath = defaultOneWireBasePath
 	}
-	return &OneWireCollector{devices: devices, autoDiscover: autoDiscover, basePath: basePath, maxValidMdeg: maxValidMdeg}
+	return &OneWireCollector{devices: devices, autoDiscover: autoDiscover, basePath: basePath, maxValidMdeg: maxValidMdeg, emptyReadMisses: make(map[string]int)}
 }
 
 func (c *OneWireCollector) Name() string { return "onewire" }
@@ -105,9 +111,16 @@ func (c *OneWireCollector) Collect(ctx context.Context, ch chan<- Metric) {
 			mu.Unlock()
 
 			if err != nil {
+				if errors.Is(err, errTemperatureFileEmpty) {
+					if c.shouldLogEmptyRead(friendlyName) {
+						log.Printf("onewire collector: %s: transient empty temperature read; retrying", friendlyName)
+					}
+					return
+				}
 				log.Printf("onewire collector: %s: %v", friendlyName, err)
 				return
 			}
+			c.clearEmptyReadMiss(friendlyName)
 			if c.maxValidMdeg > 0 && tempMdeg > c.maxValidMdeg {
 				log.Printf("onewire collector: %s: skipping outlier value=%d (max_valid_mdeg=%d)", friendlyName, tempMdeg, c.maxValidMdeg)
 				return
@@ -188,11 +201,11 @@ func readOneWireTempMilliDegrees(basePath, deviceID string) (int32, error) {
 	// Modern kernels expose a direct "temperature" file (millidegrees Celsius)
 	tempPath := filepath.Join(basePath, deviceID, "temperature")
 	if raw, err := os.ReadFile(tempPath); err == nil {
-		v, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 32)
+		v, err := parseTemperatureMilliDegrees(raw)
 		if err != nil {
 			return 0, fmt.Errorf("parse temperature file: %w", err)
 		}
-		return int32(v), nil
+		return v, nil
 	}
 
 	// Older kernels: parse w1_slave text format
@@ -202,6 +215,33 @@ func readOneWireTempMilliDegrees(basePath, deviceID string) (int32, error) {
 		return 0, fmt.Errorf("read w1_slave: %w", err)
 	}
 	return parseW1Slave(string(raw))
+}
+
+func parseTemperatureMilliDegrees(raw []byte) (int32, error) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return 0, errTemperatureFileEmpty
+	}
+	v, err := strconv.ParseInt(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("temperature file has non-integer value %q", s)
+	}
+	return int32(v), nil
+}
+
+func (c *OneWireCollector) shouldLogEmptyRead(sensor string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.emptyReadMisses[sensor]++
+	n := c.emptyReadMisses[sensor]
+	return n == 1 || n%60 == 0
+}
+
+func (c *OneWireCollector) clearEmptyReadMiss(sensor string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.emptyReadMisses, sensor)
 }
 
 // parseW1Slave parses the w1_slave file format:
